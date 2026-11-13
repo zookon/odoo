@@ -1,1149 +1,1850 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 import logging
-from datetime import timedelta
-from functools import partial
+from collections import defaultdict
+from datetime import datetime
+from pprint import pformat
+from random import randrange
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
-import psycopg2
-import pytz
+from dateutil.relativedelta import relativedelta
+from markupsafe import Markup
+from psycopg2.errors import UniqueViolation
 
-from odoo import api, fields, models, tools, _
-from odoo.tools import float_is_zero
-from odoo.exceptions import UserError
-from odoo.http import request
-from odoo.addons import decimal_precision as dp
+from odoo import _, api, fields, models
+from odoo.exceptions import ConcurrencyError, UserError, ValidationError
+from odoo.fields import Command, Domain
+from odoo.tools import (
+    SQL,
+    float_compare,
+    float_is_zero,
+    float_repr,
+    float_round,
+    formatLang,
+    frozendict,
+)
 
 _logger = logging.getLogger(__name__)
+TRACKING_NUMBER_SEQUENCE_CODE = 'pos.order.tracking.number'
 
 
 class PosOrder(models.Model):
-    _name = "pos.order"
-    _description = "Point of Sale Orders"
-    _order = "id desc"
+    _name = 'pos.order'
+    _inherit = ["portal.mixin", "pos.bus.mixin", "pos.order.receipt", "pos.load.mixin", "mail.thread"]
+    _description = "Point of Sale Order"
+    _order = "date_order desc, name desc, id desc"
+    _mailing_enabled = True
 
-    @api.model
-    def _amount_line_tax(self, line, fiscal_position_id):
-        taxes = line.tax_ids.filtered(lambda t: t.company_id.id == line.order_id.company_id.id)
-        if fiscal_position_id:
-            taxes = fiscal_position_id.map_tax(taxes, line.product_id, line.order_id.partner_id)
-        price = line.price_unit * (1 - (line.discount or 0.0) / 100.0)
-        taxes = taxes.compute_all(price, line.order_id.pricelist_id.currency_id, line.qty, product=line.product_id, partner=line.order_id.partner_id or False)['taxes']
-        return sum(tax.get('amount', 0.0) for tax in taxes)
-
-    @api.model
-    def _order_fields(self, ui_order):
-        process_line = partial(self.env['pos.order.line']._order_line_fields, session_id=ui_order['pos_session_id'])
-        return {
-            'name':         ui_order['name'],
-            'user_id':      ui_order['user_id'] or False,
-            'session_id':   ui_order['pos_session_id'],
-            'lines':        [process_line(l) for l in ui_order['lines']] if ui_order['lines'] else False,
-            'pos_reference': ui_order['name'],
-            'partner_id':   ui_order['partner_id'] or False,
-            'date_order':   ui_order['creation_date'],
-            'fiscal_position_id': ui_order['fiscal_position_id'],
-            'pricelist_id': ui_order['pricelist_id'],
-            'amount_paid':  ui_order['amount_paid'],
-            'amount_total':  ui_order['amount_total'],
-            'amount_tax':  ui_order['amount_tax'],
-            'amount_return':  ui_order['amount_return'],
-        }
-
-    def _payment_fields(self, ui_paymentline):
-        payment_date = ui_paymentline['name']
-        payment_date = fields.Date.context_today(self, fields.Datetime.from_string(payment_date))
-        return {
-            'amount':       ui_paymentline['amount'] or 0.0,
-            'payment_date': payment_date,
-            'statement_id': ui_paymentline['statement_id'],
-            'payment_name': ui_paymentline.get('note', False),
-            'journal':      ui_paymentline['journal_id'],
-        }
-
-    # This deals with orders that belong to a closed session. In order
-    # to recover from this situation we create a new rescue session,
-    # making it obvious that something went wrong.
-    # A new, separate, rescue session is preferred for every such recovery,
-    # to avoid adding unrelated orders to live sessions.
+    # This function deals with orders that belong to a closed session. It attempts to find
+    # any open session that can be used to capture the order. If no open session is found,
+    # an error is raised, asking the user to open a session.
     def _get_valid_session(self, order):
         PosSession = self.env['pos.session']
-        closed_session = PosSession.browse(order['pos_session_id'])
+        closed_session = PosSession.browse(order['session_id'])
 
-        _logger.warning('session %s (ID: %s) was closed but received order %s (total: %s) belonging to it',
+        _logger.warning('Session %s (ID: %s) was closed but received order %s (total: %s) belonging to it',
                         closed_session.name,
                         closed_session.id,
-                        order['name'],
+                        order['uuid'],
                         order['amount_total'])
-        rescue_session = PosSession.search([
-            ('state', 'not in', ('closed', 'closing_control')),
-            ('rescue', '=', True),
+
+        open_session = PosSession.search([
+            ('state', '=', 'opened'),
             ('config_id', '=', closed_session.config_id.id),
         ], limit=1)
-        if rescue_session:
-            _logger.warning('reusing recovery session %s for saving order %s', rescue_session.name, order['name'])
-            return rescue_session
 
-        _logger.warning('attempting to create recovery session for saving order %s', order['name'])
-        new_session = PosSession.create({
-            'config_id': closed_session.config_id.id,
-            'name': _('(RESCUE FOR %(session)s)') % {'session': closed_session.name},
-            'rescue': True,  # avoid conflict with live sessions
-        })
-        # bypass opening_control (necessary when using cash control)
-        new_session.action_pos_session_open()
+        if open_session:
+            _logger.warning('Using open session %s for uuid number %s', open_session.name, order['uuid'])
+            return open_session
 
-        return new_session
-
-    def _match_payment_to_invoice(self, order):
-        pricelist_id = self.env['product.pricelist'].browse(order.get('pricelist_id'))
-        account_precision = pricelist_id.currency_id.decimal_places
-
-        # ignore orders with an amount_paid of 0 because those are returns through the POS
-        if not float_is_zero(order['amount_return'], account_precision) and not float_is_zero(order['amount_paid'], account_precision):
-            cur_amount_paid = 0
-            payments_to_keep = []
-            for payment in order.get('statement_ids'):
-                if cur_amount_paid + payment[2]['amount'] > order['amount_total']:
-                    payment[2]['amount'] = order['amount_total'] - cur_amount_paid
-                    payments_to_keep.append(payment)
-                    break
-                cur_amount_paid += payment[2]['amount']
-                payments_to_keep.append(payment)
-            order['statement_ids'] = payments_to_keep
-            order['amount_return'] = 0
+        raise UserError(_('No open session available. Please open a new session to capture the order.'))
 
     @api.model
-    def _process_order(self, pos_order):
-        pos_session = self.env['pos.session'].browse(pos_order['pos_session_id'])
+    def _load_pos_data_domain(self, data):
+        return [('state', '=', 'draft'), ('config_id', '=', data['pos.config'].id)]
+
+    @api.model
+    def _load_pos_data_dependencies(self):
+        return ['res.partner']
+
+    @api.model
+    def _process_order(self, order, existing_order):
+        """Create or update an pos.order from a given dictionary.
+
+        :param dict order: dictionary representing the order.
+        :param existing_order: order to be updated or False.
+        :type existing_order: pos.order.
+        :returns: id of created/updated pos.order
+        :rtype: int
+        """
+        draft = order.get('state') == 'draft'
+        pos_session = self.env['pos.session'].browse(order['session_id'])
         if pos_session.state == 'closing_control' or pos_session.state == 'closed':
-            pos_order['pos_session_id'] = self._get_valid_session(pos_order).id
-        order = self.create(self._order_fields(pos_order))
-        prec_acc = order.pricelist_id.currency_id.decimal_places
-        journal_ids = set()
-        for payments in pos_order['statement_ids']:
-            if not float_is_zero(payments[2]['amount'], precision_digits=prec_acc):
-                order.add_payment(self._payment_fields(payments[2]))
-            journal_ids.add(payments[2]['journal_id'])
+            pos_session = self._get_valid_session(order)
+            order['session_id'] = pos_session.id
 
-        if pos_session.sequence_number <= pos_order['sequence_number']:
-            pos_session.write({'sequence_number': pos_order['sequence_number'] + 1})
-            pos_session.refresh()
+        if not order.get('source'):
+            order['source'] = 'pos'
 
-        if not float_is_zero(pos_order['amount_return'], prec_acc):
-            cash_journal_id = pos_session.cash_journal_id.id
-            if not cash_journal_id:
-                # Select for change one of the cash journals used in this
-                # payment
-                cash_journal = self.env['account.journal'].search([
-                    ('type', '=', 'cash'),
-                    ('id', 'in', list(journal_ids)),
-                ], limit=1)
-                if not cash_journal:
-                    # If none, select for change one of the cash journals of the POS
-                    # This is used for example when a customer pays by credit card
-                    # an amount higher than total amount of the order and gets cash back
-                    cash_journal = [statement.journal_id for statement in pos_session.statement_ids if statement.journal_id.type == 'cash']
-                    if not cash_journal:
-                        raise UserError(_("No cash statement found for this session. Unable to record returned cash."))
-                cash_journal_id = cash_journal[0].id
-            order.add_payment({
-                'amount': -pos_order['amount_return'],
-                'payment_date': fields.Datetime.now(),
-                'payment_name': _('return'),
-                'journal': cash_journal_id,
+        if order.get('partner_id'):
+            self.update_order_partner(order)
+
+        if not order.get('company_id'):
+            order['company_id'] = pos_session.config_id.company_id.id
+
+        if self.env.context.get('current_order_uuid') and order['uuid'] == self.env.context['current_order_uuid']:
+            # Prioritize the server date for the order that is currently being processed
+            order['date_order'] = fields.Datetime.now()
+
+        pos_order = False
+        record_uuid_mapping = order.pop('relations_uuid_mapping', {})
+
+        if not existing_order:
+            pos_order = self.create({
+                **{key: value for key, value in order.items() if key != 'name'},
             })
-        return order
+            pos_order = pos_order.with_company(pos_order.company_id)
+        else:
+            pos_order = existing_order
 
-    def _prepare_analytic_account(self, line):
-        '''This method is designed to be inherited in a custom module'''
-        return False
+            # If the order is belonging to another session, it must be moved to the current session first
+            if order.get('session_id') and order['session_id'] != pos_order.session_id.id:
+                pos_order.write({'session_id': order['session_id']})
 
-    def _create_account_move(self, dt, ref, journal_id, company_id):
-        date_tz_user = fields.Datetime.context_timestamp(self, fields.Datetime.from_string(dt))
-        date_tz_user = fields.Date.to_string(date_tz_user)
-        return self.env['account.move'].sudo().create({'ref': ref, 'journal_id': journal_id, 'date': date_tz_user})
+            # Customer account payments require the customer to be set on the order when created
+            if 'partner_id' in order:
+                pos_order.write({'partner_id': order.pop('partner_id')})
+            self._update_lines(order, pos_order, ['lines', 'payment_ids'])
+            del order['uuid']
+            if "access_token" in order:
+                # From self access_token is no longer present in the data
+                del order['access_token']
 
-    def _prepare_invoice(self):
+            if order.get('state') == 'paid':
+                # The "paid" state will be assigned later by `_process_saved_order`
+                order['state'] = pos_order.state
+            pos_order.write(order)
+
+        for model_name, mapping in record_uuid_mapping.items():
+            owner_records = self.env[model_name].search([('uuid', 'in', mapping.keys())])
+            for uuid, field_names in mapping.items():
+                for name, uuids in field_names.items():
+                    params = self.env[model_name]._fields[name]
+                    if params.type in ['one2many', 'many2many']:
+                        records = self.env[params.comodel_name].search([('uuid', 'in', uuids)])
+                        owner_records.filtered(lambda r: r.uuid == uuid).write({name: [Command.link(r.id) for r in records]})
+                    else:
+                        record = self.env[params.comodel_name].search([('uuid', '=', uuids)])
+                        owner_records.filtered(lambda r: r.uuid == uuid).write({name: record.id})
+
+        self_comp = self.with_company(pos_order.company_id)
+        self_comp._process_payment_lines(order, pos_order, pos_session, draft)
+
+        # Lines changed on another device while this one was paying offline: keep the
+        # payments but leave the order draft so the difference can be settled
+        if not draft and existing_order:
+            # The order total comes from the device, it doesn't include the lines added meanwhile by another device
+            total = pos_order.with_context(active_test=False)._get_order_tax_totals()['total_amount_currency']
+            # The frontend and backend may apply the cash rounding differently or drift by a cent
+            tolerance = max(
+                pos_order.config_id.cash_rounding and pos_order.config_id.rounding_method.rounding or 0.0,
+                pos_order.currency_id.rounding,
+            )
+            if pos_order.currency_id.compare_amounts(abs(abs(total) - abs(pos_order.amount_paid)), tolerance) > 0:
+                draft = True
+                pos_order.message_post(body=_(
+                    "The order was validated with a total of %(paid)s, but its lines now amount to %(total)s because they were changed on another device. The order stays open until the difference is settled.",
+                    paid=formatLang(self.env, pos_order.amount_paid, currency_obj=pos_order.currency_id),
+                    total=formatLang(self.env, total, currency_obj=pos_order.currency_id),
+                ))
+
+        return pos_order._process_saved_order(draft)
+
+    def _process_saved_order(self, draft):
+        self.ensure_one()
+        if not draft and self.state != 'cancel':
+            self._compute_prices()
+            self.action_pos_order_paid()
+            self._set_product_qty_available()
+            self._compute_total_cost_in_real_time()
+
+        self._generate_order_invoice()
+        return self.id
+
+    def _update_lines(self, order, pos_order, fields=[]):
+        # Save lines and payments before to avoid exception if a line is deleted
+        # when vals change the state to 'paid'
+        for field in fields:
+            if order.get(field):
+                existing_ids = set(pos_order[field].ids)
+                existing_line_ids = {line.uuid: line.id for line in pos_order[field]}
+                commands = []
+                for line in order[field]:
+                    # An already paid order can be synced twice, replaying the same commands.
+                    # Skip update/delete/unlink of records that no longer exist to stay idempotent.
+                    if len(line) >= 2 and line[0] in (Command.UPDATE, Command.DELETE, Command.UNLINK) and line[1] not in existing_ids:
+                        continue
+                    if len(line) < 3:
+                        commands.append(line)
+                        continue
+                    line_vals = line[2]
+                    if line[0] == Command.CREATE and line_vals.get('uuid') in existing_line_ids:
+                        # If we try to create (line[0] == Command.CREATE) a line with a uuid that already
+                        # exists on another line of the same order, we transform the creation
+                        # into an update (line[0] = Command.UPDATE) of the existing line.
+                        line[0] = Command.UPDATE
+                        line[1] = existing_line_ids[line_vals.get('uuid')]
+                    commands.append(line)
+                pos_order.write({field: commands})
+                added_ids = set(pos_order[field].ids) - existing_ids
+                if added_ids:
+                    _logger.info("Added %s %s to pos.order #%s", field, list(added_ids), pos_order.id)
+                order[field] = []
+
+    def _generate_order_invoice(self):
+        self.ensure_one()
+        if self.to_invoice and self.state == 'paid' and self.config_id.journal_id and not self.is_singly_invoiced:
+            self.to_invoice = True  # Ensure true if has_paylater_pm is true
+            should_generate_pdf = self.env.context.get('generate_pdf') or self.config_id.use_download_invoice
+            self.with_context(generate_pdf=should_generate_pdf)._generate_pos_order_invoice()
+        elif not self.config_id.journal_id:
+            _logger.warning('Trying to create an invoice without any journal configured')
+            raise UserError(_('No invoice journal configured for this POS session.'))
+
+    def update_order_partner(self, order):
+        partner_id = self.env['res.partner'].browse(order['partner_id'])
+        if not partner_id.exists():
+            order.update({
+                "partner_id": False,
+                "to_invoice": False,
+            })
+
+    def process_saved_payments(self, order, existing_order):
+        """This will process and save payment related changes by ensuring necessary updates are performed on UI"""
+        # don't directly write the order - on continuing from feedback screen it syncs with wrong amounts
+        if order.get('partner_id'):
+            self.update_order_partner(order)
+            existing_order.write({'partner_id': order.get('partner_id'), 'to_invoice': order.get('to_invoice', False)})
+        # payments
+        if order.get('payment_ids'):
+            self._update_lines(order, existing_order, ['lines', 'payment_ids'])
+            self._process_payment_lines(order, existing_order, existing_order.session_id, False)
+        existing_order._generate_order_invoice()
+
+    def _clean_payment_lines(self):
+        self.ensure_one()
+        self.payment_ids.unlink()
+
+    def _compute_amount_paid(self):
+        paid_payment_ids = self.payment_ids.filtered(lambda p: not p.payment_status or p.payment_status == "done")
+        return sum(paid_payment_ids.mapped('amount'))
+
+    def _process_payment_lines(self, pos_order, order, pos_session, draft):
+        """Create account.bank.statement.lines from the dictionary given to the parent function.
+
+        If the payment_line is an updated version of an existing one, the existing payment_line will first be
+        removed before making a new one.
         """
-        Prepare the dict of values to create the new invoice for a pos order.
-        """
-        invoice_type = 'out_invoice' if self.amount_total >= 0 else 'out_refund'
-        return {
-            'name': self.name,
-            'origin': self.name,
-            'account_id': self.partner_id.property_account_receivable_id.id,
-            'journal_id': self.session_id.config_id.invoice_journal_id.id,
-            'company_id': self.company_id.id,
-            'type': invoice_type,
-            'reference': self.name,
-            'partner_id': self.partner_id.id,
-            'comment': self.note or '',
-            # considering partner's sale pricelist's currency
-            'currency_id': self.pricelist_id.currency_id.id,
-            'user_id': self.user_id.id,
-        }
+        prec_acc = order.currency_id.decimal_places
+
+        # Recompute amount paid because we don't trust the client
+        order.write({'amount_paid': order._compute_amount_paid()})
+
+        # The change payment has no uuid, so it isn't deduplicated by _update_lines.
+        # Remove the old one before recomputing to avoid duplicates on re-sync/edit.
+        order.payment_ids.filtered('is_change').unlink()
+
+        if not draft and not float_is_zero(pos_order['amount_return'], prec_acc):
+            cash_payment_method = pos_session.payment_method_ids.filtered(lambda pm: pm.type == 'cash')[:1]
+            if not cash_payment_method:
+                raise UserError(_("No cash statement found for this session. Unable to record returned cash."))
+            return_payment_vals = {
+                'name': _('return'),
+                'pos_order_id': order.id,
+                'amount': pos_order['amount_return'],
+                'payment_date': fields.Datetime.now(),
+                'payment_method_id': cash_payment_method.id,
+                'is_change': True,
+            }
+            if foreign_currency := order.payment_ids[0].foreign_currency_id:
+                return_payment_vals.update({
+                    'amount_currency': return_payment_vals['amount'] * foreign_currency.rate,
+                    'foreign_currency_id': foreign_currency.id,
+                })
+            order.add_payment(return_payment_vals)
+            order._compute_prices()
+
+    def _get_pos_anglo_saxon_price_unit(self, product, quantity):
+        moves = self.mapped('picking_ids.move_ids')\
+            .filtered(lambda m: m.is_valued and m.product_id.valuation == 'real_time' and m.product_id.id == product.id)\
+            .sorted(lambda x: x.date)
+        return moves._get_price_unit()
 
     @api.model
-    def _get_account_move_line_group_data_type_key(self, data_type, values):
-        """
-        Return a tuple which will be used as a key for grouping account
-        move lines in _create_account_move_line method.
-        :param data_type: 'product', 'tax', ....
-        :param values: account move line values
-        :return: tuple() representing the data_type key
-        """
-        if data_type == 'product':
-            return ('product',
-                    values['partner_id'],
-                    (values['product_id'], tuple(values['tax_ids'][0][2]), values['name']),
-                    values['analytic_account_id'],
-                    values['debit'] > 0)
-        elif data_type == 'tax':
-            return ('tax',
-                    values['partner_id'],
-                    values['tax_line_id'],
-                    values['debit'] > 0)
-        elif data_type == 'counter_part':
-            return ('counter_part',
-                    values['partner_id'],
-                    values['account_id'],
-                    values['debit'] > 0)
-        return False
-
-    def _action_create_invoice_line(self, line=False, invoice_id=False):
-        InvoiceLine = self.env['account.invoice.line']
-        inv_name = line.product_id.name_get()[0][1]
-        inv_line = {
-            'invoice_id': invoice_id,
-            'product_id': line.product_id.id,
-            'quantity': line.qty if self.amount_total >= 0 else -line.qty,
-            'account_analytic_id': self._prepare_analytic_account(line),
-            'name': inv_name,
-        }
-        # Oldlin trick
-        invoice_line = InvoiceLine.sudo().new(inv_line)
-        invoice_line._onchange_product_id()
-        invoice_line.invoice_line_tax_ids = invoice_line.invoice_line_tax_ids.filtered(lambda t: t.company_id.id == line.order_id.company_id.id).ids
-        fiscal_position_id = line.order_id.fiscal_position_id
-        if fiscal_position_id:
-            invoice_line.invoice_line_tax_ids = fiscal_position_id.map_tax(invoice_line.invoice_line_tax_ids, line.product_id, line.order_id.partner_id)
-        invoice_line.invoice_line_tax_ids = invoice_line.invoice_line_tax_ids.ids
-        # We convert a new id object back to a dictionary to write to
-        # bridge between old and new api
-        inv_line = invoice_line._convert_to_write({name: invoice_line[name] for name in invoice_line._cache})
-        inv_line.update(price_unit=line.price_unit, discount=line.discount, name=inv_name)
-        return InvoiceLine.sudo().create(inv_line)
-
-    def _create_account_move_line(self, session=None, move=None):
-        def _flatten_tax_and_children(taxes, group_done=None):
-            children = self.env['account.tax']
-            if group_done is None:
-                group_done = set()
-            for tax in taxes.filtered(lambda t: t.amount_type == 'group'):
-                if tax.id not in group_done:
-                    group_done.add(tax.id)
-                    children |= _flatten_tax_and_children(tax.children_tax_ids, group_done)
-            return taxes + children
-
-        # Tricky, via the workflow, we only have one id in the ids variable
-        """Create a account move line of order grouped by products or not."""
-        IrProperty = self.env['ir.property']
-        ResPartner = self.env['res.partner']
-
-        if session and not all(session.id == order.session_id.id for order in self):
-            raise UserError(_('Selected orders do not have the same session!'))
-
-        grouped_data = {}
-        have_to_group_by = session and session.config_id.group_by or False
-        rounding_method = session and session.config_id.company_id.tax_calculation_rounding_method
-
-        def add_anglosaxon_lines(grouped_data):
-            Product = self.env['product.product']
-            Analytic = self.env['account.analytic.account']
-            for product_key in list(grouped_data.keys()):
-                if product_key[0] == "product":
-                    line = grouped_data[product_key][0]
-                    product = Product.browse(line['product_id'])
-                    # In the SO part, the entries will be inverted by function compute_invoice_totals
-                    price_unit = self._get_pos_anglo_saxon_price_unit(product, line['partner_id'], line['quantity'])
-                    account_analytic = Analytic.browse(line.get('analytic_account_id'))
-                    res = Product._anglo_saxon_sale_move_lines(
-                        line['name'], product, product.uom_id, line['quantity'], price_unit,
-                            fiscal_position=order.fiscal_position_id,
-                            account_analytic=account_analytic)
-                    if res:
-                        line1, line2 = res
-                        line1 = Product._convert_prepared_anglosaxon_line(line1, order.partner_id)
-                        insert_data('counter_part', {
-                            'name': line1['name'],
-                            'account_id': line1['account_id'],
-                            'credit': line1['credit'] or 0.0,
-                            'debit': line1['debit'] or 0.0,
-                            'partner_id': line1['partner_id']
-
-                        })
-
-                        line2 = Product._convert_prepared_anglosaxon_line(line2, order.partner_id)
-                        insert_data('counter_part', {
-                            'name': line2['name'],
-                            'account_id': line2['account_id'],
-                            'credit': line2['credit'] or 0.0,
-                            'debit': line2['debit'] or 0.0,
-                            'partner_id': line2['partner_id']
-                        })
-
-        for order in self.filtered(lambda o: not o.account_move or o.state == 'paid'):
-            current_company = order.sale_journal.company_id
-            account_def = IrProperty.get(
-                'property_account_receivable_id', 'res.partner')
-            order_account = order.partner_id.property_account_receivable_id.id or account_def and account_def.id
-            partner_id = ResPartner._find_accounting_partner(order.partner_id).id or False
-            if move is None:
-                # Create an entry for the sale
-                journal_id = self.env['ir.config_parameter'].sudo().get_param(
-                    'pos.closing.journal_id_%s' % current_company.id, default=order.sale_journal.id)
-                move = self._create_account_move(
-                    order.session_id.start_at, order.name, int(journal_id), order.company_id.id)
-
-            def insert_data(data_type, values):
-                # if have_to_group_by:
-                values.update({
-                    'partner_id': partner_id,
-                    'move_id': move.id,
-                })
-
-                key = self._get_account_move_line_group_data_type_key(data_type, values)
-                if not key:
-                    return
-
-                grouped_data.setdefault(key, [])
-
-                if have_to_group_by:
-                    if not grouped_data[key]:
-                        grouped_data[key].append(values)
-                    else:
-                        current_value = grouped_data[key][0]
-                        current_value['quantity'] = current_value.get('quantity', 0.0) + values.get('quantity', 0.0)
-                        current_value['credit'] = current_value.get('credit', 0.0) + values.get('credit', 0.0)
-                        current_value['debit'] = current_value.get('debit', 0.0) + values.get('debit', 0.0)
-                else:
-                    grouped_data[key].append(values)
-
-            # because of the weird way the pos order is written, we need to make sure there is at least one line,
-            # because just after the 'for' loop there are references to 'line' and 'income_account' variables (that
-            # are set inside the for loop)
-            # TOFIX: a deep refactoring of this method (and class!) is needed
-            # in order to get rid of this stupid hack
-            assert order.lines, _('The POS order must have lines when calling this method')
-            # Create an move for each order line
-            cur = order.pricelist_id.currency_id
-            for line in order.lines:
-                amount = line.price_subtotal
-
-                # Search for the income account
-                if line.product_id.property_account_income_id.id:
-                    income_account = line.product_id.property_account_income_id.id
-                elif line.product_id.categ_id.property_account_income_categ_id.id:
-                    income_account = line.product_id.categ_id.property_account_income_categ_id.id
-                else:
-                    raise UserError(_('Please define income '
-                                      'account for this product: "%s" (id:%d).')
-                                    % (line.product_id.name, line.product_id.id))
-
-                name = line.product_id.name
-                if line.notice:
-                    # add discount reason in move
-                    name = name + ' (' + line.notice + ')'
-
-                # Create a move for the line for the order line
-                # Just like for invoices, a group of taxes must be present on this base line
-                # As well as its children
-                base_line_tax_ids = _flatten_tax_and_children(line.tax_ids_after_fiscal_position).filtered(lambda tax: tax.type_tax_use in ['sale', 'none'])
-                insert_data('product', {
-                    'name': name,
-                    'quantity': line.qty,
-                    'product_id': line.product_id.id,
-                    'account_id': income_account,
-                    'analytic_account_id': self._prepare_analytic_account(line),
-                    'credit': ((amount > 0) and amount) or 0.0,
-                    'debit': ((amount < 0) and -amount) or 0.0,
-                    'tax_ids': [(6, 0, base_line_tax_ids.ids)],
-                    'partner_id': partner_id
-                })
-
-                # Create the tax lines
-                taxes = line.tax_ids_after_fiscal_position.filtered(lambda t: t.company_id.id == current_company.id)
-                if not taxes:
-                    continue
-                price = line.price_unit * (1 - (line.discount or 0.0) / 100.0)
-                for tax in taxes.compute_all(price, cur, line.qty)['taxes']:
-                    insert_data('tax', {
-                        'name': _('Tax') + ' ' + tax['name'],
-                        'product_id': line.product_id.id,
-                        'quantity': line.qty,
-                        'account_id': tax['account_id'] or income_account,
-                        'credit': ((tax['amount'] > 0) and tax['amount']) or 0.0,
-                        'debit': ((tax['amount'] < 0) and -tax['amount']) or 0.0,
-                        'tax_line_id': tax['id'],
-                        'partner_id': partner_id
-                    })
-
-            # round tax lines per order
-            if rounding_method == 'round_globally':
-                for group_key, group_value in grouped_data.items():
-                    if group_key[0] == 'tax':
-                        for line in group_value:
-                            line['credit'] = cur.round(line['credit'])
-                            line['debit'] = cur.round(line['debit'])
-
-            # counterpart
-            insert_data('counter_part', {
-                'name': _("Trade Receivables"),  # order.name,
-                'account_id': order_account,
-                'credit': ((order.amount_total < 0) and -order.amount_total) or 0.0,
-                'debit': ((order.amount_total > 0) and order.amount_total) or 0.0,
-                'partner_id': partner_id
+    def _default_tracking_number(self):
+        sequence = self.env['ir.sequence'].sudo().search([
+            ('code', '=', TRACKING_NUMBER_SEQUENCE_CODE),
+            ('company_id', '=', self.env.company.id)
+        ], order='id', limit=1)
+        if not sequence:
+            sequence = self.env['ir.sequence'].sudo().create({
+                'name': 'PoS Order Tracking Number',
+                'implementation': 'standard',
+                'use_date_range': True,
+                'company_id': self.env.company.id,
+                'code': TRACKING_NUMBER_SEQUENCE_CODE,
             })
-
-            order.write({'state': 'done', 'account_move': move.id})
-
-        if self and order.company_id.anglo_saxon_accounting:
-            add_anglosaxon_lines(grouped_data)
-
-        all_lines = []
-        for group_key, group_data in grouped_data.items():
-            for value in group_data:
-                all_lines.append((0, 0, value),)
-        if move:  # In case no order was changed
-            move.sudo().write({'line_ids': all_lines})
-            move.sudo().post()
-        return True
-
-    def _get_pos_anglo_saxon_price_unit(self, product, partner_id, quantity):
-        price_unit = product._get_anglo_saxon_price_unit()
-        if product._get_invoice_policy() == "delivery":
-            moves = self.filtered(lambda o: o.partner_id.id == partner_id)\
-                .mapped('picking_id.move_lines')\
-                .filtered(lambda m: m.product_id.id == product.id)\
-                .sorted(lambda x: x.date)
-            average_price_unit = product._compute_average_price(0, quantity, moves)
-            price_unit = average_price_unit or price_unit
-        # In the SO part, the entries will be inverted by function compute_invoice_totals
-        return - price_unit
-
-    def _reconcile_payments(self):
-        for order in self:
-            aml = order.statement_ids.mapped('journal_entry_ids') | order.account_move.line_ids | order.invoice_id.move_id.line_ids
-            aml = aml.filtered(lambda r: not r.reconciled and r.account_id.internal_type == 'receivable' and r.partner_id == order.partner_id.commercial_partner_id)
-
-            # Reconcile returns first
-            # to avoid mixing up the credit of a payment and the credit of a return
-            # in the receivable account
-            aml_returns = aml.filtered(lambda l: (l.journal_id.type == 'sale' and l.credit) or (l.journal_id.type != 'sale' and l.debit))
+        tz = ZoneInfo(self.env.company.tz or 'UTC')
+        today = datetime.now(tz).date()
+        DateRange = self.env['ir.sequence.date_range'].sudo()
+        in_range = DateRange.search_count([
+            ('sequence_id', '=', sequence.id),
+            ('date_from', '<=', today),
+            ('date_to', '>=', today),
+        ])
+        if not in_range:
             try:
-                aml_returns.reconcile()
-                (aml - aml_returns).reconcile()
-            except Exception:
-                # There might be unexpected situations where the automatic reconciliation won't
-                # work. We don't want the user to be blocked because of this, since the automatic
-                # reconciliation is introduced for convenience, not for mandatory accounting
-                # reasons.
-                # It may be interesting to have the Traceback logged anyway
-                # for debugging and support purposes
-                _logger.exception('Reconciliation did not work for order %s', order.name)
+                DateRange.create({
+                    'sequence_id': sequence.id,
+                    'date_from': today,
+                    'date_to': today,
+                })
+            except UniqueViolation as e:
+                # Use the retrying mechanism
+                raise ConcurrencyError() from e
+        return sequence._next(sequence_date=today)
 
-    def _default_session(self):
-        return self.env['pos.session'].search([('state', '=', 'opened'), ('user_id', '=', self.env.uid)], limit=1)
-
-    def _default_pricelist(self):
-        return self._default_session().config_id.pricelist_id
+    @api.autovacuum
+    def _gc_tracking_number_date_ranges(self):
+        sequence = self.env['ir.sequence'].sudo().search([
+            ('code', '=', TRACKING_NUMBER_SEQUENCE_CODE),
+        ])
+        if sequence.exists():
+            self.env['ir.sequence.date_range'].search([
+                ('sequence_id', 'in', sequence.ids),
+                ('date_to', '<', fields.Date.today() - relativedelta(days=2))
+            ]).unlink()
 
     name = fields.Char(string='Order Ref', required=True, readonly=True, copy=False, default='/')
-    company_id = fields.Many2one('res.company', string='Company', required=True, readonly=True, default=lambda self: self.env.user.company_id)
-    date_order = fields.Datetime(string='Order Date', readonly=True, index=True, default=fields.Datetime.now)
+    date_order = fields.Datetime(string='Date', readonly=True, index=True, default=fields.Datetime.now)
     user_id = fields.Many2one(
-        comodel_name='res.users', string='Salesman',
-        help="Person who uses the cash register. It can be a reliever, a student or an interim employee.",
+        comodel_name='res.users', string='Employee',
+        help="Employee who uses the cash register.",
         default=lambda self: self.env.uid,
-        states={'done': [('readonly', True)], 'invoiced': [('readonly', True)]},
     )
-    amount_tax = fields.Float(string='Taxes', digits=0, readonly=True, required=True)
-    amount_total = fields.Float(string='Total', digits=0, readonly=True, required=True)
-    amount_paid = fields.Float(string='Paid', states={'draft': [('readonly', False)]},
-        readonly=True, digits=0, required=True)
-    amount_return = fields.Float(string='Returned', digits=0, required=True, readonly=True)
-    lines = fields.One2many('pos.order.line', 'order_id', string='Order Lines', states={'draft': [('readonly', False)]}, readonly=True, copy=True)
-    statement_ids = fields.One2many('account.bank.statement.line', 'pos_statement_id', string='Payments', states={'draft': [('readonly', False)]}, readonly=True)
-    pricelist_id = fields.Many2one('product.pricelist', string='Pricelist', required=True, states={
-                                   'draft': [('readonly', False)]}, readonly=True, default=_default_pricelist)
-    partner_id = fields.Many2one('res.partner', string='Customer', change_default=True, index=True, states={'draft': [('readonly', False)], 'paid': [('readonly', False)]})
-    sequence_number = fields.Integer(string='Sequence Number', help='A session-unique sequence number for the order', default=1)
+    amount_difference = fields.Monetary(string='Difference', readonly=True)
+    amount_tax = fields.Monetary(string='Taxes', readonly=True, required=True)
+    amount_total = fields.Monetary(string='Total', readonly=True, required=True)
+    amount_paid = fields.Monetary(string='Paid', required=True)
+    amount_return = fields.Monetary(string='Returned', required=True, readonly=True)
+    margin = fields.Monetary(string="Margin", compute='_compute_margin')
+    margin_percent = fields.Float(string="Margin (%)", compute='_compute_margin', digits=(12, 4))
+    is_total_cost_computed = fields.Boolean(compute='_compute_is_total_cost_computed',
+        help="Allows to know if all the total cost of the order lines have already been computed")
+    lines = fields.One2many('pos.order.line', 'order_id', string='Order Lines', copy=True)
+    company_id = fields.Many2one('res.company', string='Company', required=True, readonly=True, index=True)
+    country_code = fields.Char(related='company_id.account_fiscal_country_id.code')
+    pricelist_id = fields.Many2one('product.pricelist', string='Pricelist')
+    partner_id = fields.Many2one('res.partner', string='Customer', change_default=True, index='btree_not_null')
+    sequence_number = fields.Integer(string='Sequence Number', copy=False,
+                                     help='A session-unique sequence number for the order. Negative if generated from the client')
+    session_id = fields.Many2one('pos.session', string='Session', index=True, ui_domain="[('state', '=', 'opened')]")
+    config_id = fields.Many2one('pos.config', compute='_compute_order_config_id', string="Point of Sale", readonly=False, store=True, index=True)
+    currency_id = fields.Many2one('res.currency', related='config_id.currency_id', string="Currency")
+    currency_rate = fields.Float("Currency Rate", compute='_compute_currency_rate', compute_sudo=True, store=True, digits=0, readonly=True,
+        help='The rate of the currency to the currency of rate applicable at the date of the order')
 
-    session_id = fields.Many2one(
-        'pos.session', string='Session', required=True, index=True,
-        domain="[('state', '=', 'opened')]", states={'draft': [('readonly', False)]},
-        readonly=True, default=_default_session)
-    config_id = fields.Many2one('pos.config', related='session_id.config_id', string="Point of Sale")
-    invoice_group = fields.Boolean(related="config_id.module_account")
+    is_refund = fields.Boolean(string='Is Refund', readonly=True, default=False)
     state = fields.Selection(
-        [('draft', 'New'), ('cancel', 'Cancelled'), ('paid', 'Paid'), ('done', 'Posted'), ('invoiced', 'Invoiced')],
-        'Status', readonly=True, copy=False, default='draft')
+        [('draft', 'New'), ('cancel', 'Cancelled'), ('paid', 'Paid'), ('done', 'Posted')],
+        'Status', readonly=True, copy=False, default='draft', index=True)
 
-    invoice_id = fields.Many2one('account.invoice', string='Invoice', copy=False)
-    account_move = fields.Many2one('account.move', string='Journal Entry', readonly=True, copy=False)
-    picking_id = fields.Many2one('stock.picking', string='Picking', readonly=True, copy=False)
-    picking_type_id = fields.Many2one('stock.picking.type', related='session_id.config_id.picking_type_id', string="Operation Type")
-    location_id = fields.Many2one(
-        comodel_name='stock.location',
-        related='session_id.config_id.stock_location_id',
-        string="Location", store=True,
-        readonly=True,
-    )
-    note = fields.Text(string='Internal Notes')
+    account_move = fields.Many2one('account.move', string='Invoice', readonly=True, copy=False, index="btree_not_null")
+    preset_id = fields.Many2one('pos.preset', string='Preset')
+    floating_order_name = fields.Char(string='Order Name')
+    general_customer_note = fields.Text(string='General Customer Note')
+    internal_note = fields.Text(string='Internal Note')
     nb_print = fields.Integer(string='Number of Print', readonly=True, copy=False, default=0)
-    pos_reference = fields.Char(string='Receipt Ref', readonly=True, copy=False)
-    sale_journal = fields.Many2one('account.journal', related='session_id.config_id.journal_id', string='Sales Journal', store=True, readonly=True)
+    pos_reference = fields.Char(string='Receipt Number', readonly=True, copy=False, index=True)
+    sale_journal = fields.Many2one('account.journal', related='session_id.config_id.journal_id', string='Sales Journal', store=True, readonly=True, ondelete='restrict')
     fiscal_position_id = fields.Many2one(
         comodel_name='account.fiscal.position', string='Fiscal Position',
-        default=lambda self: self._default_session().config_id.default_fiscal_position_id,
-        readonly=True,
-        states={'draft': [('readonly', False)]},
+        readonly=False,
     )
+    payment_ids = fields.One2many('pos.payment', 'pos_order_id', string='Payments')
+    to_invoice = fields.Boolean('To invoice', copy=False)
+    preset_time = fields.Datetime(string='Hour', help="Hour of the day for the order")
+    is_singly_invoiced = fields.Boolean('Is Singly Invoiced', compute='_compute_is_invoiced')
+    is_globally_invoiced = fields.Boolean('Is Globally Invoiced', compute='_compute_is_invoiced')
+    is_tipped = fields.Boolean('Is this already tipped?', readonly=True)
+    tip_amount = fields.Monetary(string='Tip Amount', readonly=True)
+    refund_orders_count = fields.Integer('Number of Refund Orders', compute='_compute_refund_related_fields', help="Number of orders where items from this order were refunded")
+    refunded_order_id = fields.Many2one('pos.order', compute='_compute_refund_related_fields', help="Order from which items were refunded in this order")
+    has_refundable_lines = fields.Boolean('Has Refundable Lines', compute='_compute_has_refundable_lines')
+    ticket_code = fields.Char(help='5 digits alphanumeric code to be used by portal user to request an invoice')
+    tracking_number = fields.Char(string="Order Number", readonly=True, copy=False)
+    uuid = fields.Char(string='Uuid', readonly=True, default=lambda self: str(uuid4()), copy=False)
+    email = fields.Char(string='Email', compute="_compute_contact_details", readonly=False, store=True)
+    mobile = fields.Char(string='Mobile', compute="_compute_contact_details", readonly=False, store=True)
+    is_edited = fields.Boolean(string='Edited', compute='_compute_is_edited')
+    has_deleted_line = fields.Boolean(string='Has Deleted Line')
+    available_payment_method_ids = fields.Many2many('pos.payment.method', related='config_id.payment_method_ids', string='Available Payment Methods', readonly=True, store=False)
+    invoice_status = fields.Selection([
+        ('invoiced', 'Fully Invoiced'),
+        ('to_invoice', 'To Invoice'),
+    ], string='Invoice Status', compute='_compute_is_invoiced')
+    reversed_move_ids = fields.One2many(
+        'account.move',
+        'reversed_pos_order_id',
+        string="Reversal Journal Entries",
+        help="List of journal entries created when this POS order was reversed and invoiced after session close.",
+    )
+    source = fields.Selection(string="Origin", selection=[('pos', 'Point of Sale')], default='pos')
+    defer_invoice_pdf = fields.Boolean(string="Defer Invoice PDF Generation", index=True)
 
-    @api.onchange('statement_ids', 'lines', 'lines')
-    def _onchange_amount_all(self):
+    prep_order_ids = fields.One2many('pos.prep.order', 'pos_order_id', string='Preparation orders')
+    _unique_uuid = models.Constraint('unique (uuid)', 'An order with this uuid already exists')
+
+    def ask_for_ticket_printing(self):
+        self.config_id._notify("TICKET_PRINTING_REQUESTED", self.ids)
+
+    def is_refund_or_negative(self):
+        return self.is_refund or self.amount_total < 0
+
+    @api.depends('account_move')
+    def _compute_invoice_status(self):
         for order in self:
-            currency = order.pricelist_id.currency_id
-            order.amount_paid = sum(payment.amount for payment in order.statement_ids)
-            order.amount_return = sum(payment.amount < 0 and payment.amount or 0 for payment in order.statement_ids)
-            order.amount_tax = currency.round(sum(self._amount_line_tax(line, order.fiscal_position_id) for line in order.lines))
-            amount_untaxed = currency.round(sum(line.price_subtotal for line in order.lines))
-            order.amount_total = order.amount_tax + amount_untaxed
+            order.invoice_status = 'invoiced' if len(order.account_move) else 'to_invoice'
+
+    @api.depends('session_id')
+    def _compute_order_config_id(self):
+        for order in self:
+            if order.session_id:
+                order.config_id = order.session_id.config_id
+
+    @api.depends('lines.refund_orderline_ids', 'lines.refunded_orderline_id')
+    def _compute_refund_related_fields(self):
+        for order in self:
+            order.refund_orders_count = len(order.mapped('lines.refund_orderline_ids.order_id'))
+            order.refunded_order_id = next(iter(order.lines.refunded_orderline_id.order_id), False)
+
+    @api.depends('lines.refunded_qty', 'lines.qty')
+    def _compute_has_refundable_lines(self):
+        digits = self.env['decimal.precision'].precision_get('Product Unit')
+        for order in self:
+            order.has_refundable_lines = any(float_compare(line.qty, line.refunded_qty, digits) > 0 for line in order.lines)
+
+    @api.depends('account_move', 'session_id.move_ids')
+    def _compute_is_invoiced(self):
+        for order in self:
+            order_move = order.account_move
+            session_moves = order.session_id.move_ids
+            order.is_singly_invoiced = order_move and order_move not in session_moves
+            order.is_globally_invoiced = order_move and order_move in session_moves
+            order.invoice_status = 'invoiced' if order.is_singly_invoiced else 'to_invoice'
+
+    @api.depends('date_order', 'company_id', 'currency_id', 'company_id.currency_id')
+    def _compute_currency_rate(self):
+        for order in self:
+            order.currency_rate = self.env['res.currency']._get_conversion_rate(order.company_id.currency_id, order.currency_id, order.company_id, order.date_order.date())
+
+    @api.depends('lines.is_total_cost_computed')
+    def _compute_is_total_cost_computed(self):
+        for order in self:
+            order.is_total_cost_computed = not False in order.lines.mapped('is_total_cost_computed')
+
+    @api.depends('partner_id')
+    def _compute_contact_details(self):
+        for order in self:
+            order.email = order.partner_id.email or ""
+            order.mobile = order._phone_format(number=order.partner_id.phone or "",
+                        country=order.partner_id.country_id)
+
+    def _compute_total_cost_in_real_time(self):
+        """
+        Compute the total cost of the order when it's processed by the server. It will compute the total cost of all the lines
+        if it's possible. If a margin of one of the order's lines cannot be computed (because of session_id.update_stock_at_closing),
+        then the margin of said order is not computed (it will be computed when closing the session).
+        """
+        for order in self:
+            lines = order._get_total_cost_in_real_time_lines()
+            lines._compute_total_cost()
+
+    def _get_total_cost_in_real_time_lines(self):
+        self.ensure_one()
+        return self.lines
+
+    @api.depends('lines.margin', 'is_total_cost_computed')
+    def _compute_margin(self):
+        for order in self:
+            sign = -1 if order.is_refund_or_negative() else 1
+            if order.is_total_cost_computed:
+                order.margin = sum(order.lines.mapped('margin'))
+                amount_untaxed = order.currency_id.round(sum(line.price_subtotal for line in order.lines)) * sign
+                order.margin_percent = (not float_is_zero(amount_untaxed, precision_rounding=order.currency_id.rounding)
+                                        and order.margin / amount_untaxed) \
+                                        or 0
+            else:
+                order.margin = 0
+                order.margin_percent = 0
+
+    @api.onchange('payment_ids', 'lines')
+    def _onchange_amount_all(self):
+        self._compute_prices()
+
+    def _get_order_tax_totals(self):
+        self.ensure_one()
+        base_lines = self.lines._prepare_base_lines_for_taxes_computation()
+        self.env['account.tax']._add_tax_details_in_base_lines(base_lines, self.company_id)
+        self.env['account.tax']._round_base_lines_tax_details(base_lines, self.company_id)
+
+        cash_rounding = None
+        payment_methods = self.payment_ids
+
+        if self.config_id.only_round_cash_method:
+            payment_methods = payment_methods.filtered_domain([
+                ("payment_method_id.type", "in", ["cash"])
+            ])
+        if payment_methods:
+            cash_rounding = self.config_id.rounding_method
+
+        return self.env['account.tax']._get_tax_totals_summary(
+            base_lines=base_lines,
+            currency=self.currency_id,
+            company=self.company_id,
+            cash_rounding=cash_rounding,
+        )
+
+    def _compute_prices(self):
+        for order in self:
+            if not order.currency_id:
+                raise UserError(_("You can't: create a pos order from the backend interface, or unset the pricelist, or create a pos.order in a python test with Form tool, or edit the form view in studio if no PoS order exist"))
+            tax_totals = order._get_order_tax_totals()
+            rounding_base_amount_currency = tax_totals.get('cash_rounding_base_amount_currency', 0)
+            amount_total = tax_totals['total_amount_currency'] - rounding_base_amount_currency
+            refund_factor = -1 if order.is_refund_or_negative() else 1
+            order.amount_paid = sum(payment.amount for payment in order.payment_ids)
+            order.amount_return = -sum((payment.amount < 0 and payment.amount) or 0 for payment in order.payment_ids)
+            order.amount_tax = refund_factor * tax_totals['tax_amount_currency']
+            order.amount_total = refund_factor * amount_total
+            order.amount_difference = order.amount_paid - amount_total
+
+    @api.depends('lines.is_edited', 'has_deleted_line')
+    def _compute_is_edited(self):
+        for order in self:
+            order.is_edited = any(order.lines.mapped('is_edited')) or order.has_deleted_line
 
     @api.onchange('partner_id')
     def _onchange_partner_id(self):
         if self.partner_id:
-            self.pricelist = self.partner_id.property_product_pricelist.id
+            self.pricelist_id = self.partner_id.property_product_pricelist.id
 
-    @api.multi
+    @api.ondelete(at_uninstall=False)
+    def _unlink_except_draft_or_cancel(self):
+        order_to_cancel = self.env['pos.order']
+        for pos_order in self:
+            if pos_order.state not in ['draft', 'cancel']:
+                raise UserError(_('In order to delete a sale, it must be new or cancelled.'))
+            if pos_order.state == 'draft':
+                order_to_cancel |= pos_order
+        # Cancel orders before deletion to trigger notifications and keep the UI in sync
+        if order_to_cancel:
+            order_to_cancel.action_pos_order_cancel()
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            session = self.env['pos.session'].browse(vals['session_id'])
+            vals = self._complete_values_from_session(session, vals)
+        return super().create(vals_list)
+
+    def _update_sequence_number(self, session, values):
+        # Some localization needs orders to have a sequence number
+        seq_id = session.config_id.order_seq_id
+        prefix, suffix = seq_id._get_prefix_suffix()
+        seq_next = seq_id._next()
+        if prefix:
+            seq_next = seq_next.removeprefix(prefix)
+        if suffix:
+            seq_next = seq_next.removesuffix(suffix)
+        values['sequence_number'] = seq_next
+
+    @api.model
+    def _complete_values_from_session(self, session, values):
+        values.setdefault('pricelist_id', session.config_id.pricelist_id.id)
+        values.setdefault('fiscal_position_id', session.config_id.default_fiscal_position_id.id)
+        values.setdefault('company_id', session.config_id.company_id.id)
+        if 'tracking_number' not in values:
+            values['tracking_number'] = self.with_company(values['company_id'])._default_tracking_number()
+        if session.config_id.use_presets and session.config_id.default_preset_id:
+            values.setdefault('preset_id', session.config_id.default_preset_id.id)
+
+        if not values.get('pos_reference'):
+            reference = session.config_id._get_next_order_refs()[0]
+            values['pos_reference'] = reference
+
+        if not values.get('sequence_number'):
+            self._update_sequence_number(session, values)
+
+        return values
+
     def write(self, vals):
-        res = super(PosOrder, self).write(vals)
-        Partner = self.env['res.partner']
-        # If you change the partner of the PoS order, change also the partner of the associated bank statement lines
-        if 'partner_id' in vals:
+        for order in self:
+            if vals.get('state') and vals['state'] == 'paid' and order.name == '/':
+                session = self.env['pos.session'].browse(vals['session_id']) if not self.session_id and vals.get('session_id') else False
+                vals['name'] = self._compute_order_name(session)
+            if vals.get('mobile'):
+                vals['mobile'] = order._phone_format(number=vals.get('mobile'),
+                        country=order.partner_id.country_id or self.env.company.country_id)
+            if vals.get('has_deleted_line') is not None and self.has_deleted_line:
+                del vals['has_deleted_line']
+            allowed_vals = ['paid', 'done', 'invoiced']
+            if vals.get('state') and vals['state'] not in allowed_vals and order.state in allowed_vals:
+                raise UserError(_('This order has already been paid. You cannot set it back to draft or edit it.'))
+
+        list_line = self._create_pm_change_log(vals)
+        res = super().write(vals)
+        for order in self:
+            if vals.get('payment_ids'):
+                order._compute_prices()
+                totally_paid_or_more = order.currency_id.compare_amounts(order.amount_paid, order.amount_total)
+                if totally_paid_or_more < 0 and order.state in ['paid', 'done']:
+                    raise UserError(_('The paid amount is different from the total amount of the order.'))
+                if totally_paid_or_more > 0 and order.state == 'paid':
+                    list_line.append(_("Warning, the paid amount is higher than the total amount. (Difference: %s)", formatLang(self.env, order.amount_paid - order.amount_total, currency_obj=order.currency_id)))
+                if order.nb_print > 0 and any(command[0] in [0, 1] and command[2].get('payment_status') and command[2]['payment_status'] != 'cancelled' for command in vals.get('payment_ids')):
+                    raise UserError(_('You cannot change the payment of a printed order.'))
+
+        if len(list_line) > 0:
+            body = _("Payment changes:")
+            body += self._markup_list_message(list_line)
             for order in self:
-                partner_id = False
-                if order.invoice_id:
-                    raise UserError(_("You cannot change the partner of a POS order for which an invoice has already been issued."))
-                if vals['partner_id']:
-                    partner = Partner.browse(vals['partner_id'])
-                    partner_id = Partner._find_accounting_partner(partner).id
-                order.statement_ids.write({'partner_id': partner_id})
+                if vals.get('payment_ids'):
+                    order.message_post(body=body)
+
         return res
 
-    @api.multi
-    def unlink(self):
-        for pos_order in self.filtered(lambda pos_order: pos_order.state not in ['draft', 'cancel']):
-            raise UserError(_('In order to delete a sale, it must be new or cancelled.'))
-        return super(PosOrder, self).unlink()
+    def _create_pm_change_log(self, vals):
+        if not vals.get('payment_ids'):
+            return []
+
+        message_list = []
+        new_pms = vals.get('payment_ids', [])
+        for new_pm in new_pms:
+            orm_command = new_pm[0]
+
+            if orm_command == 0:
+                payment_method_id = self.env['pos.payment.method'].browse(new_pm[2].get('payment_method_id'))
+                amount = formatLang(self.env, new_pm[2].get('amount'), currency_obj=self.currency_id)
+                message_list.append(_("Added %(payment_method)s with %(amount)s",
+                    payment_method=payment_method_id.name,
+                    amount=amount))
+            elif orm_command == 1:
+                pm_id = self.env['pos.payment'].browse(new_pm[1])
+                old_pm = pm_id.payment_method_id.name
+                old_amount = formatLang(self.env, pm_id.amount, currency_obj=pm_id.currency_id)
+                new_amount = False
+                new_payment_method = False
+
+                if new_pm[2].get('payment_method_id'):
+                    new_payment_method = self.env['pos.payment.method'].browse(new_pm[2].get('payment_method_id'))
+                if new_pm[2].get('amount'):
+                    new_amount = formatLang(self.env, new_pm[2].get('amount'), currency_obj=pm_id.currency_id)
+
+                if new_payment_method and new_amount:
+                    message_list.append(_("%(old_pm)s changed to %(new_pm)s and from %(old_amount)s to %(new_amount)s",
+                        old_pm=old_pm,
+                        new_pm=new_payment_method.name,
+                        old_amount=old_amount,
+                        new_amount=new_amount))
+                elif new_payment_method:
+                    message_list.append(_("%(old_pm)s changed to %(new_pm)s for %(old_amount)s",
+                        old_pm=old_pm,
+                        new_pm=new_payment_method.name,
+                        old_amount=old_amount))
+                elif new_amount:
+                    message_list.append(_("Amount for %(old_pm)s changed from %(old_amount)s to %(new_amount)s",
+                        old_amount=old_amount,
+                        new_amount=new_amount,
+                        old_pm=old_pm))
+            elif orm_command == 2:
+                pm_id = self.env['pos.payment'].browse(new_pm[1])
+                amount = formatLang(self.env, pm_id.amount, currency_obj=pm_id.currency_id)
+                message_list.append(_("Removed %(payment_method)s with %(amount)s",
+                    payment_method=pm_id.payment_method_id.name,
+                    amount=amount))
+
+        return message_list
+
+    def _markup_list_message(self, message):
+        body = Markup("<ul>")
+        for line in message:
+            body += Markup("<li>")
+            body += line
+            body += Markup("</li>")
+        body += Markup("</ul>")
+        return body
+
+    def _get_order_name_from_pos_reference(self, session=None):
+        """Return the order name from the sequence prefix and the receipt reference (``pos_reference``)."""
+        self.ensure_one()
+        session = session or self.session_id
+        last_reference_part = self.get_reference_last_part()
+        seq_id = session.config_id.order_seq_id
+        prefix, suffix = seq_id._get_prefix_suffix()
+        if not prefix:
+            prefix = session.config_id.name
+        suffix = f" - {suffix}" if suffix else ''
+        return f"{prefix} - {last_reference_part}{suffix}"
+
+    def _compute_order_name(self, session=None):
+        session = session or self.session_id
+        if self.refunded_order_id.exists():
+            return _('%(refunded_order)s REFUND', refunded_order=self.refunded_order_id.name)
+        return self._get_order_name_from_pos_reference(session)
+
+    def get_reference_last_part(self):
+        return self.pos_reference.split('-')[-1]
 
     @api.model
-    def create(self, values):
-        if values.get('session_id'):
-            # set name based on the sequence specified on the config
-            session = self.env['pos.session'].browse(values['session_id'])
-            values['name'] = session.config_id.sequence_id._next()
-            values.setdefault('pricelist_id', session.config_id.pricelist_id.id)
-        else:
-            # fallback on any pos.order sequence
-            values['name'] = self.env['ir.sequence'].next_by_code('pos.order')
-        return super(PosOrder, self).create(values)
+    def _cron_process_pos_orders(self):
+        """
+        Entry point for the POS 5-minute cron.
 
-    @api.multi
+        This method acts as a central handler that runs various
+        PoS order-related background tasks (e.g., processing deferred
+        invoices, syncing orders, cleanup operations).
+
+        Each task should be implemented in its own dedicated method
+        and called from here to keep responsibilities well separated.
+        """
+        self._process_deferred_invoice_orders()
+
+    @api.model
+    def _process_deferred_invoice_orders(self):
+        orders = self.search([('defer_invoice_pdf', '=', True)])
+        for order in orders:
+            try:
+                order.account_move.with_context(skip_invoice_sync=True)._generate_and_send()
+            except (UserError, ValidationError) as e:
+                _logger.error("Error processing order %s: %s", order.name, e)
+            order.defer_invoice_pdf = False
+
     def action_view_invoice(self):
+        invoices = self.account_move
+        if (len(invoices) == 1):
+            return {
+                'name': _('Customer Invoice'),
+                'view_mode': 'form',
+                'view_id': self.env.ref('account.view_move_form').id,
+                'res_model': 'account.move',
+                'context': "{'move_type':'out_invoice'}",
+                'type': 'ir.actions.act_window',
+                'res_id': self.account_move.id,
+            }
         return {
-            'name': _('Customer Invoice'),
-            'view_mode': 'form',
-            'view_id': self.env.ref('account.invoice_form').id,
-            'res_model': 'account.invoice',
-            'context': "{'type':'out_invoice'}",
+            'name': _('Customer Invoices'),
+            'view_mode': 'list,form',
+            'res_model': 'account.move',
             'type': 'ir.actions.act_window',
-            'res_id': self.invoice_id.id,
+            'domain': [('id', 'in', invoices.ids)],
         }
 
-    @api.multi
+    def action_create_invoices(self):
+        return {
+            'name': _('Create Invoice(s)'),
+            'view_mode': 'form',
+            'view_id': self.env.ref('point_of_sale.view_pos_make_invoice').id,
+            'res_model': 'pos.make.invoice',
+            'target': 'new',
+            'type': 'ir.actions.act_window',
+            'context': {'dialog_size': 'medium'},
+        }
+
+    # the refunded order is the order from which the items were refunded in this order
+    def action_view_refunded_order(self):
+        return {
+            'name': _('Refunded Order'),
+            'view_mode': 'form',
+            'view_id': self.env.ref('point_of_sale.view_pos_pos_form').id,
+            'res_model': 'pos.order',
+            'type': 'ir.actions.act_window',
+            'res_id': self.refunded_order_id.id,
+        }
+
+    # the refund orders are the orders where the items from this order were refunded
+    def action_view_refund_orders(self):
+        return {
+            'name': _('Refund Orders'),
+            'view_mode': 'list,form',
+            'res_model': 'pos.order',
+            'type': 'ir.actions.act_window',
+            'domain': [('id', 'in', self.mapped('lines.refund_orderline_ids.order_id').ids)],
+        }
+
+    def _is_pos_order_paid(self):
+        amount_total = self.amount_total
+        # If we are checking if a refund was paid and if it was a total refund, we take into account the amount paid on
+        # the original order. For a pertial refund, we take into account the value of the items returned.
+        if float_is_zero(self.refunded_order_id.amount_total + amount_total, precision_rounding=self.currency_id.rounding):
+            amount_total = -self.refunded_order_id.amount_paid
+        return float_is_zero(self._get_rounded_amount(amount_total) - self.amount_paid, precision_rounding=self.currency_id.rounding)
+
+    def _get_rounded_amount(self, amount, force_round=False):
+        if self.config_id.cash_rounding:
+            rounding_method = self.config_id.rounding_method
+            if force_round or not self.config_id.only_round_cash_method:
+                amount = float_round(amount, precision_rounding=rounding_method.rounding, rounding_method=rounding_method.rounding_method)
+            elif any(p.payment_method_id.type == 'cash' for p in self.payment_ids):
+                # Only round the residual settled in cash: non-cash payments pay their exact share.
+                non_cash_amount = sum(p.amount for p in self.payment_ids if p.payment_method_id.type != 'cash')
+                amount = non_cash_amount + float_round(amount - non_cash_amount, precision_rounding=rounding_method.rounding, rounding_method=rounding_method.rounding_method)
+        currency = self.currency_id
+        return currency.round(amount) if currency else amount
+
+    def _get_partner_bank_id(self):
+        partner_bank_id = False
+        amount_total = sum(order.amount_total for order in self)
+
+        def _first_allowed(bank_ids):
+            return bank_ids.filtered(lambda b: b.allow_out_payment)[:1]
+
+        # Case 1: refund / negative amount → customer bank
+        if amount_total <= 0 and self.partner_id.bank_ids:
+            partner_bank_id = _first_allowed(self.partner_id.bank_ids)
+
+        # Case 2: positive amount → payment journal bank
+        elif amount_total >= 0 and self.payment_ids:
+            journal_bank = self.payment_ids[0].payment_method_id.journal_id.bank_account_id
+            if journal_bank and journal_bank.allow_out_payment:
+                partner_bank_id = journal_bank
+
+        # Case 3: fallback → company bank
+        if not partner_bank_id and amount_total >= 0 and self.company_id.partner_id.bank_ids:
+            partner_bank_id = _first_allowed(self.company_id.partner_id.bank_ids)
+
+        return partner_bank_id.id if partner_bank_id else False
+
     def action_pos_order_paid(self):
-        if not self.test_paid():
-            raise UserError(_("Order is not paid."))
+        self.ensure_one()
+
+        # TODO: add support for mix of cash and non-cash payments when both cash_rounding and only_round_cash_method are True
+        if not self.config_id.cash_rounding \
+           or (self.config_id.only_round_cash_method
+           and not any(p.payment_method_id.type == 'cash' for p in self.payment_ids)):
+            total = self.amount_total
+        else:
+            total = float_round(self.amount_total, precision_rounding=self.config_id.rounding_method.rounding, rounding_method=self.config_id.rounding_method.rounding_method)
+
+        isPaid = float_is_zero(total - self.amount_paid, precision_rounding=self.currency_id.rounding)
+
+        if not isPaid and not self.config_id.cash_rounding:
+            raise UserError(_("Order %s is not fully paid.", self.name))
+        if not isPaid and self.config_id.cash_rounding:
+            currency = self.currency_id
+            if self.config_id.rounding_method.rounding_method == "HALF-UP":
+                maxDiff = currency.round(self.config_id.rounding_method.rounding / 2)
+            else:
+                maxDiff = currency.round(self.config_id.rounding_method.rounding)
+
+            diff = currency.round(self.amount_total - self.amount_paid)
+            if not abs(diff) <= maxDiff:
+                raise UserError(_("Order %s is not fully paid.", self.name))
+
         self.write({'state': 'paid'})
-        return self.create_picking()
 
-    @api.multi
-    def action_pos_order_invoice(self):
-        Invoice = self.env['account.invoice']
+        return True
 
-        for order in self:
-            # Force company for all SUPERUSER_ID action
-            local_context = dict(self.env.context, force_company=order.company_id.id, company_id=order.company_id.id)
-            if order.invoice_id:
-                Invoice += order.invoice_id
-                continue
-
-            if not order.partner_id:
-                raise UserError(_('Please provide a partner for the sale.'))
-
-            invoice = Invoice.new(order._prepare_invoice())
-            invoice._onchange_partner_id()
-            invoice.fiscal_position_id = order.fiscal_position_id
-
-            inv = invoice._convert_to_write({name: invoice[name] for name in invoice._cache})
-            new_invoice = Invoice.with_context(local_context).sudo().create(inv)
-            message = _("This invoice has been created from the point of sale session: <a href=# data-oe-model=pos.order data-oe-id=%d>%s</a>") % (order.id, order.name)
-            new_invoice.message_post(body=message)
-            order.write({'invoice_id': new_invoice.id, 'state': 'invoiced'})
-            Invoice += new_invoice
-
-            for line in order.lines:
-                self.with_context(local_context)._action_create_invoice_line(line, new_invoice.id)
-
-            new_invoice.with_context(local_context).sudo().compute_taxes()
-            order.sudo().write({'state': 'invoiced'})
-
-        if not Invoice:
-            return {}
-
+    def _prepare_product_aml_dict(self, base_line_vals, update_base_line_vals, rate, sign):
+        amount_currency = update_base_line_vals['amount_currency']
+        balance = self.company_id.currency_id.round(amount_currency * rate)
+        order_line = base_line_vals['record']
         return {
-            'name': _('Customer Invoice'),
-            'view_type': 'form',
-            'view_mode': 'form',
-            'view_id': self.env.ref('account.invoice_form').id,
-            'res_model': 'account.invoice',
-            'context': "{'type':'out_invoice'}",
-            'type': 'ir.actions.act_window',
-            'nodestroy': True,
-            'target': 'current',
-            'res_id': Invoice and Invoice.ids[0] or False,
+            'name': order_line.full_product_name,
+            'product_id': order_line.product_id.id,
+            'quantity': order_line.qty * sign,
+            'account_id': base_line_vals['account_id'].id,
+            'partner_id': base_line_vals['partner_id'].id,
+            'currency_id': base_line_vals['currency_id'].id,
+            'tax_ids': [(6, 0, base_line_vals['tax_ids'].ids)],
+            'tax_tag_ids': update_base_line_vals['tax_tag_ids'],
+            'amount_currency': amount_currency,
+            'balance': balance,
+            'no_followup': False,
         }
-
-    # this method is unused, and so is the state 'cancel'
-    @api.multi
-    def action_pos_order_cancel(self):
-        return self.write({'state': 'cancel'})
-
-    @api.multi
-    def action_pos_order_done(self):
-        return self._create_account_move_line()
 
     @api.model
-    def create_from_ui(self, orders):
-        # Keep only new orders
-        submitted_references = [o['data']['name'] for o in orders]
-        pos_order = self.search([('pos_reference', 'in', submitted_references)])
-        existing_orders = pos_order.read(['pos_reference'])
-        existing_references = set([o['pos_reference'] for o in existing_orders])
-        orders_to_save = [o for o in orders if o['data']['name'] not in existing_references]
+    def get_example_order_data(self):
+        last_order = self.env['pos.order'].search([], order='id desc', limit=1)
+        return last_order.order_receipt_generate_data()
+
+    def get_receipt_print_data(self):
+        """Return what the backend needs to print the receipt of this order.
+
+        The receipts are rendered server side, as the client only has to forward
+        them to the printers it can reach: an ePOS document for the printers on
+        its local network, an image for the ones behind an IoT box. Rendering is
+        done once per format and paper size, printers sharing both share theirs.
+        The receipt html is always returned to allow the browser printing flow,
+        used when no printer is configured or when they all failed to print.
+        """
+        self.ensure_one()
+        order = self.with_company(self.company_id)
+        printers = order.config_id.receipt_printer_ids.filtered(
+            lambda printer: printer._can_print_backend_receipt(),
+        )
+        receipts = {}
+        printers_data = []
+        for printer in printers:
+            key = (printer._get_backend_receipt_format(), printer.paper_size)
+            if key not in receipts:
+                receipts[key] = order._order_receipt_generate_for_format(*key)
+            if receipts[key]:
+                printers_data.append({**printer._get_backend_print_data(), 'receipt': receipts[key]})
+        return {
+            'printers': printers_data,
+            'receipt_html': order.order_receipt_generate_html(),
+            'config_id': order.config_id.id,
+        }
+
+    def mark_receipt_as_printed(self):
+        """Count a print of the receipt, as the register does once it printed it."""
+        self.ensure_one()
+        self.nb_print += 1
+
+    def _get_invoice_post_context(self):
+        return {"skip_invoice_sync": True}
+
+    def _get_payments(self):
+        return self.payment_ids.sudo().with_company(self.company_id)
+
+    def _reconcile_invoice_payments(self, invoice, payment_moves):
+        # Gather the lines with the same rights that reconcile them: a salesperson cannot read the payment moves.
+        invoice = invoice.sudo()
+        payment_moves = payment_moves.sudo()
+        receivable_account = self.env["res.partner"]._find_accounting_partner(invoice.partner_id).with_company(self.company_id).property_account_receivable_id
+        payment_receivable_lines = payment_moves.pos_payment_ids._get_receivable_lines_for_invoice_reconciliation(receivable_account)
+        invoice_receivable_lines = invoice.line_ids.filtered(lambda line: line.account_id == receivable_account and not line.reconciled)
+        (payment_receivable_lines | invoice_receivable_lines).with_company(invoice.company_id).reconcile()
+
+    def _post_cancel_message(self, author_id=None):
+        author_id = author_id or self.env.user.partner_id.id
+        for record in self:
+            record.message_post(body=_('Point of Sale Order cancelled'), author_id=author_id)
+
+    def cancel_order_from_pos(self):
+        draft_orders = self.filtered(lambda o: o.state == 'draft')
+        today = fields.Date.context_today(self)
+        if self.env.context.get('active_ids'):
+            orders = self.browse(self.env.context.get('active_ids'))
+            order_is_in_futur = any(order.preset_time and fields.Datetime.context_timestamp(self, order.preset_time).date() > today for order in orders)
+            if order_is_in_futur:
+                raise UserError(_('The order delivery / pickup date is in the future. You cannot cancel it.'))
+            if not draft_orders:
+                raise UserError(_('This order has already been paid. You cannot set it back to draft or edit it.'))
+
+        if draft_orders:
+            draft_orders.write({'state': 'cancel', 'date_order': fields.Datetime.now()})
+            author_id = self.session_id._get_message_author().id
+            draft_orders._post_cancel_message(author_id=author_id)
+            for config in draft_orders.mapped('config_id'):
+                config.notify_synchronisation(config.current_session_id.id, self.env.context.get('device_identifier', 0))
+
+        return {
+            'pos.order': self._load_pos_data_read(draft_orders, self.config_id),
+        }
+
+    def action_pos_order_cancel(self):
+        orders = self.browse(self.env.context.get('active_ids'))
+        orders.write({'state': 'cancel', 'date_order': fields.Datetime.now()})
+        orders._post_cancel_message()
+        for config in orders.config_id:
+            config.notify_synchronisation(config.current_session_id.id, 0)
+
+    def _get_open_order(self, order):
+        return self.env["pos.order"].search([('uuid', '=', order.get('uuid'))], limit=1, order='id desc')
+
+    @staticmethod
+    def _get_order_log_representation(order):
+        return {k: order.get(k) for k in ("name", "pos_reference", "uuid")}
+
+    def _should_log_order_data(self):
+        return self.env['ir.config_parameter'].sudo().get_bool('point_of_sale.log_order_data')
+
+    @api.model
+    def sync_from_ui(self, orders):
+        """ Create and update Orders from the frontend PoS application.
+
+        Create new orders and update orders that are in draft status. If an order already exists with a status
+        different from 'draft' it will be discarded, otherwise it will be saved to the database. If saved with
+        'draft' status the order can be overwritten later by this function.
+
+        :param orders: dictionary with the orders to be created.
+        :type orders: dict.
+        :returns: list of db-ids for the created and updated orders.
+        :rtype: list
+        """
+        sync_token = randrange(100_000_000)  # Use to differentiate 2 parallels calls to this function in the logs
+        _logger.info("PoS synchronisation #%d started for PoS orders references: %s", sync_token, [self._get_order_log_representation(order) for order in orders])
         order_ids = []
 
-        for tmp_order in orders_to_save:
-            to_invoice = tmp_order['to_invoice']
-            order = tmp_order['data']
-            if to_invoice:
-                self._match_payment_to_invoice(order)
-            pos_order = self._process_order(order)
-            order_ids.append(pos_order.id)
+        for order in orders:
+            order_log_name = self._get_order_log_representation(order)
+            if self._should_log_order_data():
+                _logger.info("PoS synchronisation #%d processing order %s order full data:\n%s", sync_token, order_log_name, pformat(order))
 
-            try:
-                pos_order.action_pos_order_paid()
-            except psycopg2.OperationalError:
-                # do not hide transactional errors, the order(s) won't be saved!
-                raise
-            except Exception as e:
-                _logger.error('Could not fully process the POS Order: %s', tools.ustr(e))
+            refunded_orders = self._get_refunded_orders(order)
+            if len(refunded_orders) > 1:
+                raise ValidationError(_('You can only refund products from the same order.'))
+            if len(refunded_orders) == 1:
+                order_ids.append(refunded_orders[0].id)
 
-            if to_invoice:
-                pos_order.action_pos_order_invoice()
-                pos_order.invoice_id.sudo().action_invoice_open()
-                pos_order.account_move = pos_order.invoice_id.move_id
-        return order_ids
-
-    def test_paid(self):
-        """A Point of Sale is paid when the sum
-        @return: True
-        """
-        for order in self:
-            if order.lines and not order.amount_total:
-                continue
-            if (not order.lines) or (not order.statement_ids) or (abs(order.amount_total - order.amount_paid) > 0.00001):
-                return False
-        return True
-
-    def create_picking(self):
-        """Create a picking for each order and validate it."""
-        Picking = self.env['stock.picking']
-        Move = self.env['stock.move']
-        StockWarehouse = self.env['stock.warehouse']
-        for order in self:
-            if not order.lines.filtered(lambda l: l.product_id.type in ['product', 'consu']):
-                continue
-            address = order.partner_id.address_get(['delivery']) or {}
-            picking_type = order.picking_type_id
-            return_pick_type = order.picking_type_id.return_picking_type_id or order.picking_type_id
-            order_picking = Picking
-            return_picking = Picking
-            moves = Move
-            location_id = order.location_id.id
-            if order.partner_id:
-                destination_id = order.partner_id.property_stock_customer.id
+            existing_order = self._get_open_order(order)
+            if existing_order and existing_order.state == 'draft':
+                order_ids.append(self._process_order(order, existing_order))
+                _logger.info("PoS synchronisation #%d order %s updated pos.order #%d", sync_token, order_log_name, order_ids[-1])
+            elif not existing_order:
+                order_ids.append(self._process_order(order, False))
+                _logger.info("PoS synchronisation #%d order %s created pos.order #%d", sync_token, order_log_name, order_ids[-1])
             else:
-                if (not picking_type) or (not picking_type.default_location_dest_id):
-                    customerloc, supplierloc = StockWarehouse._get_partner_locations()
-                    destination_id = customerloc.id
-                else:
-                    destination_id = picking_type.default_location_dest_id.id
+                # In theory, this situation is unintended
+                # In practice it can happen when "Tip later" option is used
+                # This will update the order if edited after payent from UI.
+                if existing_order.state == "paid" and not existing_order.nb_print and not existing_order.account_move:
+                    self.process_saved_payments(order, existing_order)
+                order_ids.append(existing_order.id)
+                _logger.info("PoS synchronisation #%d order %s sync ignored for existing PoS order %s (state: %s)", sync_token, order_log_name, existing_order, existing_order.state)
 
-            if picking_type:
-                message = _("This transfer has been created from the point of sale session: <a href=# data-oe-model=pos.order data-oe-id=%d>%s</a>") % (order.id, order.name)
-                picking_vals = {
-                    'origin': order.name,
-                    'partner_id': address.get('delivery', False),
-                    'date_done': order.date_order,
-                    'picking_type_id': picking_type.id,
-                    'company_id': order.company_id.id,
-                    'move_type': 'direct',
-                    'note': order.note or "",
-                    'location_id': location_id,
-                    'location_dest_id': destination_id,
-                }
-                pos_qty = any([x.qty > 0 for x in order.lines if x.product_id.type in ['product', 'consu']])
-                if pos_qty:
-                    order_picking = Picking.create(picking_vals.copy())
-                    order_picking.message_post(body=message)
-                neg_qty = any([x.qty < 0 for x in order.lines if x.product_id.type in ['product', 'consu']])
-                if neg_qty:
-                    return_vals = picking_vals.copy()
-                    return_vals.update({
-                        'location_id': destination_id,
-                        'location_dest_id': return_pick_type != picking_type and return_pick_type.default_location_dest_id.id or location_id,
-                        'picking_type_id': return_pick_type.id
-                    })
-                    return_picking = Picking.create(return_vals)
-                    return_picking.message_post(body=message)
+        # Sometime pos_orders_ids can be empty.
+        pos_order_ids = self.env['pos.order'].browse(order_ids)
+        config = pos_order_ids.config_id[0] if pos_order_ids else False
 
-            for line in order.lines.filtered(lambda l: l.product_id.type in ['product', 'consu'] and not float_is_zero(l.qty, precision_rounding=l.product_id.uom_id.rounding)):
-                moves |= Move.create({
-                    'name': line.name,
-                    'product_uom': line.product_id.uom_id.id,
-                    'picking_id': order_picking.id if line.qty >= 0 else return_picking.id,
-                    'picking_type_id': picking_type.id if line.qty >= 0 else return_pick_type.id,
-                    'product_id': line.product_id.id,
-                    'product_uom_qty': abs(line.qty),
-                    'state': 'draft',
-                    'location_id': location_id if line.qty >= 0 else destination_id,
-                    'location_dest_id': destination_id if line.qty >= 0 else return_pick_type != picking_type and return_pick_type.default_location_dest_id.id or location_id,
-                })
+        for order in pos_order_ids:
+            order._ensure_access_token()
+            if not self.env.context.get('preparation'):
+                order.config_id.notify_synchronisation(order.config_id.current_session_id.id, self.env.context.get('device_identifier', 0))
 
-            # prefer associating the regular order picking, not the return
-            order.write({'picking_id': order_picking.id or return_picking.id})
+        _logger.info("PoS synchronisation #%d finished", sync_token)
+        return pos_order_ids.read_pos_data(orders, config)
 
-            if return_picking:
-                order._force_picking_done(return_picking)
-            if order_picking:
-                order._force_picking_done(order_picking)
+    @api.model
+    def read_pos_orders(self, domain=False):
+        orders = self.search(domain)
+        config_id = orders[0].config_id if orders else False
+        return orders.read_pos_data([], config_id) if config_id else {'pos.order': []}
 
-            # when the pos.config has no picking_type_id set only the moves will be created
-            if moves and not return_picking and not order_picking:
-                moves._action_assign()
-                moves.filtered(lambda m: m.product_id.tracking == 'none')._action_done()
+    @api.model
+    def read_pos_data_uuid(self, uuid):
+        return self.read_pos_orders([('uuid', '=', uuid)])
 
-        return True
-
-    def _force_picking_done(self, picking):
-        """Force picking in order to be set as done."""
-        self.ensure_one()
-        picking.action_assign()
-        wrong_lots = self.set_pack_operation_lot(picking)
-        if not wrong_lots:
-            picking.action_done()
-
-    def set_pack_operation_lot(self, picking=None):
-        """Set Serial/Lot number in pack operations to mark the pack operation done."""
-
-        StockProductionLot = self.env['stock.production.lot']
-        PosPackOperationLot = self.env['pos.pack.operation.lot']
-        has_wrong_lots = False
-        for order in self:
-            for move in (picking or self.picking_id).move_lines:
-                picking_type = (picking or self.picking_id).picking_type_id
-                lots_necessary = True
-                if picking_type:
-                    lots_necessary = picking_type and picking_type.use_existing_lots
-                qty = 0
-                qty_done = 0
-                pack_lots = []
-                pos_pack_lots = PosPackOperationLot.search([('order_id', '=', order.id), ('product_id', '=', move.product_id.id)])
-                pack_lot_names = [pos_pack.lot_name for pos_pack in pos_pack_lots]
-
-                if pack_lot_names and lots_necessary:
-                    for lot_name in list(set(pack_lot_names)):
-                        stock_production_lot = StockProductionLot.search([('name', '=', lot_name), ('product_id', '=', move.product_id.id)])
-                        if stock_production_lot:
-                            if stock_production_lot.product_id.tracking == 'lot':
-                                # if a lot nr is set through the frontend it will refer to the full quantity
-                                qty = move.product_uom_qty
-                            else: # serial numbers
-                                qty = 1.0
-                            qty_done += qty
-                            pack_lots.append({'lot_id': stock_production_lot.id, 'qty': qty})
-                        else:
-                            has_wrong_lots = True
-                elif move.product_id.tracking == 'none' or not lots_necessary:
-                    qty_done = move.product_uom_qty
-                else:
-                    has_wrong_lots = True
-                for pack_lot in pack_lots:
-                    lot_id, qty = pack_lot['lot_id'], pack_lot['qty']
-                    self.env['stock.move.line'].create({
-                        'move_id': move.id,
-                        'product_id': move.product_id.id,
-                        'product_uom_id': move.product_uom.id,
-                        'qty_done': qty,
-                        'location_id': move.location_id.id,
-                        'location_dest_id': move.location_dest_id.id,
-                        'lot_id': lot_id,
-                    })
-                if not pack_lots and not float_is_zero(qty_done, precision_rounding=move.product_uom.rounding):
-                    move.quantity_done = qty_done
-        return has_wrong_lots
-
-    def _prepare_bank_statement_line_payment_values(self, data):
-        """Create a new payment for the order"""
-        args = {
-            'amount': data['amount'],
-            'date': data.get('payment_date', fields.Date.context_today(self)),
-            'name': self.name + ': ' + (data.get('payment_name', '') or ''),
-            'partner_id': self.env["res.partner"]._find_accounting_partner(self.partner_id).id or False,
+    def read_pos_data(self, data, config):
+        # If the previous session is closed, the order will get a new session_id due to _get_valid_session in _process_order
+        account_moves = self.sudo().account_move | self.sudo().payment_ids.account_move_id | self.session_id.sale_move_ids | self.session_id.refund_move_ids
+        return {
+            'pos.order': self._load_pos_data_read(self, config) if config else [],
+            'pos.payment': self.env['pos.payment']._load_pos_data_read(self.payment_ids, config) if config else [],
+            'pos.order.line': self.env['pos.order.line']._load_pos_data_read(self.lines, config) if config else [],
+            'product.attribute.custom.value': self.env['product.attribute.custom.value']._load_pos_data_read(self.lines.custom_attribute_value_ids, config) if config else [],
+            'account.move': self.env['account.move'].sudo()._load_pos_data_read(account_moves, config) if config else [],
+            'pos.prep.order': self.env['pos.prep.order']._load_pos_data_read(self.prep_order_ids, config) if config else [],
+            'pos.prep.line': self.env['pos.prep.line']._load_pos_data_read(self.prep_order_ids.prep_line_ids, config) if config else [],
         }
 
-        journal_id = data.get('journal', False)
-        statement_id = data.get('statement_id', False)
-        assert journal_id or statement_id, "No statement_id or journal_id passed to the method!"
-
-        journal = self.env['account.journal'].browse(journal_id)
-        # use the company of the journal and not of the current user
-        company_cxt = dict(self.env.context, force_company=journal.company_id.id)
-        account_def = self.env['ir.property'].with_context(company_cxt).get('property_account_receivable_id', 'res.partner')
-        args['account_id'] = (self.partner_id.property_account_receivable_id.id) or (account_def and account_def.id) or False
-
-        if not args['account_id']:
-            if not args['partner_id']:
-                msg = _('There is no receivable account defined to make payment.')
-            else:
-                msg = _('There is no receivable account defined to make payment for the partner: "%s" (id:%d).') % (
-                    self.partner_id.name, self.partner_id.id,)
-            raise UserError(msg)
-
-        context = dict(self.env.context)
-        context.pop('pos_session_id', False)
-        for statement in self.session_id.statement_ids:
-            if statement.id == statement_id:
-                journal_id = statement.journal_id.id
-                break
-            elif statement.journal_id.id == journal_id:
-                statement_id = statement.id
-                break
-        if not statement_id:
-            raise UserError(_('You have to open at least one cashbox.'))
-
-        args.update({
-            'statement_id': statement_id,
-            'pos_statement_id': self.id,
-            'journal_id': journal_id,
-            'ref': self.session_id.name,
-        })
-
-        return args
+    @api.model
+    def _get_refunded_orders(self, order):
+        refunded_orderline_ids = [line[2]['refunded_orderline_id'] for line in order['lines'] if line[0] in [0, 1] and line[2].get('refunded_orderline_id')]
+        return self.env['pos.order.line'].browse(refunded_orderline_ids).mapped('order_id')
 
     def add_payment(self, data):
         """Create a new payment for the order"""
         self.ensure_one()
-        args = self._prepare_bank_statement_line_payment_values(data)
-        context = dict(self.env.context)
-        context.pop('pos_session_id', False)
-        self.env['account.bank.statement.line'].with_context(context).create(args)
-        self.amount_paid = sum(payment.amount for payment in self.statement_ids)
-        return args.get('statement_id', False)
+        self.env['pos.payment'].create(data)
+        self.amount_paid = self._compute_amount_paid()
 
-    @api.multi
-    def refund(self):
-        """Create a copy of order  for refund order"""
-        PosOrder = self.env['pos.order']
-        current_session = self.env['pos.session'].search([('state', '!=', 'closed'), ('user_id', '=', self.env.uid)], limit=1)
-        if not current_session:
-            raise UserError(_('To return product(s), you need to open a session that will be used to register the refund.'))
-        for order in self:
-            clone = order.copy({
-                # ot used, name forced by create
-                'name': order.name + _(' REFUND'),
-                'session_id': current_session.id,
-                'date_order': fields.Datetime.now(),
-                'pos_reference': order.pos_reference,
-                'lines': False,
-                'amount_tax': -order.amount_tax,
-                'amount_total': -order.amount_total,
-                'amount_paid': 0,
-            })
-            for line in order.lines:
-                clone_line = line.copy({
-                    # required=True, copy=False
-                    'name': line.name + _(' REFUND'),
-                    'order_id': clone.id,
-                    'qty': -line.qty,
-                    'price_subtotal': -line.price_subtotal,
-                    'price_subtotal_incl': -line.price_subtotal_incl,
-                })
-            PosOrder += clone
+    def _prepare_refund_values(self, current_session):
+        self.ensure_one()
+        pos_reference = current_session.config_id._get_next_order_refs()[0]
+        return {
+            'name': _('%(name)s REFUND', name=self.name),
+            'session_id': current_session.id,
+            'date_order': fields.Datetime.now(),
+            'pos_reference': pos_reference,
+            'lines': False,
+            'amount_paid': 0,
+            'is_total_cost_computed': False,
+            'is_refund': True,
+        }
+
+    def _prepare_mail_values(self, email, ticket, basic_ticket):
+        message = Markup(
+            _("<p>Dear %(client_name)s,<br/>Here is your Receipt %(is_invoiced)sfor \
+            %(pos_name)s amounting in %(amount)s from %(company_name)s. </p>"),
+        ) % {
+            'client_name': self.partner_id.name or _('Customer'),
+            'pos_name': self.name,
+            'amount': self.currency_id.format(self.amount_total),
+            'company_name': self.company_id.name,
+            'is_invoiced': "and Invoice " if self.account_move else "",
+        }
 
         return {
+            'subject': _('Receipt %s', self.name),
+            'body_html': message,
+            'author_id': self.env.user.partner_id.id,
+            'email_from': self.env.company.email or self.env.user.email_formatted,
+            'email_to': email,
+            'attachment_ids': self._add_mail_attachment(self.name, ticket, basic_ticket),
+        }
+
+    def _refund(self):
+        """ Create a copy of order to refund them.
+
+        return The newly created refund orders.
+        """
+        refund_orders = self.env['pos.order']
+        for order in self:
+            # When a refund is performed, we are creating it in a session having the same config as the original
+            # order. It can be the same session, or if it has been closed the new one that has been opened.
+            current_session = order.session_id.config_id.current_session_id
+            if not current_session:
+                raise UserError(_('To return product(s), you need to open a session in the POS %s', order.session_id.config_id.display_name))
+            refund_order = order.copy(
+                order._prepare_refund_values(current_session),
+            )
+            for line in order.lines:
+                if line.refunded_qty < line.qty:
+                    refund_line = line.copy(line._prepare_refund_data(refund_order))
+                    refund_line._onchange_amount_line_all()
+            refund_order._compute_prices()
+            refund_orders |= refund_order
+            refund_order.config_id.notify_synchronisation(current_session.id, 0)
+        refund_orders._compute_prices()
+        return refund_orders
+
+    def refund(self):
+        return {
             'name': _('Return Products'),
-            'view_type': 'form',
             'view_mode': 'form',
             'res_model': 'pos.order',
-            'res_id': PosOrder.ids[0],
+            'res_id': self._refund().ids[0],
             'view_id': False,
             'context': self.env.context,
             'type': 'ir.actions.act_window',
             'target': 'current',
         }
 
+    def action_send_mail(self):
+        template = self.env['mail.template'].search([('model', '=', self._name)], limit=1)
+        return {
+            'name': _('Send Email'),
+            'view_mode': 'form',
+            'res_model': 'mail.compose.message',
+            'type': 'ir.actions.act_window',
+            'context': {
+                'default_composition_mode': 'mass_mail',
+                'default_res_ids': self.ids,
+                'default_template_id': template.id,
+            },
+            'target': 'new',
+        }
 
-class PosOrderLine(models.Model):
-    _name = "pos.order.line"
-    _description = "Lines of Point of Sale Orders"
-    _rec_name = "product_id"
-
-    def _order_line_fields(self, line, session_id=None):
-        if line and 'name' not in line[2]:
-            session = self.env['pos.session'].browse(session_id).exists() if session_id else None
-            if session and session.config_id.sequence_line_id:
-                # set name based on the sequence specified on the config
-                line[2]['name'] = session.config_id.sequence_line_id._next()
-            else:
-                # fallback on any pos.order.line sequence
-                line[2]['name'] = self.env['ir.sequence'].next_by_code('pos.order.line')
-
-        if line and 'tax_ids' not in line[2]:
-            product = self.env['product.product'].browse(line[2]['product_id'])
-            line[2]['tax_ids'] = [(6, 0, [x.id for x in product.taxes_id])]
-        return line
-
-    company_id = fields.Many2one('res.company', string='Company', required=True, default=lambda self: self.env.user.company_id)
-    name = fields.Char(string='Line No', required=True, copy=False)
-    notice = fields.Char(string='Discount Notice')
-    product_id = fields.Many2one('product.product', string='Product', domain=[('sale_ok', '=', True)], required=True, change_default=True)
-    price_unit = fields.Float(string='Unit Price', digits=0)
-    qty = fields.Float('Quantity', digits=dp.get_precision('Product Unit of Measure'), default=1)
-    price_subtotal = fields.Float(string='Subtotal w/o Tax', digits=0,
-        readonly=True, required=True)
-    price_subtotal_incl = fields.Float(string='Subtotal', digits=0,
-        readonly=True, required=True)
-    discount = fields.Float(string='Discount (%)', digits=0, default=0.0)
-    order_id = fields.Many2one('pos.order', string='Order Ref', ondelete='cascade')
-    create_date = fields.Datetime(string='Creation Date', readonly=True)
-    tax_ids = fields.Many2many('account.tax', string='Taxes', readonly=True)
-    tax_ids_after_fiscal_position = fields.Many2many('account.tax', compute='_get_tax_ids_after_fiscal_position', string='Taxes to Apply')
-    pack_lot_ids = fields.One2many('pos.pack.operation.lot', 'pos_order_line_id', string='Lot/serial Number')
-
-    @api.model
-    def create(self, values):
-        if values.get('order_id') and not values.get('name'):
-            # set name based on the sequence specified on the config
-            config_id = self.order_id.browse(values['order_id']).session_id.config_id.id
-            # HACK: sequence created in the same transaction as the config
-            # cf TODO master is pos.config create
-            # remove me saas-15
-            self.env.cr.execute("""
-                SELECT s.id
-                FROM ir_sequence s
-                JOIN pos_config c
-                  ON s.create_date=c.create_date
-                WHERE c.id = %s
-                  AND s.code = 'pos.order.line'
-                LIMIT 1
-                """, (config_id,))
-            sequence = self.env.cr.fetchone()
-            if sequence:
-                values['name'] = self.env['ir.sequence'].browse(sequence[0])._next()
-        if not values.get('name'):
-            # fallback on any pos.order sequence
-            values['name'] = self.env['ir.sequence'].next_by_code('pos.order.line')
-        return super(PosOrderLine, self).create(values)
-
-    @api.onchange('price_unit', 'tax_ids', 'qty', 'discount', 'product_id')
-    def _onchange_amount_line_all(self):
-        for line in self:
-            res = line._compute_amount_line_all()
-            line.update(res)
-
-    def _compute_amount_line_all(self):
+    def action_send_receipt(self, email):
         self.ensure_one()
-        fpos = self.order_id.fiscal_position_id
-        tax_ids_after_fiscal_position = fpos.map_tax(self.tax_ids, self.product_id, self.order_id.partner_id) if fpos else self.tax_ids
-        price = self.price_unit * (1 - (self.discount or 0.0) / 100.0)
-        taxes = tax_ids_after_fiscal_position.compute_all(price, self.order_id.pricelist_id.currency_id, self.qty, product=self.product_id, partner=self.order_id.partner_id)
-        return {
-            'price_subtotal_incl': taxes['total_included'],
-            'price_subtotal': taxes['total_excluded'],
-        }
+        self.email = email
+        mail_template_id = 'point_of_sale.email_template_pos_receipt'
+        mail_template = self.env.ref(mail_template_id, raise_if_not_found=False)
+        ticket_image = self.order_receipt_generate_image()
+        basic_image = None
+        if self.config_id.basic_receipt:
+            basic_image = self.order_receipt_generate_image(True)
+        if not mail_template:
+            raise UserError(_("The mail template with xmlid %s has been deleted.", mail_template_id))
+        mail_template.send_mail(
+            self.id,
+            force_send=True,
+            email_values={
+                'email_to': email,
+                'attachment_ids': self._get_mail_attachments(self.name, ticket_image, basic_image),
+            })
 
-    @api.onchange('product_id')
-    def _onchange_product_id(self):
-        if self.product_id:
-            if not self.order_id.pricelist_id:
-                raise UserError(
-                    _('You have to select a pricelist in the sale form !\n'
-                      'Please set one before choosing a product.'))
-            price = self.order_id.pricelist_id.get_product_price(
-                self.product_id, self.qty or 1.0, self.order_id.partner_id)
-            self._onchange_qty()
-            self.tax_ids = self.product_id.taxes_id.filtered(lambda r: not self.company_id or r.company_id == self.company_id)
-            fpos = self.order_id.fiscal_position_id
-            tax_ids_after_fiscal_position = fpos.map_tax(self.tax_ids, self.product_id, self.order_id.partner_id) if fpos else self.tax_ids
-            self.price_unit = self.env['account.tax']._fix_tax_included_price_company(price, self.product_id.taxes_id, tax_ids_after_fiscal_position, self.company_id)
+    def _get_mail_attachments(self, name, ticket, basic_ticket):
+        attachments = []
 
-    @api.onchange('qty', 'discount', 'price_unit', 'tax_ids')
-    def _onchange_qty(self):
-        if self.product_id:
-            if not self.order_id.pricelist_id:
-                raise UserError(_('You have to select a pricelist in the sale form.'))
-            price = self.price_unit * (1 - (self.discount or 0.0) / 100.0)
-            self.price_subtotal = self.price_subtotal_incl = price * self.qty
-            if (self.product_id.taxes_id):
-                taxes = self.product_id.taxes_id.compute_all(price, self.order_id.pricelist_id.currency_id, self.qty, product=self.product_id, partner=False)
-                self.price_subtotal = taxes['total_excluded']
-                self.price_subtotal_incl = taxes['total_included']
+        if ticket:
+            receipt = self.env['ir.attachment'].create({
+                'name': 'Receipt-' + name + '.jpg',
+                'type': 'binary',
+                'raw': ticket,
+                'res_model': 'pos.order',
+                'res_id': self.ids[0],
+                'mimetype': 'image/jpeg',
+            })
+            attachments += [(4, receipt.id)]
 
-    @api.multi
-    def _get_tax_ids_after_fiscal_position(self):
-        for line in self:
-            line.tax_ids_after_fiscal_position = line.order_id.fiscal_position_id.map_tax(line.tax_ids, line.product_id, line.order_id.partner_id)
+        if basic_ticket:
+            basic_receipt = self.env['ir.attachment'].create({
+                'name': 'Receipt-' + name + '-1' + '.jpg',
+                'type': 'binary',
+                'raw': basic_ticket,
+                'res_model': 'pos.order',
+                'res_id': self.ids[0],
+                'mimetype': 'image/jpeg',
+            })
+            attachments += [(4, basic_receipt.id)]
 
+        if self.mapped('account_move'):
+            report = self.env['ir.actions.report']._render_qweb_pdf("account.account_invoices", self.account_move.ids[0])
+            invoice = self.env['ir.attachment'].create({
+                'name': name + '.pdf',
+                'type': 'binary',
+                'raw': report[0],
+                'res_model': 'pos.order',
+                'res_id': self.ids[0],
+                'mimetype': 'application/pdf',
+            })
+            attachments += [(4, invoice.id)]
 
-class PosOrderLineLot(models.Model):
-    _name = "pos.pack.operation.lot"
-    _description = "Specify product lot/serial number in pos order line"
-
-    pos_order_line_id = fields.Many2one('pos.order.line')
-    order_id = fields.Many2one('pos.order', related="pos_order_line_id.order_id")
-    lot_name = fields.Char('Lot Name')
-    product_id = fields.Many2one('product.product', related='pos_order_line_id.product_id')
-
-
-class ReportSaleDetails(models.AbstractModel):
-
-    _name = 'report.point_of_sale.report_saledetails'
-
+        return attachments
 
     @api.model
-    def get_sale_details(self, date_start=False, date_stop=False, configs=False):
-        """ Serialise the orders of the day information
+    def remove_from_ui(self, server_ids):
+        """ Remove orders from the frontend PoS application
 
-        params: date_start, date_stop string representing the datetime of order
+        Remove orders from the server by id.
+        :param server_ids: list of the id's of orders to remove from the server.
+        :type server_ids: list.
+        :returns: list -- list of db-ids for the removed orders.
         """
-        if not configs:
-            configs = self.env['pos.config'].search([])
+        orders = self.search([('id', 'in', server_ids), ('state', '=', 'draft')])
+        orders.write({'state': 'cancel'})
+        # TODO Looks like delete cascade is a better solution.
+        orders.mapped('payment_ids').sudo().unlink()
+        orders.sudo().unlink()
+        return orders.ids
 
-        user_tz = pytz.timezone(self.env.context.get('tz') or self.env.user.tz or 'UTC')
-        today = user_tz.localize(fields.Datetime.from_string(fields.Date.context_today(self)))
-        today = today.astimezone(pytz.timezone('UTC'))
-        if date_start:
-            date_start = fields.Datetime.from_string(date_start)
+    @api.model
+    def search_order_ids(self, config_id, domain, limit, offset, state_filter='paid'):
+        """Search for orders that satisfy the given domain, limit and offset.
+
+        state_filter: 'paid' for non-draft/non-cancelled orders, 'cancelled' for cancelled orders.
+        """
+        pos_config = self.env['pos.config'].browse(config_id)
+        if state_filter == 'cancelled':
+            state_domain = Domain('state', '=', 'cancel')
         else:
-            # start by default today 00:00:00
-            date_start = today
+            state_domain = Domain([
+                '|',
+                ('state', 'not in', ['cancel', 'draft']),
+                '&',
+                ('state', '!=', 'draft'),
+                ('is_refund', '=', True),
+            ])
+        order_domain = state_domain & Domain(domain) & Domain(
+            'config_id.currency_id', '=', pos_config.currency_id.id
+        ) & pos_config._get_paid_orders_config_domain()
+        orders = self.search(order_domain, limit=limit, offset=offset, order='create_date desc')
+        PosOrderLineModel = self.env['pos.order.line']
+        line_queries = [
+            PosOrderLineModel._search([('order_id', 'in', orders.ids)]),
+            PosOrderLineModel._search([('refunded_orderline_id.order_id', 'in', orders.ids)]),
+        ]
+        orderlines = PosOrderLineModel.browse(
+            row[0] for row in self.env.execute_query(
+                SQL(' UNION ').join(line_query.subselect() for line_query in line_queries)
+            )
+        )
 
-        if date_stop:
-            # set time to 23:59:59
-            date_stop = fields.Datetime.from_string(date_stop)
-        else:
-            # stop by default today 23:59:59
-            date_stop = today + timedelta(days=1, seconds=-1)
+        # We will return to the frontend the ids and the date of their last modification
+        # so that it can compare to the last time it fetched the orders and can ask to fetch
+        # orders that are not up-to-date.
+        # The date of their last modification is either the last time one of its orderline has changed,
+        # or the last time a refunded orderline related to it has changed.
+        orders_info = {order.id: order.write_date for order in orders}
+        for line in orderlines:
+            affected_order_id = line.order_id.id
+            if affected_order_id not in orders_info:
+                affected_order_id = line.refunded_orderline_id.order_id.id
 
-        # avoid a date_stop smaller than date_start
-        date_stop = max(date_stop, date_start)
-
-        date_start = fields.Datetime.to_string(date_start)
-        date_stop = fields.Datetime.to_string(date_stop)
-
-        orders = self.env['pos.order'].search([
-            ('date_order', '>=', date_start),
-            ('date_order', '<=', date_stop),
-            ('state', 'in', ['paid','invoiced','done']),
-            ('config_id', 'in', configs.ids)])
-
-        user_currency = self.env.user.company_id.currency_id
-
-        total = 0.0
-        products_sold = {}
-        taxes = {}
-        for order in orders:
-            if user_currency != order.pricelist_id.currency_id:
-                total += order.pricelist_id.currency_id._convert(
-                    order.amount_total, user_currency, order.company_id, order.date_order or fields.Date.today())
-            else:
-                total += order.amount_total
-            currency = order.session_id.currency_id
-
-            for line in order.lines:
-                key = (line.product_id, line.price_unit, line.discount)
-                products_sold.setdefault(key, 0.0)
-                products_sold[key] += line.qty
-
-                if line.tax_ids_after_fiscal_position:
-                    line_taxes = line.tax_ids_after_fiscal_position.compute_all(line.price_unit * (1-(line.discount or 0.0)/100.0), currency, line.qty, product=line.product_id, partner=line.order_id.partner_id or False)
-                    for tax in line_taxes['taxes']:
-                        taxes.setdefault(tax['id'], {'name': tax['name'], 'tax_amount':0.0, 'base_amount':0.0})
-                        taxes[tax['id']]['tax_amount'] += tax['amount']
-                        taxes[tax['id']]['base_amount'] += tax['base']
-                else:
-                    taxes.setdefault(0, {'name': _('No Taxes'), 'tax_amount':0.0, 'base_amount':0.0})
-                    taxes[0]['base_amount'] += line.price_subtotal_incl
-
-        st_line_ids = self.env["account.bank.statement.line"].search([('pos_statement_id', 'in', orders.ids)]).ids
-        if st_line_ids:
-            self.env.cr.execute("""
-                SELECT aj.name, sum(amount) total
-                FROM account_bank_statement_line AS absl,
-                     account_bank_statement AS abs,
-                     account_journal AS aj 
-                WHERE absl.statement_id = abs.id
-                    AND abs.journal_id = aj.id 
-                    AND absl.id IN %s 
-                GROUP BY aj.name
-            """, (tuple(st_line_ids),))
-            payments = self.env.cr.dictfetchall()
-        else:
-            payments = []
+            orders_info[affected_order_id] = max(
+                orders_info[affected_order_id],
+                line.write_date,
+            )
 
         return {
-            'currency_precision': user_currency.decimal_places,
-            'total_paid': user_currency.round(total),
-            'payments': payments,
-            'company_name': self.env.user.company_id.name,
-            'taxes': list(taxes.values()),
-            'products': sorted([{
-                'product_id': product.id,
-                'product_name': product.name,
-                'code': product.default_code,
-                'quantity': qty,
-                'price_unit': price_unit,
-                'discount': discount,
-                'uom': product.uom_id.name
-            } for (product, price_unit, discount), qty in products_sold.items()], key=lambda l: l['product_name'])
+            'ordersInfo': list(orders_info.items()),
+            'totalCount': self.search_count(order_domain),
         }
 
-    @api.multi
-    def _get_report_values(self, docids, data=None):
-        data = dict(data or {})
-        configs = self.env['pos.config'].browse(data['config_ids'])
-        data.update(self.get_sale_details(data['date_start'], data['date_stop'], configs))
-        return data
+    def _should_send_to_preparation(self):
+        """
+        Determine whether the order should be sent to preparation based
+        on its payment status and the config's payment method configuration.
+        """
+        return self.state == "paid"
+
+    def _send_order(self):
+        self.ensure_one()
+        if self._should_send_to_preparation():
+            self.env['pos.prep.order'].sudo().update_last_order_change(self.sudo())  # Will send to preparation display if installed.
+
+    def _prepare_pos_log(self, body):
+        return body
+
+    def _set_product_qty_available(self):
+        pass
+
+    @api.model
+    def _should_update_quantity_on_product(self):
+        """ Overriden in pos_stock, as the quantity update is handled through the stock module.
+        """
+        return True
+
+    ##############################################################
+    #                 Accounting related methods                 #
+    ##############################################################
+    def _grouping_function(self, base_line):
+        use_product = self.config_id.use_closing_entry_by_product
+        product_id = base_line['product_id']
+        return frozendict({
+            'account_id': base_line['account_id'],
+            'product_id': product_id if use_product else False,
+            'tax_ids': base_line['tax_ids'],
+        })
+
+    def _prepare_move_line_vals_from_base_line(self, base_line):
+        product = base_line['product_id']
+        name = base_line['account_id'].name
+        product_id = product.id if product else False
+        if product:
+            name = product.description_sale
+
+        # Untaxed lines get no manual amounts, so the global rounding delta
+        # allocated to them must be kept in the price, or the move is unbalanced.
+        total = base_line['price_unit']
+        tax_details = base_line['tax_details']
+        if not tax_details['taxes_data']:
+            total = tax_details['total_excluded_currency'] + tax_details['delta_total_excluded_currency']
+
+        if self.config_id._is_quantities_set():
+            quantity = base_line['_aggregated_quantity']
+            price_unit = total / quantity if quantity else total
+        else:
+            quantity, price_unit = 1.0, total
+
+        line_vals = {
+            'name': name,
+            'quantity': quantity,
+            'price_unit': price_unit,
+            'display_type': 'product',
+            'extra_tax_data': self.env['account.tax']._export_base_line_extra_tax_data({
+                **base_line,
+                'quantity': quantity,
+                'price_unit': price_unit,
+            }),
+            'account_id': base_line['account_id'].id,
+            'tax_ids': [(6, 0, base_line['tax_ids'].ids)],
+        }
+        if self.config_id.use_closing_entry_by_product:
+            line_vals['product_id'] = product_id
+
+        return line_vals
+
+    def _aggregate_base_line_and_prepare_account_move_line_data(self, base_lines):
+        def aggregate_function(target_base_line, base_line):
+            target_base_line.setdefault('_aggregated_quantity', 0.0)
+            target_base_line['_aggregated_quantity'] += base_line['quantity']
+
+        AccountTax = self.env['account.tax']
+        company = self.company_id
+        aggregated = AccountTax._reduce_base_lines_with_grouping_function(
+            base_lines,
+            grouping_function=self._grouping_function,
+            aggregate_function=aggregate_function,
+        )
+        AccountTax._fix_base_lines_tax_details_on_manual_tax_amounts(
+            aggregated,
+            company,
+        )
+        to_create = []
+        for base_line in aggregated:
+            to_create.append({
+                'account.move.line': self._prepare_move_line_vals_from_base_line(base_line),
+                'metadata': {
+                    'base_line': base_line,
+                },
+            })
+        return to_create
+
+    def _prepare_account_move_line_data_from_base_line(self, base_lines):
+        """
+        Convert base_lines to a format compatible with account.move.line Command.create().
+
+        This produces the same structure as _aggregate_base_line_and_prepare_account_move_line_data
+        but without any aggregation, each base_line becomes its own entry.
+        """
+        def add_customer_note(note):
+            to_create.append({
+                'account.move.line': {
+                    'name': note,
+                    'display_type': 'line_note',
+                },
+                'metadata': {},
+            })
+
+        self.ensure_one()  # Not aggregated version can only works with on order
+        if not len(base_lines):
+            return []
+
+        to_create = []
+        is_percentage = bool(self.pricelist_id.item_ids.filtered('is_plain_discount'))
+
+        for base_line in base_lines:
+            line = base_line['record']
+            product = base_line['product_id']
+
+            if line.product_id.type == 'combo' and not self.env.context.get('hide_combo_title'):
+                to_create.append({
+                    'account.move.line': {
+                        'display_type': 'line_section',
+                        'name': f"{product.name} x {line.qty}",
+                        'quantity': abs(line.qty),
+                        'product_uom_id': line.product_id.uom_id.id,
+                    },
+                    'metadata': {
+                        'line': line,
+                    },
+                })
+            elif line.product_id.type != 'combo':
+                to_create.append({
+                    'account.move.line': {
+                        'name': product.description_sale,
+                        'display_type': 'product',
+                        'quantity': base_line['quantity'],
+                        'discount': base_line['discount'],
+                        'price_unit': base_line['price_unit'],
+                        'account_id': base_line['account_id'].id,
+                        'tax_ids': [(6, 0, base_line['tax_ids'].ids)],
+                        'extra_tax_data': self.env['account.tax']._export_base_line_extra_tax_data(base_line),
+                        'product_id': product.id,
+                        'product_uom_id': base_line['uom_id'].id,
+                    },
+                    'metadata': {
+                        'line': line,
+                    },
+                })
+
+            price_changed = float_compare(
+                line.price_unit,
+                line.product_id.lst_price,
+                precision_rounding=self.currency_id.rounding,
+            )
+
+            if is_percentage and price_changed < 0:
+                decimal = self.currency_id.decimal_places
+                name = _(
+                    'Price discount from %(list_price)s to %(price_unit)s',
+                    list_price=float_repr(line.product_id.lst_price, decimal),
+                    price_unit=float_repr(line.price_unit, decimal),
+                )
+                add_customer_note(name)
+
+            if line.customer_note:
+                add_customer_note(line.customer_note)
+
+        if self.general_customer_note:
+            add_customer_note(self.general_customer_note)
+
+        return to_create
+
+    def _prepare_account_move_line_data(self, aggregate=True):
+        """
+        Build Command.create entries for account move line, this method
+        is used in both the invoice generation and the session closing
+        to create move lines for sales and refunds.
+        - Session closing: lines are aggregated by taxes
+        - Order invoice: no aggregation, each line is a separate entry
+
+        The 'pos_invoice_group_move_type' context key, when set, signs lines by the group's
+        move_type instead of each order's own direction (see _prepare_base_lines_for_taxes_computation).
+        """
+        AccountTax = self.env['account.tax']
+        company = self.company_id
+        base_lines = []
+
+        # 1. Collect base_lines with PER-ORDER rounding + accounting data
+        for order in self:
+            lines = order.lines._prepare_base_lines_for_taxes_computation()
+            AccountTax._add_tax_details_in_base_lines(lines, company)
+            AccountTax._round_base_lines_tax_details(lines, company)
+            AccountTax._add_accounting_data_in_base_lines_tax_details(
+                lines,
+                company,
+                include_caba_tags=True,
+            )
+            base_lines.extend(lines)
+
+        if not aggregate:
+            # Transform each base_line to the same format as aggregated version,
+            # but without grouping/aggregation. Each line becomes a separate entry.
+            AccountTax._fix_base_lines_tax_details_on_manual_tax_amounts(
+                base_lines,
+                company,
+            )
+            return self._prepare_account_move_line_data_from_base_line(base_lines)
+
+        # Create zero price line independently, as they will not be aggregated
+        # This can happen with a fixed taxes, the product is free but the
+        # tax will add price on the receipt
+        zero_price_line_data = [line for line in base_lines if line['currency_id'].is_zero(line['price_unit'])]
+        sales_by_order = defaultdict(list)
+        zero_price_lines = []
+
+        for line in zero_price_line_data:
+            sales_by_order[line['record'].order_id].append(line)
+
+        for [order, line] in sales_by_order.items():
+            data = order._prepare_account_move_line_data_from_base_line(line)
+            zero_price_lines.extend(data)
+
+        # 2. Aggregate product lines by (revenue account + VAT rate) grouping
+        aggregated_per_line = self._aggregate_base_line_and_prepare_account_move_line_data(base_lines)
+        return aggregated_per_line + zero_price_lines
+
+    def _prepare_account_move_line_data_for_payments(self, partner=None):
+        """
+        Aggregate pos.payment amounts by payment method for the session receipt.
+
+        This method only COLLECTS and AGGREGATES data, it does NOT create any
+        accounting records. The actual account.payment records are created
+        later, after the out_receipt is posted
+
+        Skipped:
+          - payments whose order is already invoiced (handled by a separate flow)
+        """
+        combined_currency = {}  # (pm, foreign currency) -> total signed amounts
+        session = self.session_id  # Always single record in this context
+        today = fields.Date.context_today(self)
+
+        for payment in self.payment_ids:
+            pm = payment.payment_method_id
+            # A payment made in the order currency is not a foreign payment, even when
+            # the UI stored a currency on it.
+            foreign_currency = payment.foreign_currency_id
+            if foreign_currency == payment.currency_id:
+                foreign_currency = self.env['res.currency']
+
+            # Customer account payments are grouped per customer, so each
+            # one gets its own transfer to the customer receivable.
+            line_partner = payment.pos_order_id.partner_id if pm.type == 'pay_later' else partner
+            key = (pm, foreign_currency, line_partner)
+
+            combined_currency.setdefault(key, {
+                'amount': 0.0,
+                'amount_currency': 0.0,
+            })
+            combined_currency[key]['amount'] += payment.amount
+            if foreign_currency:
+                combined_currency[key]['amount_currency'] += payment.amount_currency
+
+        # Combined payments: aggregate all orders for a given PM into one slot
+        result = []
+        # All the payment_term lines share the same receivable: an invoice
+        # cannot hold several receivable accounts or partners. On the session
+        # invoice, customer account payments are moved to the customer
+        # receivable by a separate entry (see _create_pay_later_payment_line).
+        partner_account = partner.property_account_receivable_id if partner else None
+        destination_account = partner_account or session._get_receivable_account()
+        for (pm, foreign_currency, line_partner), data in combined_currency.items():
+            name = pm.name
+            if pm.type == 'pay_later' and line_partner:
+                name = f'{pm.name} - {line_partner.name}'
+
+            result.append({
+                'account.move.line': {
+                    'display_type': 'payment_term',
+                    'name': name,
+                    'account_id': destination_account.id,
+                    'partner_id': line_partner.id if line_partner else None,
+                    'date_maturity': today,
+                    # Always expressed in the currency of the move: this line is summed
+                    # with the other payment_term lines by account.move._compute_amount
+                    # to get amount_residual, so a foreign currency here would make the
+                    # residual compare amounts of two different currencies.
+                    'amount_currency': data['amount'],
+                },
+                'metadata': {
+                    'payment_method_id': pm,
+                    'amount': data['amount'],
+                    'partner': line_partner,
+                    # The currency actually handed over by the customer, only relevant
+                    # for the payment side (liquidity) of the accounting.
+                    'foreign_currency_id': foreign_currency,
+                    'amount_currency': data['amount_currency'],
+                },
+            })
+
+        return result
+
+    def _prepare_account_move_line_data_for_rounding(self, invoice):
+        line_ids_commands = []
+        currency = self.currency_id
+        lines = invoice.line_ids.filtered_domain([
+            ('display_type', '!=', 'rounding'),
+        ])
+
+        # The rounding line computed by account.move on the whole move total must
+        # always be dropped, even when no rounding is needed (e.g. card + cash payments).
+        rounding_line = invoice.line_ids.filtered(
+            lambda line: line.display_type == 'rounding' and not line.tax_line_id,
+        )
+        if rounding_line:
+            line_ids_commands.append(Command.unlink(rounding_line.id))
+
+        debit = sum(lines.mapped('debit'))
+        credit = sum(lines.mapped('credit'))
+        invoice_difference = credit - debit
+
+        if invoice.move_type == 'out_refund':
+            invoice_difference = -invoice_difference
+
+        if not self.config_id.cash_rounding or currency.is_zero(invoice_difference):
+            return line_ids_commands
+
+        rate = invoice.invoice_currency_rate
+        difference_balance = invoice.company_currency_id.round(invoice_difference / rate) if rate else 0.0
+        signed_difference = (invoice_difference * invoice.direction_sign)
+        signed_balance = (difference_balance * invoice.direction_sign)
+
+        profit = invoice.invoice_cash_rounding_id.loss_account_id
+        lost = invoice.invoice_cash_rounding_id.profit_account_id
+        account = profit if invoice_difference > 0.0 else lost
+
+        line_ids_commands.append(Command.create({
+            'name': invoice.invoice_cash_rounding_id.name,
+            'amount_currency': -signed_difference,
+            'balance': -signed_balance,
+            'currency_id': invoice.currency_id.id,
+            'display_type': 'rounding',
+            'account_id': account.id,
+        }))
+
+        return line_ids_commands
+
+    def _prepare_invoice_vals(self):
+        """We have orders filtered by company > config > partners >
+        fiscal_positions so it won't make any issue when we access user,
+        partner, bank or similar directly.
+        """
+        invoice_date = fields.Date.context_today(self)
+        pos_refunded_invoice_ids = []
+        is_single_order = len(self) == 1
+
+        for orderline in self.lines:
+            refunded_line = orderline.refunded_orderline_id
+            if refunded_line.order_id.account_move:
+                pos_refunded_invoice_ids.append(
+                    refunded_line.order_id.account_move.id,
+                )
+
+        # A document whose total is negative for its type cannot be posted, so the move type
+        # follows the sign of the net amount of the whole group.
+        amount_total = sum(self.mapped('amount_total'))
+        if self.currency_id.is_zero(amount_total):
+            move_type = 'out_refund' if all(order.is_refund for order in self) else 'out_invoice'
+        else:
+            move_type = 'out_invoice' if amount_total > 0.0 else 'out_refund'
+        partner_term = self.partner_id.property_payment_term_id
+        is_pay_later = any(p.payment_method_id.type == 'pay_later' for p in self.payment_ids)
+        invoice_payment_term_id = partner_term.id if partner_term and is_pay_later else False
+        lines = []
+        for order in self.with_context(pos_invoice_group_move_type=move_type):
+            lines += order._prepare_account_move_line_data(False)
+        line_commands = [Command.create(line['account.move.line']) for line in lines]
+        users = self.user_id.ids
+        fp = self.fiscal_position_id.ids
+        currencies = self.currency_id.ids
+        ref = None
+
+        if is_single_order:
+            ref = _('Customer invoice from %(pos_reference)s', pos_reference=self.name)
+
+        if len(currencies) > 1:
+            raise UserError(_("You cannot create an invoice for orders with different currencies."))
+
+        # Ensure rounding method record is set on the invoice if needed
+        rounding_method = self.config_id._get_rounding_method_for_invoice(self)
+
+        vals = {
+            'invoice_origin': ', '.join(ref or '' for ref in self.mapped('pos_reference')),
+            'pos_refunded_invoice_ids': pos_refunded_invoice_ids,
+            'review_state': 'no_review',
+            'ref': ref,
+            'journal_id': self.config_id.journal_id.id,
+            'move_type': move_type,
+            'partner_id': self.partner_id.address_get(['invoice'])['invoice'],
+            'partner_shipping_id': self.partner_id.address_get(['delivery'])['delivery'],
+            'partner_bank_id': self._get_partner_bank_id(),
+            'currency_id': self.currency_id.id,
+            'invoice_date': invoice_date,
+            'invoice_user_id': users[0] if len(users) == 1 else None,
+            'fiscal_position_id': fp[0] if fp else None,
+            'invoice_line_ids': line_commands,
+            'invoice_payment_term_id': invoice_payment_term_id,
+            'invoice_cash_rounding_id': rounding_method.id,
+        }
+
+        refunded_order_invoice = self.refunded_order_id.account_move
+        if is_single_order and refunded_order_invoice:
+            vals['ref'] = _('Reversal of: %s', refunded_order_invoice.name)
+            vals['reversed_entry_id'] = refunded_order_invoice.id
+
+        if any(order.floating_order_name for order in self):
+            narr = ', '.join(self.filtered('floating_order_name').mapped('floating_order_name'))
+            vals.update({'narration': narr})
+
+        return vals
+
+    def _prepare_invoice_extra_line_commands(self, payments=[]):
+        """ Inherited in pos_stock """
+        return []
+
+    def _generate_pos_order_invoice(self):
+        if not self.env['res.company']._with_locked_records(self, allow_raising=False):
+            raise UserError(_("Some orders are already being invoiced. Please try again later."))
+
+        company = self.company_id
+        vals = self._prepare_invoice_vals()
+        vals['line_ids'] = []
+
+        # Orders already in a session closing entry (closed session or
+        # periodic closing cron) are paid there, their part is reversed from
+        # that entry instead of registering their payments again.
+        globally_invoiced = self.filtered('is_globally_invoiced')
+
+        total_payments_by_session = {}
+        for order in self - globally_invoiced:
+            payments = order._prepare_account_move_line_data_for_payments(
+                order.partner_id,
+            )
+
+            line_data = [pm['account.move.line'] for pm in payments]
+            payment_commands = [Command.create(pm_data) for pm_data in line_data]
+            extra_commands = order._prepare_invoice_extra_line_commands(payments)
+            total_payments_by_session.setdefault(order.session_id, [])
+            total_payments_by_session[order.session_id] += payments
+            vals['line_ids'] += payment_commands + extra_commands
+
+        AccountMove = self.env['account.move'].sudo().with_company(company)
+        move_ctx = AccountMove.with_context(
+            default_move_type=vals['move_type'],
+            check_move_validity=False,
+            always_tax_exigible=True,
+            linked_to_pos=True,
+        )
+        invoice = move_ctx.create(vals)
+        invoice_ctx = invoice.sudo().with_company(company).with_context(
+            **self._get_invoice_post_context(),
+        )
+
+        reversal_moves = []
+        grouped_by_move = {}
+        for order in globally_invoiced:
+            grouped_by_move.setdefault(order.account_move, self.env['pos.order'])
+            grouped_by_move[order.account_move] |= order
+
+        for move, orders in grouped_by_move.items():
+            reversal_move = orders.session_id._create_partial_reversal_move_from_session_closing(orders)
+            reversal_move._post()
+            reversal_moves.append((orders, reversal_move))
+
+        # Create rounding line if needed
+        data = self._prepare_account_move_line_data_for_rounding(invoice)
+        with self.env['account.move']._check_balanced({'records': invoice}):
+            invoice.with_context(linked_to_pos=True, skip_invoice_sync=True).line_ids = data
+
+        # Set account_move before _post() so that invoice.pos_order_ids is
+        # populated when stock_account computes COGS via _get_cogs_value()
+        # (pos_stock overrides _get_cogs_value to use _get_pos_anglo_saxon_price_unit
+        # which relies on pos_order_ids being set on the move).
+        self.account_move = invoice
+        invoice_ctx._post()
+
+        # Only posted lines can be reconciled
+        for orders, move in reversal_moves:
+            session = orders.session_id
+            session._reconcile_partial_reversal_move(orders, invoice, move)
+
+        name_str = " - ".join(self.mapped('name')) if len(self) > 1 else self.name
+        all_payment_lines = self.env['account.move.line']
+        payment_term_lines = invoice.line_ids.filtered(
+            lambda line: line.display_type == 'payment_term',
+        )
+
+        for session, payments in total_payments_by_session.items():
+            for payment in payments:
+                metadata = payment['metadata']
+                pm = metadata['payment_method_id']
+
+                all_payment_lines |= pm._create_payment_line(
+                    session,
+                    metadata['amount'],
+                    self.partner_id.property_account_receivable_id,
+                    f"POS Order {name_str}",
+                    self.partner_id,
+                    metadata['foreign_currency_id'].id,
+                    metadata['amount_currency'],
+                )
+
+        to_reconcile = (payment_term_lines | all_payment_lines).filtered(
+            lambda line: not line.reconciled,
+        )
+        to_reconcile.with_context(skip_invoice_sync=True).reconcile()
+
+        body = _("This invoice has been created from the point of sale session:%s",
+            Markup().join(Markup("%s ") % order._get_html_link() for order in self),
+        )
+        invoice.message_post(body=body)
+        if self.env.context.get('generate_pdf', True):
+            invoice.with_context(skip_invoice_sync=True)._generate_and_send()
+        else:
+            order.defer_invoice_pdf = True
+
+        statement = self.session_id.bank_statement_id
+        if statement:
+            statement._compute_balance_end_real()
+
+        return invoice
+
+    def _prepare_missing_invoice_moves(self):
+        self.write({'to_invoice': True})
+        return self._generate_pos_order_invoice()
+
+    def action_invoice_download_pdf(self):
+        self.ensure_one()
+        if self.defer_invoice_pdf:
+            self.account_move.with_context(skip_invoice_sync=True)._generate_and_send()
+            self.defer_invoice_pdf = False
+        return self.account_move.action_invoice_download_pdf()
+
+    def action_pos_order_invoice(self):
+        self.ensure_one()
+        account_move = self.account_move
+        singly = self.is_singly_invoiced
+
+        if singly and account_move:
+            # Already has a real customer invoice (account_move is not a session closing entry).
+            move = self.account_move
+        else:
+            # Session still open: standard path (also handles pos_stock picking creation).
+            move = self._prepare_missing_invoice_moves()
+
+        return {
+            'name': _('Customer Invoice'),
+            'view_mode': 'form',
+            'view_id': self.env.ref('account.view_move_form').id,
+            'res_model': 'account.move',
+            'context': "{'move_type':'out_invoice'}",
+            'type': 'ir.actions.act_window',
+            'target': 'current',
+            'res_id': move.id,
+        }

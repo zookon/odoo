@@ -1,0 +1,29 @@
+
+.s_media_list:not([data-vcss]) {
+    .row {
+        margin: var(--o-bs-grid-gutter-width) 0;
+    }
+    [class*="col-"] {
+        padding: 0;
+    }
+    .s_media_list_body {
+        padding: var(--o-bs-grid-gutter-width);
+        background-color: map-get($grays, 'white');
+    }
+    .s_media_list_options {
+        position: absolute;
+        bottom: 0;
+        inset-inline: 0;
+        display: flex;
+        border-top: 1px solid var(--gray-400);
+        .s_media_list_option {
+            flex: 1 1 auto;
+            padding: calc(var(--o-bs-grid-gutter-width) / 3) 0;
+            border-right: 1px solid var(--gray-400);
+            text-align: center;
+            &:last-child {
+                border-right: 0;
+            }
+        }
+    }
+}

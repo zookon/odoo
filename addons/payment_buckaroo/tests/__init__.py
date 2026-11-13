@@ -1,3 +1,3 @@
-# -*- coding: utf-8 -*-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from . import test_buckaroo
+from . import common, test_buckaroo, test_processing_flows

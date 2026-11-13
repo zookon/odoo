@@ -1,170 +1,147 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # * repair
-# 
+#
 # Translators:
-# e2f <projects@e2f.com>, 2018
-# enjolras <yo@miguelrevilla.com>, 2018
-# ES R1 <e2fes@hotmail.com>, 2018
-# David Perez <david@closemarketing.es>, 2018
-# Martin Trigaux, 2018
-# Pedro M. Baeza <pedro.baeza@gmail.com>, 2018
-# Jesús Alan Ramos Rodríguez <alan.ramos@jarsa.com.mx>, 2018
-# oihane <oihanecruce@gmail.com>, 2018
-# Christopher Ormaza <chris.ormaza@gmail.com>, 2018
-# Alejandro Die Sanchis <marketing@domatix.com>, 2018
-# José Vicente <txusev@gmail.com>, 2018
-# Luis M. Ontalba <luis.martinez@tecnativa.com>, 2018
-# Sergio Flores <vitavitae1@gmail.com>, 2018
-# Antonio Trueba, 2018
-# RGB Consulting <odoo@rgbconsulting.com>, 2018
-# Gustavo Valverde, 2018
-# Miguel Orueta <mo@landoo.es>, 2018
-# e2f_EPV Translator <e2f_EPV@outlook.com>, 2018
-# Nicole Kist <nki@odoo.com>, 2018
-# Raquel Iciarte <ric@odoo.com>, 2018
-# Fernando San Martín Woerner <fsnmartin@gmail.com>, 2018
-# José Matias Zuazo <jose.zuazo@tpsistemas.com.ar>, 2018
-# Nicolás Broggi <rnbroggi@gmail.com>, 2018
-# Carlos Vásquez <carlos.vasquez@clearcorp.co.cr>, 2018
-# Ana Juaristi <ajuaristio@gmail.com>, 2018
-# Manuel Vázquez Acosta <mva.led@gmail.com>, 2018
-# Javier Ramirez <elbomba887@gmail.com>, 2018
+# Martin Trigaux, 2022
+# Leonardo J. Caballero G. <leonardocaballero@gmail.com>, 2022
+# Pedro M. Baeza <pedro.baeza@tecnativa.com>, 2023
+# "Dylan Kiss (dyki)" <dyki@odoo.com>, 2025.
+# Weblate <noreply-mt-weblate@weblate.org>, 2025.
+# "Noemi Pla Garcia (nopl)" <nopl@odoo.com>, 2025, 2026.
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server saas~11.4\n"
+"Project-Id-Version: Odoo Server 16.0beta\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2018-08-02 09:56+0000\n"
-"PO-Revision-Date: 2018-08-02 09:56+0000\n"
-"Last-Translator: Javier Ramirez <elbomba887@gmail.com>, 2018\n"
-"Language-Team: Spanish (https://www.transifex.com/odoo/teams/41243/es/)\n"
+"POT-Creation-Date: 2026-09-04 17:44+0000\n"
+"PO-Revision-Date: 2026-08-31 15:29+0000\n"
+"Last-Translator: \"Noemi Pla Garcia (nopl)\" <nopl@odoo.com>\n"
+"Language-Team: Spanish <https://translate.odoo.com/projects/odoo-s19-4/"
+"repair/es/>\n"
+"Language: es\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: es\n"
-"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"Plural-Forms: nplurals=3; plural=(n == 1) ? 0 : ((n != 0 && n % 1000000 == "
+"0) ? 1 : 2);\n"
+"X-Generator: Weblate 2026.8.1\n"
 
 #. module: repair
-#: model:mail.template,report_name:repair.mail_template_repair_quotation
-msgid "${(object.name or '').replace('/','_')}"
-msgstr "${(object.name or '').replace('/','_')}"
-
-#. module: repair
-#: model:mail.template,subject:repair.mail_template_repair_quotation
-msgid "${object.partner_id.name} Repair Orders (Ref ${object.name or 'n/a' })"
+#: model:ir.module.module,description:base.module_repair
+msgid ""
+"\n"
+"The aim is to have a complete module to manage all products repairs.\n"
+"====================================================================\n"
+"\n"
+"The following topics are covered by this module:\n"
+"------------------------------------------------------\n"
+"    * Add/remove products in the reparation\n"
+"    * Impact for stocks\n"
+"    * Warranty concept\n"
+"    * Repair quotation report\n"
+"    * Notes for the technician and for the final customer\n"
 msgstr ""
-"${object.partner_id.name} Pedidos de reparación (Ref ${object.name o \"n/d\""
-" })"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
+#. odoo-python
+#: code:addons/repair/models/stock_warehouse.py:0
+msgid "%(name)s Sequence repair"
+msgstr "Secuencia de reparación %(name)s"
+
+#. module: repair
+#: model:ir.actions.report,print_report_name:repair.action_report_repair_order
+msgid "('Repair Order - %s' % (object.name))"
+msgstr "('Orden de reparación - %s' % (object.name))"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "(<i>Recycle</i>)"
+msgstr "(<i>Reciclar</i>)"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
 msgid "(<i>Remove</i>)"
 msgstr "(<i>Eliminar</i>)"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "(update)"
-msgstr "(actualizar)"
-
-#. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__state
 msgid ""
-"* The 'Draft' status is used when a user is encoding a new and unconfirmed repair order.\n"
+"* The 'New' status is used when a user is encoding a new and unconfirmed "
+"repair order.\n"
 "* The 'Confirmed' status is used when a user confirms the repair order.\n"
-"* The 'Ready to Repair' status is used to start to repairing, user can start repairing only after repair order is confirmed.\n"
-"* The 'To be Invoiced' status is used to generate the invoice before or after repairing done.\n"
 "* The 'Done' status is set when repairing is completed.\n"
 "* The 'Cancelled' status is used when user cancel repair order."
 msgstr ""
-"* El estado \"Borrador\" se utiliza cuando un usuario ha introducido una orden de reparación nueva y no está confirmada.\n"
-"* El estado \"Confirmado\" se utiliza cuando un usuario ha confirmado la orden de reparación.\n"
-"* El estado \"Listo para reparar\" indica que se puede comenzar a reparar, es obligatorio que se haya confirmado previamente.\n"
-"* El estado 'Para ser facturado' se utiliza para generar la factura antes o después de la reparación.\n"
-"* El estado \"Hecho\" se establece cuando se completa la reparación.\n"
-"* El estado \"Cancelado\" indica que un usuario ha cancelado la orden."
 
 #. module: repair
-#: model:mail.template,body_html:repair.mail_template_repair_quotation
-msgid ""
-"<?xml version=\"1.0\"?>\n"
-"<data><p>Dear ${object.partner_id.name}</p>\n"
-"                <p>\n"
-"                Here is your repair order ${doc_name} <strong>${object.name}</strong>\n"
-"                % if object.origin:\n"
-"                (with reference: ${object.origin} )\n"
-"                % endif\n"
-"                % if object.invoice_method != 'none':\n"
-"                amounting in <strong>${format_amount(object.amount_total, object.pricelist_id.currency_id)}.</strong>\n"
-"                % endif\n"
-"                </p>\n"
-"                <p>You can reply to this email if you have any questions.</p>\n"
-"                <p>Thank you,</p>\n"
-"            </data>"
-msgstr ""
-"<?xml version=\"1.0\"?>\n"
-"<data>Estimado(a) ${object.partner_id.name}</p>\n"
-"                <p>\n"
-"                Ésta es su orden de reparación ${doc_name} <strong>${object.name}</strong>\n"
-"                % if object.origin:\n"
-"                (con referencia: ${object.origin} )\n"
-"                % endif\n"
-"                % if object.invoice_method != 'none':\n"
-"                por un total de <strong>${format_amount(object.amount_total, object.pricelist_id.currency_id)}.</strong>\n"
-"                % endif\n"
-"                </p>\n"
-"                <p>Puede responder a este correo electrónico si tiene alguna duda.</p>\n"
-"                <p>Gracias,</p>\n"
-"            </data>"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
 msgid "<i>(Add)</i>"
 msgstr "<i>(Añadir)</i>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Lot/Serial Number:</strong>"
-msgstr "<strong>Lote/número de serie:</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "<span class=\"col-6\">Confirmed</span>"
+msgstr "<span class=\"col-6\">Confirmada</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Operations</strong>"
-msgstr "<strong>Operaciones</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "<span class=\"col-6\">Late</span>"
+msgstr "<span class=\"col-6\">Retrasado</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Parts</strong>"
-msgstr "<strong>Piezas</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.stock_production_lot_view_form
+msgid "<span class=\"o_stat_text\">Done:</span>"
+msgstr "<span class=\"o_stat_text\">Hecho:</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Printing Date:</strong>"
-msgstr "<strong>Fecha de impresión:</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.stock_production_lot_view_form
+msgid "<span class=\"o_stat_text\">Repair Parts:</span>"
+msgstr "<span class=\"o_stat_text\">Piezas de reparación:</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Product to Repair:</strong>"
-msgstr "<strong>Producto a reparar:</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "<span class=\"o_stat_text\">Sale Order</span>"
+msgstr "<span class=\"o_stat_text\">Pedido de venta</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Shipping address :</strong>"
-msgstr "<strong>Dirección de envío :</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.stock_production_lot_view_form
+msgid "<span class=\"o_stat_text\">To Do:</span>"
+msgstr "<span class=\"o_stat_text\">Pendiente:</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Total Without Taxes</strong>"
-msgstr "<strong>Total Sin Impuestos</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "<span>Orders</span>"
+msgstr "<span>Órdenes</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Total</strong>"
-msgstr "<strong>Total</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "<span>Repair Order #</span>"
+msgstr "<span>N.° de orden de reparación</span>"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "<strong>Warranty:</strong>"
-msgstr "<strong>Garantía:</strong>"
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "<strong>Customer:</strong>"
+msgstr "<strong>Cliente:</strong>"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "<strong>Lot/Serial:</strong>"
+msgstr "<strong>Lote/Serie:</strong>"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "<strong>Product:</strong>"
+msgstr "<strong>Producto:</strong>"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "<strong>Responsible:</strong>"
+msgstr "<strong>Responsable</strong>"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "<strong>Status:</strong>"
+msgstr "<strong>Estado:</strong>"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_needaction
@@ -177,200 +154,373 @@ msgid "Activities"
 msgstr "Actividades"
 
 #. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__activity_exception_decoration
+msgid "Activity Exception Decoration"
+msgstr "Decoración de Actividad de Excepción"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__activity_plans_ids
+msgid "Activity Plans"
+msgstr ""
+
+#. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__activity_state
 msgid "Activity State"
 msgstr "Estado de la actividad"
 
 #. module: repair
-#: selection:repair.line,type:0
+#: model:ir.model.fields,field_description:repair.field_repair_order__activity_type_icon
+msgid "Activity Type Icon"
+msgstr "Icono de tipo de actividad"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.repair_order_view_activity
+msgid "Activity view"
+msgstr "Vista de actividad"
+
+#. module: repair
+#: model:ir.model.fields.selection,name:repair.selection__stock_move__repair_line_type__add
 msgid "Add"
 msgstr "Añadir"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Add internal notes..."
-msgstr "Añadir notas internas..."
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Add a line"
+msgstr "Añadir una línea"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Add quotation notes..."
-msgstr "Añadir notas de presupuesto..."
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Add internal notes."
+msgstr "Añada notas internas."
 
 #. module: repair
-#: selection:repair.order,invoice_method:0
-msgid "After Repair"
-msgstr "Después de la reparación"
+#: model:ir.model.fields,field_description:repair.field_repair_order__location_dest_id
+msgid "Added Parts Destination Location"
+msgstr "Ubicación de destino de las piezas añadidas"
 
 #. module: repair
-#: selection:repair.order,invoice_method:0
-msgid "Before Repair"
-msgstr "Antes de la reparación"
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__search_date_category__after
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "After"
+msgstr "Después de"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_cancel_repair
-#: model:ir.ui.view,arch_db:repair.view_make_invoice
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "All"
+msgstr "Todos"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__is_parts_available
+msgid "All Parts are available"
+msgstr "Todas las piezas están disponibles"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__allowed_lot_ids
+msgid "Allowed Lot"
+msgstr "Lote permitido"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__allowed_uom_ids
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__allowed_uom_ids
+msgid "Allowed Uom"
+msgstr "UdM permitida"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__reserve_visible
+msgid "Allowed to Reserve Production"
+msgstr "Permitido reservar producción"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__unreserve_visible
+msgid "Allowed to Unreserve Production"
+msgstr "Permitido anular reserva de producción"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__is_parts_late
+msgid "Any Part is late"
+msgstr "Cualquier pieza está tarde"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/product.py:0
+msgid ""
+"As other units of measure (ex : %(problem_uom)s) than %(uom)s have already "
+"been used for this product, the change of unit of measure can not be done.If "
+"you want to change it, please archive the product and create a new one."
+msgstr ""
+"Como ya se han utilizado otras unidades de medida (por ejemplo, %"
+"(problem_uom)s) distintas de %(uom)s para este producto, no se puede cambiar "
+"la unidad de medida. Si deseas cambiarla, archiva el producto y crea uno "
+"nuevo."
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__message_attachment_count
+msgid "Attachment Count"
+msgstr "Número de archivos adjuntos"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__parts_availability_state__available
+msgid "Available"
+msgstr "Disponible"
+
+#. module: repair
+#. odoo-javascript
+#: code:addons/repair/static/src/components/product_catalog/kanban_controller.js:0
+msgid "Back to Repair"
+msgstr "Volver a las reparaciones"
+
+#. module: repair
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__search_date_category__before
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Before"
+msgstr "Antes"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.product_view_search_catalog
+msgid "BoM Components"
+msgstr "Componentes de LdM"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__can_create_extra_invoice
+msgid "Can Create Extra Invoice"
+msgstr ""
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__can_create_sale_or_invoice
+msgid "Can Create Sale Or Invoice"
+msgstr ""
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/stock_warehouse.py:0
+msgid "Can't find any production location."
+msgstr "No se puede encontrar ninguna ubicación de producción."
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Cancel"
-msgstr "Cancelar"
+msgstr ""
 
 #. module: repair
-#: model:ir.model,name:repair.model_repair_cancel
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Cancel Repair"
-msgstr "Cancelar reparación"
-
-#. module: repair
-#: model:ir.actions.act_window,name:repair.action_cancel_repair
-#: model:ir.ui.view,arch_db:repair.view_cancel_repair
-msgid "Cancel Repair Order"
-msgstr "Cancelar orden de reparación"
-
-#. module: repair
-#: selection:repair.line,state:0 selection:repair.order,state:0
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__state__cancel
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Cancelled"
 msgstr "Cancelado"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:244
-#, python-format
-msgid "Cannot cancel completed repairs."
-msgstr "No se pueden cancelar las reparaciones finalizadas."
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Catalog"
+msgstr "Catálogo"
 
 #. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__partner_id
-msgid "Choose partner for whom the order will be invoiced and delivered."
-msgstr "Elija una empresa para la que el pedido será facturado y enviado."
+msgid ""
+"Choose partner for whom the order will be invoiced and delivered. You can "
+"find a partner by its Name, TIN, Email or Internal Reference."
+msgstr ""
+"Elija el contacto al que se facturará y entregará la orden. Puede encontrar "
+"un contacto por su nombre, número de identificación fiscal, correo "
+"electrónico o referencia interna."
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_tags__color
+msgid "Color Index"
+msgstr "Índice de Colores"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__company_id
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__company_id
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Company"
 msgstr "Compañía"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model_terms:ir.ui.view,arch_db:repair.repair_view_picking_type_form
+msgid "Component Destination Location"
+msgstr "Ubicación de destino del componente"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__location_id
+#: model_terms:ir.ui.view,arch_db:repair.repair_view_picking_type_form
+msgid "Component Source Location"
+msgstr "Ubicación de origen del componente"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__parts_availability
+msgid "Component Status"
+msgstr "Estado del componente"
+
+#. module: repair
+#: model:ir.ui.menu,name:repair.repair_menu_config
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "Configuration"
+msgstr "Configuración"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_consumption_warning_form
+msgid "Confirm"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Confirm Repair"
 msgstr "Confirmar reparación"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-#: selection:repair.line,state:0 selection:repair.order,state:0
+#. odoo-python
+#: code:addons/repair/models/stock_picking.py:0
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__state__confirmed
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Confirmed"
 msgstr "Confirmado"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:604
-#: code:addons/repair/models/repair.py:662
-#, python-format
-msgid ""
-"Couldn't find a pricelist line matching this product and quantity.\n"
-"You have to change either the product, the quantity or the pricelist."
-msgstr ""
-"No se ha encontrado una línea de tarifa que concuerde con este producto y cantidad.\n"
-"Debe cambiar el producto, la cantidad o la tarifa."
-
-#. module: repair
-#: model:ir.actions.act_window,name:repair.act_repair_invoice
-#: model:ir.ui.view,arch_db:repair.view_make_invoice
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Create Invoice"
-msgstr "Crear Factura"
-
-#. module: repair
-#: model:ir.actions.act_window,help:repair.action_repair_order_tree
-msgid "Create a new reparation order"
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__product_consumed_qty_uom
+msgid "Consumed"
 msgstr ""
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_make_invoice
-msgid "Create invoices"
-msgstr "Crear facturas"
+#: model:ir.actions.act_window,name:repair.action_repair_consumption_warning
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_consumption_warning_form
+msgid "Consumption Warning"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel__create_uid
-#: model:ir.model.fields,field_description:repair.field_repair_fee__create_uid
-#: model:ir.model.fields,field_description:repair.field_repair_line__create_uid
+#: model:ir.model,name:repair.model_res_partner
+msgid "Contact"
+msgstr ""
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/stock_picking.py:0
+#: model:ir.actions.server,name:repair.action_create_repair_order
+msgid "Create Repair"
+msgstr "Crear reparación"
+
+#. module: repair
+#: model:ir.model,website_form_label:repair.model_res_partner
+msgid "Create a Customer"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.actions.act_window,help:repair.action_repair_order_tag
+msgid "Create a new tag"
+msgstr "Crear una nueva etiqueta"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_product_product__service_tracking
+#: model:ir.model.fields,field_description:repair.field_product_template__service_tracking
+msgid "Create on Order"
+msgstr "Crear en el pedido"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__create_uid
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__create_uid
 #: model:ir.model.fields,field_description:repair.field_repair_order__create_uid
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__create_uid
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__create_uid
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__create_uid
+#: model:ir.model.fields,field_description:repair.field_repair_tags__create_uid
 msgid "Created by"
-msgstr "Creada por"
+msgstr "Creado por"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel__create_date
-#: model:ir.model.fields,field_description:repair.field_repair_fee__create_date
-#: model:ir.model.fields,field_description:repair.field_repair_line__create_date
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__create_date
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__create_date
 #: model:ir.model.fields,field_description:repair.field_repair_order__create_date
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__create_date
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__create_date
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__create_date
+#: model:ir.model.fields,field_description:repair.field_repair_tags__create_date
 msgid "Created on"
-msgstr "Creada el"
+msgstr "Creado el"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Creates a new serial/lot number"
+msgstr "Crea un nuevo número de serie/lote"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__partner_id
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Customer"
 msgstr "Cliente"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__default_address_id
-msgid "Default Address"
-msgstr "Dirección por defecto"
+#: model:ir.model.fields,field_description:repair.field_repair_order__search_date_category
+msgid "Date Category"
+msgstr "Categoría de la fecha"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__address_id
-msgid "Delivery Address"
-msgstr "Dirección de entrega"
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Demand"
+msgstr "Demanda"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__name
-#: model:ir.model.fields,field_description:repair.field_repair_line__name
-#: model:ir.ui.view,arch_db:repair.report_repairorder
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__description
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Description"
 msgstr "Descripción"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_line__location_dest_id
-msgid "Dest. Location"
-msgstr "Ubicación destino"
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Details"
+msgstr "Detalles"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel__display_name
-#: model:ir.model.fields,field_description:repair.field_repair_fee__display_name
-#: model:ir.model.fields,field_description:repair.field_repair_line__display_name
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_consumption_warning_form
+msgid "Discard"
+msgstr ""
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_account_move__display_name
+#: model:ir.model.fields,field_description:repair.field_account_move_line__display_name
+#: model:ir.model.fields,field_description:repair.field_product_product__display_name
+#: model:ir.model.fields,field_description:repair.field_product_template__display_name
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__display_name
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__display_name
 #: model:ir.model.fields,field_description:repair.field_repair_order__display_name
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__display_name
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__display_name
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__display_name
+#: model:ir.model.fields,field_description:repair.field_repair_tags__display_name
+#: model:ir.model.fields,field_description:repair.field_res_partner__display_name
+#: model:ir.model.fields,field_description:repair.field_sale_order__display_name
+#: model:ir.model.fields,field_description:repair.field_sale_order_line__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_forecasted_product_product__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_lot__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_move__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_move_line__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_picking__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_traceability_report__display_name
+#: model:ir.model.fields,field_description:repair.field_stock_warehouse__display_name
 msgid "Display Name"
-msgstr "Nombre a mostrar"
+msgstr "Nombre para mostrar"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_make_invoice
-msgid "Do you really want to create the invoice(s)?"
-msgstr "¿Desea crear la(s) factura(s)?"
-
-#. module: repair
-#: selection:repair.line,state:0
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__state__done
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Done"
-msgstr "Hecho"
+msgstr ""
 
 #. module: repair
-#: selection:repair.line,state:0
-msgid "Draft"
-msgstr "Borrador"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "End Repair"
 msgstr "Finalizar reparación"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Extra Info"
-msgstr "Información extra"
+#: model:ir.model.fields,help:repair.field_repair_order__tracking
+msgid "Ensure the traceability of a storable product in your warehouse."
+msgstr "Asegure la trazabilidad de un producto almacenable en su almacén."
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Fees"
-msgstr "Cargos"
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "Exp %s"
+msgstr "%s previsto"
+
+#. module: repair
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__parts_availability_state__expected
+msgid "Expected"
+msgstr "Previsto"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_follower_ids
@@ -378,75 +528,100 @@ msgid "Followers"
 msgstr "Seguidores"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__message_channel_ids
-msgid "Followers (Channels)"
-msgstr "Seguidores (Canales)"
-
-#. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_partner_ids
 msgid "Followers (Partners)"
-msgstr "Seguidores (Empresas)"
+msgstr "Seguidores (Contactos)"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Future Activities"
-msgstr "Actividades Futuras"
+msgstr "Actividades futuras"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Group By"
-msgstr "Agrupar Por"
+#: model:ir.model.fields,field_description:repair.field_repair_order__has_message
+msgid "Has Message"
+msgstr "Tiene un mensaje"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__group
-msgid "Group by partner invoice address"
-msgstr "Agrupar por dirección de facturación"
+#: model:ir.model.fields,field_description:repair.field_repair_order__has_uncomplete_moves
+msgid "Has Uncomplete Moves"
+msgstr "Tiene movimientos incompletos"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "History"
-msgstr "Historial"
-
-#. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel__id
-#: model:ir.model.fields,field_description:repair.field_repair_fee__id
-#: model:ir.model.fields,field_description:repair.field_repair_line__id
+#: model:ir.model.fields,field_description:repair.field_account_move__id
+#: model:ir.model.fields,field_description:repair.field_account_move_line__id
+#: model:ir.model.fields,field_description:repair.field_product_product__id
+#: model:ir.model.fields,field_description:repair.field_product_template__id
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__id
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__id
 #: model:ir.model.fields,field_description:repair.field_repair_order__id
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__id
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__id
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__id
+#: model:ir.model.fields,field_description:repair.field_repair_tags__id
+#: model:ir.model.fields,field_description:repair.field_res_partner__id
+#: model:ir.model.fields,field_description:repair.field_sale_order__id
+#: model:ir.model.fields,field_description:repair.field_sale_order_line__id
+#: model:ir.model.fields,field_description:repair.field_stock_forecasted_product_product__id
+#: model:ir.model.fields,field_description:repair.field_stock_lot__id
+#: model:ir.model.fields,field_description:repair.field_stock_move__id
+#: model:ir.model.fields,field_description:repair.field_stock_move_line__id
+#: model:ir.model.fields,field_description:repair.field_stock_picking__id
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__id
+#: model:ir.model.fields,field_description:repair.field_stock_traceability_report__id
+#: model:ir.model.fields,field_description:repair.field_stock_warehouse__id
 msgid "ID"
-msgstr "ID (identificación)"
+msgstr "ID"
 
 #. module: repair
-#: model:ir.model.fields,help:repair.field_repair_order__message_unread
-msgid "If checked new messages require your attention."
-msgstr "Si está marcado, hay nuevos mensajes que requieren su atención"
+#: model:ir.model.fields,field_description:repair.field_repair_order__activity_exception_icon
+msgid "Icon"
+msgstr "Icono"
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_repair_order__activity_exception_icon
+msgid "Icon to indicate an exception activity."
+msgstr "Icono para indicar una actividad de excepción."
 
 #. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__message_needaction
 msgid "If checked, new messages require your attention."
-msgstr "Si está marcado hay nuevos mensajes que requieren su atención."
+msgstr "Si está marcada, hay nuevos mensajes que requieren su atención."
 
 #. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__message_has_error
+#: model:ir.model.fields,help:repair.field_repair_order__message_has_sms_error
 msgid "If checked, some messages have a delivery error."
-msgstr ""
+msgstr "Si está marcada, algunos mensajes tienen error de envío."
 
 #. module: repair
-#: model:ir.actions.act_window,help:repair.action_repair_order_tree
+#: model:ir.model.fields,help:repair.field_repair_order__under_warranty
+msgid ""
+"If ticked, the sales price will be set to 0 for all products transferred "
+"from the repair order."
+msgstr ""
+"Si está marcado, el precio de venta será 0 para todos los productos que se "
+"transfieran desde la orden de reparación."
+
+#. module: repair
+#: model_terms:ir.actions.act_window,help:repair.action_repair_order_tree
 msgid ""
 "In a repair order, you can detail the components you remove,\n"
-"                add or replace and record the time you spent on the different\n"
+"                add or replace and record the time you spent on the "
+"different\n"
 "                operations."
 msgstr ""
 "En una orden de reparación, se puede detallar los componentes que eliminar,\n"
-"añadir o sustituir y registrar el tiempo que pasó en las diferentes operaciones."
+"añadir o sustituir y registrar el tiempo que pasó en las diferentes "
+"operaciones."
 
 #. module: repair
-#: code:addons/repair/models/repair.py:210
-#, python-format
-msgid "Insufficient Quantity"
-msgstr "Cantidad insuficiente"
+#: model:ir.model.fields,field_description:repair.field_stock_lot__in_repair_count
+msgid "In repair count"
+msgstr "Número de reparaciones actuales"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.product_view_search_catalog
+msgid "In the Repair Order"
+msgstr "En la orden de reparación"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__internal_notes
@@ -454,60 +629,35 @@ msgid "Internal Notes"
 msgstr "Notas internas"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_line__move_id
+#: model:ir.model.fields,field_description:repair.field_repair_order__move_id
 msgid "Inventory Move"
 msgstr "Movimiento de inventario"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__invoice_id
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model:ir.actions.act_window,name:repair.action_repair_move_lines
+msgid "Inventory Moves"
+msgstr "Movimientos de inventario"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__invoice_ids
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Invoice"
-msgstr "Factura"
+msgstr ""
 
 #. module: repair
-#: selection:repair.order,state:0
-msgid "Invoice Exception"
-msgstr "Excepción de factura"
+#: model:ir.model.fields,field_description:repair.field_repair_order__invoice_count
+msgid "Invoice Count"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__invoice_line_id
-#: model:ir.model.fields,field_description:repair.field_repair_line__invoice_line_id
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__invoice_line_ids
 msgid "Invoice Line"
-msgstr "Linea de la Factura"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__invoice_method
-msgid "Invoice Method"
-msgstr "Método de facturación"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Invoice address:"
-msgstr "Dirección de facturación:"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Invoice and shipping address:"
-msgstr "Dirección de facturación y de envío:"
-
-#. module: repair
-#: code:addons/repair/models/repair.py:384
-#, python-format
-msgid "Invoice created"
-msgstr "Factura creada"
-
-#. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__invoiced
-#: model:ir.model.fields,field_description:repair.field_repair_line__invoiced
-#: model:ir.model.fields,field_description:repair.field_repair_order__invoiced
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Invoiced"
-msgstr "Facturado"
-
-#. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__partner_invoice_id
-msgid "Invoicing Address"
-msgstr "Dirección de facturación"
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Invoices"
+msgstr ""
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_is_follower
@@ -515,61 +665,94 @@ msgid "Is Follower"
 msgstr "Es un seguidor"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel____last_update
-#: model:ir.model.fields,field_description:repair.field_repair_fee____last_update
-#: model:ir.model.fields,field_description:repair.field_repair_line____last_update
-#: model:ir.model.fields,field_description:repair.field_repair_order____last_update
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice____last_update
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair____last_update
-msgid "Last Modified on"
-msgstr "Última modificación el"
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "Jane Smith"
+msgstr "Jane Smith"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel__write_uid
-#: model:ir.model.fields,field_description:repair.field_repair_fee__write_uid
-#: model:ir.model.fields,field_description:repair.field_repair_line__write_uid
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "John Doe"
+msgstr "John Doe"
+
+#. module: repair
+#: model:ir.model,name:repair.model_account_move
+msgid "Journal Entry"
+msgstr ""
+
+#. module: repair
+#: model:ir.model,name:repair.model_account_move_line
+msgid "Journal Item"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "L12345"
+msgstr "L12345"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "Laptop"
+msgstr "Portátil"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__write_uid
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__write_uid
 #: model:ir.model.fields,field_description:repair.field_repair_order__write_uid
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__write_uid
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__write_uid
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__write_uid
+#: model:ir.model.fields,field_description:repair.field_repair_tags__write_uid
 msgid "Last Updated by"
 msgstr "Última actualización por"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_cancel__write_date
-#: model:ir.model.fields,field_description:repair.field_repair_fee__write_date
-#: model:ir.model.fields,field_description:repair.field_repair_line__write_date
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__write_date
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__write_date
 #: model:ir.model.fields,field_description:repair.field_repair_order__write_date
-#: model:ir.model.fields,field_description:repair.field_repair_order_make_invoice__write_date
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__write_date
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__write_date
+#: model:ir.model.fields,field_description:repair.field_repair_tags__write_date
 msgid "Last Updated on"
 msgstr "Última actualización el"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__parts_availability_state__late
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Late"
+msgstr "Retrasado"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Late Activities"
-msgstr "Actividades tardías"
+msgstr "Actividades retrasadas"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__location_id
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__location_id
-msgid "Location"
-msgstr "Ubicación"
+#: model:ir.model.fields,help:repair.field_repair_order__parts_availability
+msgid ""
+"Latest parts availability status for this RO. If green, then the RO's "
+"readiness status is ready."
+msgstr ""
+"El estado de disponibilidad de las piezas más recientes para esta orden de "
+"reparación. Si está verde, el estado de la orden de reparación está "
+"\"lista\"."
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_line__lot_id
+#: model:ir.model,name:repair.model_repair_consumption_warning_line
+msgid "Line of issue consumption"
+msgstr ""
+
+#. module: repair
+#: model:ir.model,name:repair.model_stock_lot
 #: model:ir.model.fields,field_description:repair.field_repair_order__lot_id
 msgid "Lot/Serial"
-msgstr "Lote/Número de serie"
+msgstr "Lote/serie"
 
 #. module: repair
-#: model:ir.model,name:repair.model_repair_order_make_invoice
-msgid "Make Invoice"
-msgstr "Crear factura"
+#: model:ir.model.fields,help:repair.field_repair_order__activity_type_icon
+msgid "Material Symbols icon e.g. checklist"
+msgstr ""
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_has_error
 msgid "Message Delivery error"
-msgstr ""
+msgstr "Error de envío de mensaje"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_ids
@@ -577,24 +760,38 @@ msgid "Messages"
 msgstr "Mensajes"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__move_id
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__move_id
 msgid "Move"
-msgstr "Asiento"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,help:repair.field_repair_order__move_id
-msgid "Move created by the repair order"
-msgstr "Movimiento creado por la orden de reparación"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "My Activities"
 msgstr "Mis actividades"
 
 #. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__my_activity_date_deadline
+msgid "My Activity Deadline"
+msgstr "Fecha límite de mi actividad"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__state__draft
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "New"
+msgstr "Nuevo"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__activity_calendar_event_id
+msgid "Next Activity Calendar Event"
+msgstr "Siguiente evento en el calendario de actividades."
+
+#. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__activity_date_deadline
 msgid "Next Activity Deadline"
-msgstr "Siguiente plazo de actividad"
+msgstr "Fecha límite de la siguiente actividad"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__activity_summary
@@ -604,50 +801,38 @@ msgstr "Resumen de la siguiente actividad"
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__activity_type_id
 msgid "Next Activity Type"
-msgstr "Siguiente tipo de actividad"
+msgstr "Tipo de la siguiente actividad"
 
 #. module: repair
-#: selection:repair.order,invoice_method:0
-msgid "No Invoice"
-msgstr "Sin factura"
+#. odoo-python
+#: code:addons/repair/models/stock_warehouse.py:0
+msgid "No location of type Inventory Loss found"
+msgstr "No se ha encontrado ninguna ubicación del tipo «Pérdida de inventario»"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:307
-#, python-format
-msgid "No account defined for partner \"%s\"."
-msgstr "No se ha definido una cuenta para la empresa \"%s\"."
+#: model_terms:ir.actions.act_window,help:repair.action_repair_order_tree
+msgid "No repair order found. Let's create one!"
+msgstr "No se encontraron órdenes de reparación. ¡Creemos una!"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:333
-#: code:addons/repair/models/repair.py:361
-#, python-format
-msgid "No account defined for product \"%s\"."
-msgstr "No se ha definido una cuenta para el producto \"%s\"."
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__priority__0
+msgid "Normal"
+msgstr "Normal"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:595
-#: code:addons/repair/models/repair.py:653
-#, python-format
-msgid "No pricelist found."
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "Not Available"
+msgstr "No disponible"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid ""
+"Note that the warehouses of the return and repair locations don't match!"
 msgstr ""
-
-#. module: repair
-#: code:addons/repair/models/repair.py:354
-#, python-format
-msgid "No product defined on fees."
-msgstr ""
-
-#. module: repair
-#: code:addons/repair/models/repair.py:602
-#: code:addons/repair/models/repair.py:660
-#, python-format
-msgid "No valid pricelist line found."
-msgstr ""
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Notes"
-msgstr "Notas"
+"¡Tome en cuenta que los almacenes de las ubicaciones de devolución y "
+"reparación no coinciden!"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_needaction_counter
@@ -655,85 +840,141 @@ msgid "Number of Actions"
 msgstr "Número de acciones"
 
 #. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__count_repair_late
+msgid "Number of Late Repair Orders"
+msgstr "Número de órdenes de reparación atrasadas"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__count_repair_confirmed
+msgid "Number of Repair Orders Confirmed"
+msgstr "Número de órdenes de reparación confirmadas"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__count_repair_ready
+msgid "Number of Repair Orders to Process"
+msgstr "Número de órdenes de reparación a procesar"
+
+#. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__message_has_error_counter
-msgid "Number of error"
-msgstr ""
+msgid "Number of errors"
+msgstr "Número de errores"
 
 #. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__message_needaction_counter
-msgid "Number of messages which requires an action"
+msgid "Number of messages requiring action"
 msgstr "Número de mensajes que requieren una acción"
 
 #. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__message_has_error_counter
 msgid "Number of messages with delivery error"
-msgstr ""
+msgstr "Número de mensajes con error de envío"
 
 #. module: repair
-#: model:ir.model.fields,help:repair.field_repair_order__message_unread_counter
-msgid "Number of unread messages"
-msgstr "Número de mensajes no leidos"
+#: model:ir.model.fields,field_description:repair.field_stock_picking__nbr_repairs
+msgid "Number of repairs linked to this picking"
+msgstr "Número de reparaciones vinculadas a este albarán"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:232
-#, python-format
-msgid "Only draft repairs can be confirmed."
-msgstr ""
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "Open"
+msgstr "Abierto"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__fees_lines
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model:ir.model.fields,field_description:repair.field_repair_order__picking_type_id
+msgid "Operation Type"
+msgstr "Tipo de operación"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Operations"
 msgstr "Operaciones"
 
 #. module: repair
-#: selection:repair.order,activity_state:0
-msgid "Overdue"
-msgstr "Vencidas"
+#: model:ir.ui.menu,name:repair.repair_order_menu
+msgid "Orders"
+msgstr "Órdenes"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Partner"
-msgstr "Empresa"
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__repair_consumption_warning_id
+msgid "Parent Wizard"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__operations
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model:ir.model.fields,field_description:repair.field_repair_order__move_ids
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Parts"
 msgstr "Piezas"
 
 #. module: repair
-#: selection:repair.order,activity_state:0
-msgid "Planned"
-msgstr "Planificado"
+#: model:ir.model.fields,field_description:repair.field_repair_order__parts_availability_state
+msgid "Parts Availability State"
+msgstr "Estado de disponibilidad de las piezas"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Price"
-msgstr "Precio"
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "Pending"
+msgstr "Pendiente"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__pricelist_id
-msgid "Pricelist"
-msgstr "Lista de precios"
+#: model:ir.model.fields,field_description:repair.field_repair_order__picking_product_ids
+msgid "Picking Product"
+msgstr "Producto del albarán"
 
 #. module: repair
-#: model:ir.model.fields,help:repair.field_repair_order__pricelist_id
-msgid "Pricelist of the selected partner."
-msgstr "Tarifa de la empresa seleccionada"
+#: model:ir.model,name:repair.model_stock_picking_type
+msgid "Picking Type"
+msgstr "Tipo de albarán"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Print Quotation"
-msgstr "Imprimir presupuesto"
+#: model:ir.model.fields,field_description:repair.field_repair_order__picking_type_visible
+msgid "Picking Type Visible"
+msgstr "Tipo de preparación de pedidos visible"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__product_id
-#: model:ir.model.fields,field_description:repair.field_repair_line__product_id
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__product_id
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "Please set the first Serial Number or a default sequence"
+msgstr "Establezca el primer número de serie o una secuencia por defecto"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__priority
+msgid "Priority"
+msgstr "Prioridad"
+
+#. module: repair
+#: model:ir.model,name:repair.model_product_template
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__product_id
+#: model:ir.model.fields,field_description:repair.field_repair_order__picking_product_id
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Product"
 msgstr "Producto"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "Product A"
+msgstr "Producto A"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "Product B"
+msgstr "Producto B"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__product_location_dest_id
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__default_product_location_dest_id
+msgid "Product Destination Location"
+msgstr "Ubicación de destino del producto"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Product Moves"
+msgstr "Movimientos de producto"
+
+#. module: repair
+#: model:ir.model,name:repair.model_stock_move_line
+msgid "Product Moves (Stock Move Line)"
+msgstr "Movimientos de producto (línea de movimiento de stock)"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__product_qty
@@ -741,11 +982,20 @@ msgid "Product Quantity"
 msgstr "Cantidad de producto"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__product_uom
-#: model:ir.model.fields,field_description:repair.field_repair_line__product_uom
-#: model:ir.model.fields,field_description:repair.field_repair_order__product_uom
-msgid "Product Unit of Measure"
-msgstr "Unidad de medida del producto"
+#: model:ir.model.fields,field_description:repair.field_repair_order__product_location_src_id
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__default_product_location_src_id
+msgid "Product Source Location"
+msgstr "Ubicación de origen del producto"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__tracking
+msgid "Product Tracking"
+msgstr "Rastreo de productos"
+
+#. module: repair
+#: model:ir.model,name:repair.model_product_product
+msgid "Product Variant"
+msgstr "Variante de producto"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__product_id
@@ -753,102 +1003,171 @@ msgid "Product to Repair"
 msgstr "Producto a reparar"
 
 #. module: repair
+#: model:ir.ui.menu,name:repair.repair_menu_product_template
+msgid "Products"
+msgstr "Productos"
+
+#. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__lot_id
 msgid "Products repaired are all belonging to this lot"
 msgstr "Los productos reparados pertenecen todos a este lote"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__quant_ids
-msgid "Quant"
-msgstr "Quant"
+#: model:ir.model.fields,field_description:repair.field_repair_order__repair_properties
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Properties"
+msgstr "Propiedades"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__product_uom_qty
-#: model:ir.model.fields,field_description:repair.field_repair_line__product_uom_qty
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__quantity
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_tree
 msgid "Quantity"
 msgstr "Cantidad"
 
 #. module: repair
-#: selection:repair.order,state:0
-msgid "Quotation"
-msgstr "Presupuesto"
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Quote"
+msgstr ""
 
 #. module: repair
-#: model:ir.actions.report,name:repair.action_report_repair_order
-msgid "Quotation / Order"
-msgstr "Presupuesto / Pedido"
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "RO123456"
+msgstr "RO123456"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__quotation_notes
-msgid "Quotation Notes"
-msgstr "Notas del presupuesto"
+#: model:ir.model.fields,field_description:repair.field_repair_order__rating_ids
+msgid "Ratings"
+msgstr "Calificaciones"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Quotations"
-msgstr "Presupuestos"
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Ready"
+msgstr "Listo"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Ready To Repair"
-msgstr "Preparado para reparar"
+#: model:ir.model.fields.selection,name:repair.selection__stock_move__repair_line_type__recycle
+msgid "Recycle"
+msgstr "Reciclar"
 
 #. module: repair
-#: selection:repair.order,state:0
-msgid "Ready to Repair"
-msgstr "Listo para reparar"
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__default_recycle_location_dest_id
+msgid "Recycle Destination Location"
+msgstr "Ubicación de destino de reciclaje"
 
 #. module: repair
-#: selection:repair.line,type:0
+#: model:ir.model.fields,field_description:repair.field_repair_order__recycle_location_id
+msgid "Recycled Parts Destination Location"
+msgstr "Ubicación de destino de las piezas recicladas"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__reference_ids
+msgid "References"
+msgstr "Referencias"
+
+#. module: repair
+#: model:ir.model.fields.selection,name:repair.selection__stock_move__repair_line_type__remove
 msgid "Remove"
 msgstr "Eliminar"
 
 #. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__default_remove_location_dest_id
+msgid "Remove Destination Location"
+msgstr "Ubicación de destino de eliminación"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__parts_location_id
+msgid "Removed Parts Destination Location"
+msgstr "Ubicación de destino de las piezas eliminadas"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__repair_id
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__repair_id
 #: model:ir.model.fields,field_description:repair.field_stock_move__repair_id
-#: model:ir.model.fields,field_description:repair.field_stock_warn_insufficient_qty_repair__repair_id
+#: model:ir.model.fields,field_description:repair.field_stock_picking__repair_ids
+#: model:ir.model.fields.selection,name:repair.selection__stock_picking_type__code__repair_operation
 msgid "Repair"
-msgstr "Reparar"
+msgstr "Reparación"
 
 #. module: repair
-#: model:ir.model,name:repair.model_repair_fee
-msgid "Repair Fees Line"
-msgstr "Línea de tarifas de reparación"
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning__repair_consumption_warning_line_ids
+msgid "Repair Consumption Warning Line"
+msgstr ""
 
 #. module: repair
-#: model:ir.model,name:repair.model_repair_line
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Repair Line"
-msgstr "Línea de reparación"
+#: model:ir.model.fields,field_description:repair.field_stock_warehouse__repair_mto_pull_id
+msgid "Repair MTO Rule"
+msgstr "Regla de reparación sobre pedido"
 
 #. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Repair Notes"
+msgstr "Notas de reparación"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_warehouse__repair_type_id
+msgid "Repair Operation Type"
+msgstr "Tipo de operación de reparación"
+
+#. module: repair
+#: model:ir.actions.report,name:repair.action_report_repair_order
 #: model:ir.model,name:repair.model_repair_order
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model:ir.model.fields,field_description:repair.field_account_bank_statement_line__repair_order_id
+#: model:ir.model.fields,field_description:repair.field_account_move__repair_order_id
+#: model:ir.model.fields,field_description:repair.field_account_move_line__repair_order_id
+#: model:ir.model.fields,field_description:repair.field_sale_order__repair_order_ids
+#: model:ir.model.fields.selection,name:repair.selection__product_template__service_tracking__repair
+#: model_terms:ir.ui.view,arch_db:repair.view_account_move_form_inherit_repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Repair Order"
 msgstr "Orden de reparación"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Repair Order #:"
-msgstr "Orden de reparación nº:"
+#: model:ir.model.fields,field_description:repair.field_res_partner__repair_order_count
+#: model:ir.model.fields,field_description:repair.field_res_users__repair_order_count
+msgid "Repair Order Count"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__repair_id
-#: model:ir.model.fields,field_description:repair.field_repair_line__repair_id
-msgid "Repair Order Reference"
-msgstr "Referencia de orden de reparación"
+#: model:ir.model.fields,field_description:repair.field_sale_order__repair_count
+msgid "Repair Order(s)"
+msgstr "Órdenes de reparación"
 
 #. module: repair
+#. odoo-python
+#: code:addons/repair/models/res_partner.py:0
+#: code:addons/repair/models/sale_order.py:0
+#: code:addons/repair/models/stock_picking.py:0
+#: model:ir.actions.act_window,name:repair.action_picking_repair
+#: model:ir.actions.act_window,name:repair.action_picking_repair_graph
+#: model:ir.actions.act_window,name:repair.action_repair_order_form
 #: model:ir.actions.act_window,name:repair.action_repair_order_tree
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model:ir.model.fields,field_description:repair.field_stock_lot__repair_line_ids
+#: model_terms:ir.ui.view,arch_db:repair.repair_view_picking_form
+#: model_terms:ir.ui.view,arch_db:repair.stock_production_lot_view_form
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_graph
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_pivot
 msgid "Repair Orders"
 msgstr "Órdenes de reparación"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Repair Quotation #:"
-msgstr "Presupuesto de reparación nº:"
+#: model:ir.actions.act_window,name:repair.action_repair_order_graph
+msgid "Repair Orders Analysis"
+msgstr "Análisis de las órdenes de reparación"
+
+#. module: repair
+#: model:ir.ui.menu,name:repair.repair_menu_tag
+msgid "Repair Orders Tags"
+msgstr "Etiquetas de órdenes de reparación"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__repair_properties_definition
+msgid "Repair Properties"
+msgstr "Propiedades de la reparación"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__name
@@ -856,53 +1175,93 @@ msgid "Repair Reference"
 msgstr "Referencia de reparación"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:196
-#, python-format
-msgid "Repair must be canceled in order to reset it to draft."
+#: model:ir.model.fields,field_description:repair.field_repair_order__repair_request
+msgid "Repair Request"
+msgstr "Solicitud de reparación"
+
+#. module: repair
+#: model:ir.model,name:repair.model_repair_service_line
+#: model:ir.model.fields,field_description:repair.field_account_move_line__repair_service_line_id
+#: model:ir.model.fields,field_description:repair.field_sale_order_line__repair_service_line_id
+msgid "Repair Service Line"
 msgstr ""
-"La reparación debe de estar cancelada para poder ser puesta en borrador."
 
 #. module: repair
-#: code:addons/repair/models/repair.py:403
-#, python-format
-msgid "Repair must be confirmed before starting reparation."
-msgstr "La reparación debe estar confirmada antes de comenzar la reparación."
+#: model:product.template,name:repair.product_service_order_repair_product_template
+msgid "Repair Services"
+msgstr "Servicios de reparación"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:431
-#, python-format
-msgid "Repair must be repaired in order to make the product moves."
+#: model:ir.model,name:repair.model_repair_tags
+msgid "Repair Tag"
 msgstr ""
-"La reparación debe ser terminada para generar los movimientos de productos"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:414
-#, python-format
-msgid "Repair must be under repair in order to end reparation."
-msgstr "La reparación debe estar bajo reparación para poder finalizarla."
+#: model:ir.module.module,summary:base.module_repair
+msgid "Repair damaged products"
+msgstr ""
 
 #. module: repair
-#: code:addons/repair/wizard/repair_cancel.py:20
-#, python-format
-msgid "Repair order is not invoiced."
-msgstr "La orden de reparación no está facturada."
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "Repair must be confirmed in order to end reparation."
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__repaired
-#: selection:repair.order,state:0
-msgid "Repaired"
-msgstr "Reparado"
+#. odoo-python
+#: code:addons/repair/models/stock_lot.py:0
+msgid "Repair orders of %s"
+msgstr "Órdenes de reparación de %s"
 
 #. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_lot__repair_part_count
+msgid "Repair part count"
+msgstr "Número de piezas de reparación"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_lot__repaired_count
+msgid "Repaired count"
+msgstr "Número de productos reparados"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/stock_warehouse.py:0
+#: model:ir.module.module,shortdesc:base.module_repair
 #: model:ir.ui.menu,name:repair.menu_repair_order
+#: model:ir.ui.menu,name:repair.repair_menu
+#: model:stock.picking.type,name:repair.picking_type_warehouse0_repair
+#: model_terms:ir.ui.view,arch_db:repair.view_partner_form
+#: model_terms:ir.ui.view,arch_db:repair.view_sale_order_form_inherit_repair
 msgid "Repairs"
 msgstr "Reparaciones"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-#: model:ir.ui.view,arch_db:repair.view_repair_order_tree
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_tree
 msgid "Repairs order"
 msgstr "Órdenes de reparación"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/stock_warehouse.py:0
+msgid "Replenish on Order (MTO)"
+msgstr "Reposición bajo pedido (fabricación sobre pedido)"
+
+#. module: repair
+#: model:ir.ui.menu,name:repair.repair_menu_reporting
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "Reporting"
+msgstr "Informes"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Reserve"
+msgstr ""
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__user_id
+msgid "Responsible"
+msgstr "Responsable"
 
 #. module: repair
 #: model:ir.model.fields,field_description:repair.field_repair_order__activity_user_id
@@ -910,60 +1269,111 @@ msgid "Responsible User"
 msgstr "Usuario responsable"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Returned"
+msgstr "Devuelto"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__message_has_sms_error
+msgid "SMS Delivery error"
+msgstr "Error de envío del SMS"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__sale_line_id
+msgid "Sale Line"
+msgstr ""
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__sale_order_id
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Sale Order"
+msgstr "Pedido de venta"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__sale_order_line_id
+msgid "Sale Order Line"
+msgstr "Línea de pedido de venta"
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_repair_order__repair_request
+msgid "Sale Order Line Description."
+msgstr "Descripción de la línea de pedido de venta"
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_repair_order__sale_order_line_id
+msgid "Sale Order Line from which the Repair Order comes from."
+msgstr "Línea de pedido de venta de la cual proviene la orden de reparación."
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_repair_order__sale_order_id
+msgid "Sale Order from which the Repair Order comes from."
+msgstr "Pedido de venta del cual viene la orden de reparación."
+
+#. module: repair
+#: model:ir.model,name:repair.model_sale_order
+msgid "Sales Order"
+msgstr "Pedido de venta"
+
+#. module: repair
+#: model:ir.model,name:repair.model_sale_order_line
+msgid "Sales Order Line"
+msgstr "Línea de pedido de venta"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_order__schedule_date
+msgid "Scheduled Date"
+msgstr "Fecha programada"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Search Repair Orders"
 msgstr "Buscar órdenes de reparación"
 
 #. module: repair
-#: model:ir.model.fields,help:repair.field_repair_order__invoice_method
-msgid ""
-"Selecting 'Before Repair' or 'After Repair' will allow you to generate "
-"invoice before or after the repair is done respectively. 'No invoice' means "
-"you don't want to generate invoice for this repair order."
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__sequence
+msgid "Sequence"
 msgstr ""
-"Seleccionando 'Antes de reparar' o 'Después de reparar' permitirá generar "
-"las facturas antes o después de que se realice la reparación "
-"respectivamente. 'Sin factura' significa que no quiere generar factura para "
-"esta orden de reparación."
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Send Quotation"
-msgstr "Enviar presupuesto"
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "Serial number is required for product to repair : %s"
+msgstr "El número de serie es necesario para reparar el producto: %s"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:544
-#, python-format
-msgid "Serial number is required for operation line with product '%s'"
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__product_id
+msgid "Service"
 msgstr ""
-"Se requiere un nº de serie para la línea de operación con el producto '%s'"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
+#: model:ir.model.fields,field_description:repair.field_repair_order__repair_service_line_ids
+msgid "Service Lines"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "Services"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_consumption_warning_form
+msgid "Set Quantities & Validate"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
 msgid "Set to Draft"
 msgstr "Establecer a borrador"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Show all records which has next action date is before today"
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Show all records whose next activity date is past"
 msgstr ""
-"Mostrar todos los registros que tienen la próxima fecha de acción antes de "
-"hoy"
+"Mostrar todos los registros cuya próxima fecha de actividad haya pasado"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_line__location_id
-msgid "Source Location"
-msgstr "Ubicación de origen"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Start Repair"
-msgstr "Iniciar reparación"
-
-#. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_line__state
 #: model:ir.model.fields,field_description:repair.field_repair_order__state
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Status"
 msgstr "Estado"
 
@@ -976,209 +1386,319 @@ msgid ""
 "Planned: Future activities."
 msgstr ""
 "Estado basado en actividades\n"
-"Vencida: la fecha tope ya ha pasado\n"
-"Hoy: La fecha tope es hoy\n"
-"Planificada: futuras actividades."
+"Vencida: la fecha límite ya ha pasado\n"
+"Hoy: la fecha límite es hoy\n"
+"Planificada: actividades futuras."
 
 #. module: repair
 #: model:ir.model,name:repair.model_stock_move
 msgid "Stock Move"
-msgstr "Movimiento de Stock"
+msgstr "Movimiento de stock"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__price_subtotal
-#: model:ir.model.fields,field_description:repair.field_repair_line__price_subtotal
-msgid "Subtotal"
-msgstr "Subtotal"
+#: model:ir.model,name:repair.model_stock_forecasted_product_product
+msgid "Stock Replenishment Report"
+msgstr "Informe de reposición de stock"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Tax"
-msgstr "Impuesto"
+#: model:ir.model.fields,field_description:repair.field_repair_tags__name
+msgid "Tag Name"
+msgstr "Nombre de etiqueta"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__tax_id
-#: model:ir.model.fields,field_description:repair.field_repair_line__tax_id
-#: model:ir.model.fields,field_description:repair.field_repair_order__amount_tax
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Taxes"
-msgstr "Impuestos"
+#: model:ir.model.constraint,message:repair.constraint_repair_tags_name_uniq
+msgid "Tag name already exists!"
+msgstr "¡El nombre de la etiqueta ya existe!"
 
 #. module: repair
-#: sql_constraint:repair.order:0
-msgid "The name of the Repair Order must be unique!"
-msgstr "El nombre de la orden de reparación debe ser único"
+#: model:ir.actions.act_window,name:repair.action_repair_order_tag
+#: model:ir.model.fields,field_description:repair.field_repair_order__tag_ids
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_tag_search
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_tag_tree
+msgid "Tags"
+msgstr "Etiquetas"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:172
-#, python-format
+#: model:ir.model.fields,help:repair.field_repair_order__reserve_visible
+msgid "Technical field to check when we can reserve quantities"
+msgstr "Campo técnico a seleccionar cuándo podemos reservar cantidades"
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_repair_order__unreserve_visible
+msgid "Technical field to check when we can unreserve"
+msgstr "Campo técnico para verificar cuándo podemos anular la reserva"
+
+#. module: repair
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__search_date_category__day_2
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "The day after tomorrow"
+msgstr "Pasado mañana"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "This is a repair note."
+msgstr "Esta es una nota de reparación."
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_stock_picking_type__default_product_location_dest_id
 msgid ""
-"The product unit of measure you chose has a different category than the "
-"product unit of measure."
+"This is the default destination location for the product to be repaired in "
+"repair orders with this operation type."
 msgstr ""
+"Esta es la ubicación de destino por defecto para el producto a reparar en "
+"las órdenes de reparación con este tipo de operación."
 
 #. module: repair
-#: code:addons/repair/models/repair.py:246
-#, python-format
-msgid "The repair order is already invoiced."
-msgstr ""
-
-#. module: repair
-#: model:ir.actions.act_window,help:repair.action_repair_order_tree
+#: model:ir.model.fields,help:repair.field_stock_picking_type__default_recycle_location_dest_id
 msgid ""
-"The repair order uses the warranty date on the Serial Number in\n"
-"                order to know if whether the repair should be invoiced to the\n"
-"                customer or not."
+"This is the default recycle destination location when you create a repair "
+"order with this operation type."
 msgstr ""
-"La orden de reparación utiliza la fecha de garantía\n"
-"en el número de serie con el fin de saber si la\n"
-"reparación debe ser facturada al cliente o no."
+"Esta es la ubicación de destino por defecto para el reciclaje cuando cree "
+"una orden de reparación con este tipo de operación."
 
 #. module: repair
-#: model:ir.model.fields,help:repair.field_repair_line__state
+#: model:ir.model.fields,help:repair.field_stock_picking_type__default_remove_location_dest_id
 msgid ""
-"The status of a repair line is set automatically to the one of the linked "
-"repair order."
+"This is the default remove destination location when you create a repair "
+"order with this operation type."
 msgstr ""
-"El estado de una línea de reparación se establece automáticamente en el de "
-"la orden de reparación vinculada."
+"Esta es la ubicación de destino por defecto para eleminar cuando cree una "
+"orden de reparación con este tipo de operación."
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_stock_picking_type__default_product_location_src_id
+msgid ""
+"This is the default source location for the product to be repaired in repair "
+"orders with this operation type."
+msgstr ""
+"Esta es la ubicación de origen por defecto para el producto a reparar en las "
+"órdenes de reparación con este tipo de operación."
 
 #. module: repair
 #: model:ir.model.fields,help:repair.field_repair_order__location_id
-msgid "This is the location where the product to repair is located."
-msgstr ""
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.view_cancel_repair
 msgid ""
-"This operation will cancel the Repair process, but will not cancel it's "
-"Invoice. Do you want to continue?"
+"This is the location where the components of product to repair is located."
 msgstr ""
-"Esta operación cancelará el proceso de reparación, pero no cancelará la "
-"factura. ¿Desea continuar?"
+"Esta es la ubicación donde se encuentran los componentes del producto a "
+"reparar."
 
 #. module: repair
-#: selection:repair.order,state:0
-msgid "To be Invoiced"
-msgstr "Para ser facturado"
+#: model:ir.model.fields,help:repair.field_repair_order__product_location_src_id
+msgid "This is the location where the product to repair is located."
+msgstr "Esta es la ubicación donde se encuentra el producto a reparar."
 
 #. module: repair
-#: selection:repair.order,activity_state:0
+#: model:ir.model.fields,help:repair.field_repair_order__parts_location_id
+#: model:ir.model.fields,help:repair.field_repair_order__recycle_location_id
+msgid "This is the location where the repair parts are located."
+msgstr "Esta es la ubicación donde se encuentran las piezas de reparación."
+
+#. module: repair
+#: model:ir.model.fields,help:repair.field_repair_order__location_dest_id
+#: model:ir.model.fields,help:repair.field_repair_order__product_location_dest_id
+msgid "This is the location where the repaired product is located."
+msgstr "Esta es la ubicación donde se encuentra el producto reparado."
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair_service_line.py:0
+#: code:addons/repair/models/stock_move.py:0
+msgid ""
+"This line is linked to a posted invoice and cannot be modified.\n"
+"Please create a new line to link to a new invoice or reset the invoice to "
+"draft."
+msgstr ""
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__product_expected_qty_uom
+msgid "To Consume"
+msgstr ""
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.stock_repair_type_kanban
+msgid "To Repair"
+msgstr "A reparar"
+
+#. module: repair
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__search_date_category__today
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Today"
 msgstr "Hoy"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
 msgid "Today Activities"
-msgstr "Actividades de Hoy"
+msgstr "Actividades de hoy"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__amount_total
-msgid "Total"
-msgstr "Total"
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__search_date_category__day_1
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Tomorrow"
+msgstr "Mañana"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Total amount"
-msgstr "Importe total"
+#: model:ir.model,name:repair.model_stock_traceability_report
+msgid "Traceability Report"
+msgstr "Informe de trazabilidad"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__tracking
-msgid "Tracking"
-msgstr "Seguimiento"
+#: model:ir.model,name:repair.model_stock_picking
+#: model:ir.model.fields,field_description:repair.field_repair_order__picking_id
+msgid "Transfer"
+msgstr "Traslado"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_line__type
+#: model:ir.model.fields,help:repair.field_repair_order__picking_id
+msgid "Transfer from which the product to be repaired is picked"
+msgstr "Traslado desde el que se recogerá el producto a reparar"
+
+#. module: repair
+#: model:ir.model.fields,field_description:repair.field_stock_move__repair_line_type
 msgid "Type"
 msgstr "Tipo"
 
 #. module: repair
-#: selection:repair.order,state:0
-msgid "Under Repair"
-msgstr "En reparación"
+#: model:ir.model.fields,field_description:repair.field_stock_picking_type__code
+msgid "Type of Operation"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_fee__price_unit
-#: model:ir.model.fields,field_description:repair.field_repair_line__price_unit
-#: model:ir.ui.view,arch_db:repair.report_repairorder
-msgid "Unit Price"
-msgstr "Precio de Unidad"
+#: model:ir.model.fields,help:repair.field_repair_order__activity_exception_decoration
+msgid "Type of the exception activity on record."
+msgstr "Tipo de actividad de excepción en el registro."
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Unit of Measure"
-msgstr "Unidad de medida"
+#: model:ir.model.fields,field_description:repair.field_repair_order__under_warranty
+msgid "Under Warranty"
+msgstr "Bajo garantía"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__message_unread
-msgid "Unread Messages"
-msgstr "Mensajes sin leer"
+#: model:ir.model.fields,field_description:repair.field_repair_consumption_warning_line__uom_id
+#: model:ir.model.fields,field_description:repair.field_repair_order__uom_id
+#: model:ir.model.fields,field_description:repair.field_repair_service_line__uom_id
+msgid "Unit"
+msgstr "Unidad"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__message_unread_counter
-msgid "Unread Messages Counter"
-msgstr "Contador de mensajes sin leer"
+#: model_terms:ir.ui.view,arch_db:repair.report_repairorder
+msgid "Units"
+msgstr "Unidades"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__amount_untaxed
-msgid "Untaxed Amount"
-msgstr "Base imponible"
+#: model:ir.actions.server,name:repair.action_unreserve
+msgid "Unreserve"
+msgstr "Anular reserva"
 
 #. module: repair
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form
-msgid "Untaxed amount"
-msgstr "Base imponible"
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__priority__1
+msgid "Urgent"
+msgstr "Urgente"
 
 #. module: repair
-#: code:addons/repair/models/repair.py:172
-#, python-format
+#: model:ir.model,name:repair.model_stock_warehouse
+msgid "Warehouse"
+msgstr "Almacén"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
 msgid "Warning"
-msgstr "Alerta"
+msgstr "Advertencia"
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__guarantee_limit
-#: model:ir.ui.view,arch_db:repair.view_repair_order_form_filter
-msgid "Warranty Expiration"
-msgstr "Vencimiento de la garantía"
+#: model:ir.model,name:repair.model_repair_consumption_warning
+msgid ""
+"Wizard for warning about mismatching expected vs actual component "
+"consumption quantities for ROs"
+msgstr ""
 
 #. module: repair
-#: model:ir.model.fields,field_description:repair.field_repair_order__website_message_ids
+#: model:ir.model.fields.selection,name:repair.selection__repair_order__search_date_category__yesterday
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form_filter
+msgid "Yesterday"
+msgstr "Ayer"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/stock_lot.py:0
+msgid ""
+"You are not allowed to create a lot or serial number with this operation "
+"type. To change this, go on the operation type and tick the box \"Create New "
+"Lots/Serial Numbers\"."
+msgstr ""
+"No está permitido crear un número de lote/de serie en este tipo de "
+"operación. Para cambiar este comportamiento, vaya al tipo de operación y "
+"active la opción \"Crear nuevos números de lote/de serie\"."
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "You can not enter negative quantities."
+msgstr "No puede ingresar cantidades negativas."
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid "You cannot cancel a Repair Order that's already been completed"
+msgstr "No puede cancelar una orden de reparación que ya se ha completado"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid ""
+"You cannot create a quotation for a repair order that is already linked to "
+"an existing sale order.\n"
+"Concerned repair order(s):\n"
+"%(ref_str)s"
+msgstr ""
+"No puede crear un presupuesto para una orden de reparación que ya está "
+"vinculada a un pedido de venta existente.\n"
+"Órdenes de reparación afectadas:\n"
+"%(ref_str)s"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_consumption_warning_form
+msgid ""
+"You consumed a different quantity than expected for the following products."
+msgstr ""
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/repair.py:0
+msgid ""
+"You need to define a customer for a repair order in order to create an "
+"associated quotation.\n"
+"Concerned repair order(s):\n"
+"%(ref_str)s"
+msgstr ""
+"Para crear un presupuesto asociado, es necesario que defina a un cliente "
+"para la orden de reparación.\n"
+"Órdenes de reparación afectadas:\n"
+"%(ref_str)s"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/stock_picking.py:0
+msgid "id"
+msgstr "ID"
+
+#. module: repair
+#. odoo-python
+#: code:addons/repair/models/sale_order.py:0
+msgid "sale_order_id"
+msgstr "sale_order_id"
+
+#. module: repair
+#: model_terms:ir.ui.view,arch_db:repair.view_repair_order_form
+msgid "text"
+msgstr ""
+
+msgid "Check availability"
+msgstr "Comprobar la disponibilidad"
+
 msgid "Website Messages"
 msgstr "Mensajes del sitio web"
 
-#. module: repair
-#: model:ir.model.fields,help:repair.field_repair_order__website_message_ids
 msgid "Website communication history"
-msgstr "Historial de comunicaciones del sitio web"
-
-#. module: repair
-#: model:ir.ui.view,arch_db:repair.view_cancel_repair
-msgid "Yes"
-msgstr "Sí"
-
-#. module: repair
-#: code:addons/repair/models/repair.py:597
-#: code:addons/repair/models/repair.py:655
-#, python-format
-msgid ""
-"You have to select a pricelist in the Repair form !\n"
-" Please set one before choosing a product."
-msgstr ""
-"¡Tiene que seleccionar una tarifa en el formulario de reparación!\n"
-" Por favor, indique una antes de elegir un producto."
-
-#. module: repair
-#: code:addons/repair/models/repair.py:295
-#, python-format
-msgid "You have to select an invoice address in the repair form."
-msgstr ""
-
-#. module: repair
-#: model:ir.model,name:repair.model_stock_traceability_report
-msgid "stock.traceability.report"
-msgstr "stock.traceability.report"
-
-#. module: repair
-#: model:ir.model,name:repair.model_stock_warn_insufficient_qty_repair
-msgid "stock.warn.insufficient.qty.repair"
-msgstr "stock.warn.insufficient.qty.repair"
+msgstr "Historial de comunicación del sitio web"

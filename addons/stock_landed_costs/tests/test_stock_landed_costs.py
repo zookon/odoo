@@ -1,147 +1,78 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+from odoo.fields import Command
+from odoo.tests import Form, tagged
+
 from odoo.addons.stock_landed_costs.tests.common import TestStockLandedCostsCommon
-from odoo.exceptions import ValidationError
-from odoo.tests import tagged
 
 
 @tagged('post_install', '-at_install')
 class TestStockLandedCosts(TestStockLandedCostsCommon):
 
-    def test_stock_landed_costs(self):
-        # In order to test the landed costs feature of stock,
-        # I create a landed cost, confirm it and check its account move created
+    _test_user_groups = None  # FIXME list needed groups
 
-        self._load('account', 'test', 'account_minimal_test.xml')
-        self._load('stock_account', 'test', 'stock_valuation_account.xml')
-
-        # I create 2 products with different volume and gross weight and configure
-        # them for real_time valuation and fifo costing method
-        product_landed_cost_1 = self.env['product.product'].create({
-            'name': "LC product 1",
-            'cost_method': 'fifo',
-            'valuation': 'real_time',
-            'weight': 10,
-            'volume': 1,
-            'property_stock_account_input': self.ref('stock_landed_costs.o_expense'),
-            'property_stock_account_output': self.ref('stock_landed_costs.o_income'),
+    def test_landed_cost_in_move_line(self):
+        """
+        Tests that a move line created through the catalog gives the right landed cost
+        """
+        self.landed_cost.landed_cost_ok = True
+        account_move = self.env['account.move'].create({
+            'move_type': 'in_invoice',
+            'partner_id': self.partner_a.id
         })
+        account_move._update_order_line_info(
+            product=self.landed_cost,
+            quantity=1,
+            uom=self.landed_cost.uom_id,
+            child_field='line_ids',
+        )
+        self.assertTrue(account_move.invoice_line_ids.is_landed_costs_line, "The landed cost should appear in the move line.")
+        account_move._update_order_line_info(
+            product=self.product,
+            quantity=1,
+            uom=self.product.uom_id,
+            child_field='line_ids',
+        )
+        move_line_no_landed = account_move.line_ids.filtered(lambda line: line.product_id == self.product)
+        self.assertFalse(move_line_no_landed.is_landed_costs_line, "The landed cost should not be set to True.")
 
-        product_landed_cost_2 = self.env['product.product'].create({
-            'name': "LC product 2",
-            'cost_method': 'fifo',
-            'valuation': 'real_time',
-            'weight': 20,
-            'volume': 1.5,
-            'property_stock_account_input': self.ref('stock_landed_costs.o_expense'),
-            'property_stock_account_output': self.ref('stock_landed_costs.o_income'),
+    def test_landed_cost_for_specific_products(self):
+        """Ensure that landed costs apply only to the products specified in the "Apply On" field
+        of the landed cost lines, and exclude all other products from the related pickings.
+        """
+        self.product_a.is_storable = True
+        self.landed_cost.landed_cost_on_product_ids = self.product_refrigerator
+        picking = self.env['stock.picking'].create({
+            'picking_type_id': self.warehouse.in_type_id.id,
+            'location_id': self.supplier_location_id,
+            'location_dest_id': self.warehouse.lot_stock_id.id,
+            'move_ids': [
+                Command.create({'product_id': product.id, 'product_uom_qty': qty})
+                for product, qty in [(self.product_oven, 1), (self.product_refrigerator, 3), (self.product_a, 5)]
+            ],
         })
+        picking.action_confirm()
+        picking.button_validate()
 
-        picking_default_vals = self.env['stock.picking'].default_get(list(self.env['stock.picking'].fields_get()))
+        lc_form = Form(self.env['stock.landed.cost'])
+        lc_form.picking_ids.add(picking)
+        with lc_form.cost_lines.new() as cost_line:
+            cost_line.product_id = self.landed_cost
+            cost_line.price_unit = 100
+            cost_line.split_method = 'by_quantity'
+        lc = lc_form.save()
 
-        # I create 2 picking moving those products
-        vals = dict(picking_default_vals, **{
-            'name': 'LC_pick_1',
-            'picking_type_id': self.ref('stock.picking_type_out'),
-            'move_lines': [(0, 0, {
-                'product_id': product_landed_cost_1.id,
-                'product_uom_qty': 5,
-                'product_uom': self.ref('uom.product_uom_unit'),
-                'location_id': self.ref('stock.stock_location_stock'),
-                'location_dest_id': self.ref('stock.stock_location_customers'),
-            })],
-        })
-        picking_landed_cost_1 = self.env['stock.picking'].new(vals)
-        picking_landed_cost_1.onchange_picking_type()
-        picking_landed_cost_1.move_lines.onchange_product_id()
-        picking_landed_cost_1.move_lines.name = 'move 1'
-        vals = picking_landed_cost_1._convert_to_write(picking_landed_cost_1._cache)
-        picking_landed_cost_1 = self.env['stock.picking'].create(vals)
+        self.assertEqual(lc.cost_lines.apply_on_product_ids, self.product_refrigerator)
 
-        # Confirm and assign picking
-        self.env.user.company_id.anglo_saxon_accounting = True
-        picking_landed_cost_1.action_confirm()
-        picking_landed_cost_1.action_assign()
-        picking_landed_cost_1.move_lines.quantity_done = 5
-        picking_landed_cost_1.button_validate()
+        lc.cost_lines.write({'apply_on_product_ids': [Command.link(self.product_oven.id)]})
+        lc.compute_landed_cost()
 
-        vals = dict(picking_default_vals, **{
-            'name': 'LC_pick_2',
-            'picking_type_id': self.ref('stock.picking_type_out'),
-            'move_lines': [(0, 0, {
-                'product_id': product_landed_cost_2.id,
-                'product_uom_qty': 10,
-                'product_uom': self.ref('uom.product_uom_unit'),
-                'location_id': self.ref('stock.stock_location_stock'),
-                'location_dest_id': self.ref('stock.stock_location_customers'),
-            })],
-        })
-        picking_landed_cost_2 = self.env['stock.picking'].new(vals)
-        picking_landed_cost_2.onchange_picking_type()
-        picking_landed_cost_2.move_lines.onchange_product_id()
-        picking_landed_cost_2.move_lines.name = 'move 2'
-        vals = picking_landed_cost_2._convert_to_write(picking_landed_cost_2._cache)
-        picking_landed_cost_2 = self.env['stock.picking'].create(vals)
+        valuation_lines = lc.valuation_adjustment_lines
+        self.assertEqual(len(valuation_lines), 2)
 
-        # Confirm and assign picking
-        picking_landed_cost_2.action_confirm()
-        picking_landed_cost_2.action_assign()
-        picking_landed_cost_2.move_lines.quantity_done = 10
-        picking_landed_cost_2.button_validate()
+        oven_val_line = valuation_lines.filtered(lambda line: line.product_id == self.product_oven)
+        refrigerator_val_line = valuation_lines - oven_val_line
 
-        # I create a landed cost for those 2 pickings
-        default_vals = self.env['stock.landed.cost'].default_get(list(self.env['stock.landed.cost'].fields_get()))
-        default_vals.update({
-            'picking_ids': [picking_landed_cost_1.id, picking_landed_cost_2.id],
-            'account_journal_id': self.ref('stock_landed_costs.expenses_journal'),
-            'cost_lines': [
-                (0, 0, {'product_id': self.ref('product.product_product_2')}),
-                (0, 0, {'product_id': self.ref('product.product_product_2')}),
-                (0, 0, {'product_id': self.ref('product.product_product_2')}),
-                (0, 0, {'product_id': self.ref('product.product_product_2')})],
-            'valuation_adjustment_lines': [],
-        })
-        cost_lines_values = {
-            'name': ['equal split', 'split by quantity', 'split by weight', 'split by volume'],
-            'split_method': ['equal', 'by_quantity', 'by_weight', 'by_volume'],
-            'price_unit': [10, 150, 250, 20],
-        }
-        stock_landed_cost_1 = self.env['stock.landed.cost'].new(default_vals)
-        for index, cost_line in enumerate(stock_landed_cost_1.cost_lines):
-            cost_line.onchange_product_id()
-            cost_line.name = cost_lines_values['name'][index]
-            cost_line.split_method = cost_lines_values['split_method'][index]
-            cost_line.price_unit = cost_lines_values['price_unit'][index]
-        vals = stock_landed_cost_1._convert_to_write(stock_landed_cost_1._cache)
-        stock_landed_cost_1 = self.env['stock.landed.cost'].create(vals)
-
-        # I compute the landed cost  using Compute button
-        stock_landed_cost_1.compute_landed_cost()
-
-        # I check the valuation adjustment lines
-        for valuation in stock_landed_cost_1.valuation_adjustment_lines:
-            if valuation.cost_line_id.name == 'equal split':
-                self.assertEqual(valuation.additional_landed_cost, 5)
-            elif valuation.cost_line_id.name == 'split by quantity' and valuation.move_id.name == "move 1":
-                self.assertEqual(valuation.additional_landed_cost, 50)
-            elif valuation.cost_line_id.name == 'split by quantity' and valuation.move_id.name == "move 2":
-                self.assertEqual(valuation.additional_landed_cost, 100)
-            elif valuation.cost_line_id.name == 'split by weight' and valuation.move_id.name == "move 1":
-                self.assertEqual(valuation.additional_landed_cost, 50)
-            elif valuation.cost_line_id.name == 'split by weight' and valuation.move_id.name == "move 2":
-                self.assertEqual(valuation.additional_landed_cost, 200)
-            elif valuation.cost_line_id.name == 'split by volume' and valuation.move_id.name == "move 1":
-                self.assertEqual(valuation.additional_landed_cost, 5)
-            elif valuation.cost_line_id.name == 'split by volume' and valuation.move_id.name == "move 2":
-                self.assertEqual(valuation.additional_landed_cost, 15)
-            else:
-                raise ValidationError('unrecognized valuation adjustment line')
-
-        # I confirm the landed cost
-        stock_landed_cost_1.button_validate()
-
-        # I check that the landed cost is now "Closed" and that it has an accounting entry
-        self.assertEqual(stock_landed_cost_1.state, "done")
-        self.assertTrue(stock_landed_cost_1.account_move_id)
-        self.assertEqual(len(stock_landed_cost_1.account_move_id.line_ids), 48)
+        self.assertEqual(oven_val_line.additional_landed_cost, 25)
+        self.assertEqual(refrigerator_val_line.additional_landed_cost, 75)
+        self.assertFalse(valuation_lines.filtered(lambda line: line.product_id == self.product_a))

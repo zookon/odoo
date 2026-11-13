@@ -1,88 +1,97 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo.addons.account.tests.account_test_classes import AccountingTestCase
-from odoo.tests import tagged
+from odoo.fields import Command
+from odoo.tests import Form, tagged
+from odoo.tools import mute_logger
+
+from odoo.addons.stock_account.tests.test_anglo_saxon_valuation_reconciliation_common import (
+    ValuationReconciliationTestCommon,
+)
+
 
 @tagged('post_install', '-at_install')
-class TestStockValuation(AccountingTestCase):
-    def setUp(self):
-        super(TestStockValuation, self).setUp()
-        self.supplier_location = self.env.ref('stock.stock_location_suppliers')
-        self.stock_location = self.env.ref('stock.stock_location_stock')
-        self.partner_id = self.env.ref('base.res_partner_1')
-        self.product1 = self.env.ref('product.product_product_8')
-        self.categ_id = self.product1.categ_id
+class TestStockValuation(ValuationReconciliationTestCommon):
 
-        self.acc_payable = self.partner_id.property_account_payable_id.id
-        self.acc_expense = self.categ_id.property_account_expense_categ_id.id
-        self.acc_receivable = self.partner_id.property_account_receivable_id.id
-        self.acc_sale = self.categ_id.property_account_income_categ_id.id
-        self.acc_stock_in = self.categ_id.property_stock_account_input_categ_id.id
-        self.acc_stock_out = self.categ_id.property_stock_account_output_categ_id.id
+    _test_user_groups = None  # FIXME list needed groups
 
-    def _dropship_product1(self):
-        # enable the dropship and MTO route on the product
-        dropshipping_route = self.env.ref('stock_dropshipping.route_drop_shipping')
-        mto_route = self.env.ref('stock.route_warehouse0_mto')
-        self.product1.write({'route_ids': [(6, 0, [dropshipping_route.id, mto_route.id])]})
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        cls.supplier_location = cls.env.ref('stock.stock_location_suppliers')
+        cls.stock_location = cls.company_data['default_warehouse'].lot_stock_id
+        cls.partner_id = cls.env['res.partner'].create({'name': 'My Test Partner'})
+        cls.product1 = cls.env['product.product'].create({
+            'name': 'Large Desk',
+            'is_storable': True,
+            'categ_id': cls.stock_account_product_categ.id,
+            'taxes_id': [(6, 0, [])],
+        })
+
+    def _dropship_product1(self, bill_price=None):
+        # enable the dropship route on the product
+        dropshipping_route = self.quick_ref('stock_dropshipping.route_drop_shipping')
+        self.product1.write({'route_ids': [(6, 0, [dropshipping_route.id])]})
 
         # add a vendor
         vendor1 = self.env['res.partner'].create({'name': 'vendor1'})
-        seller1 = self.env['product.supplierinfo'].create({
-            'name': vendor1.id,
-            'price': 8,
+        self.product1.write({
+            'seller_ids': [
+                Command.create({
+                    'partner_id': vendor1.id,
+                    'price': 8,
+                })
+            ]
         })
-        self.product1.write({'seller_ids': [(6, 0, [seller1.id])]})
 
         # sell one unit of this product
-        customer1 = self.env['res.partner'].create({'name': 'customer1'})
-        sale_order1 = self.env['sale.order'].create({
-            'partner_id': customer1.id,
-            'partner_invoice_id': customer1.id,
-            'partner_shipping_id': customer1.id,
-            'order_line': [(0, 0, {
-                'name': self.product1.name,
-                'product_id': self.product1.id,
-                'product_uom_qty': 1,
-                'product_uom': self.product1.uom_id.id,
-                'price_unit': 12,
-            })],
-            'pricelist_id': self.env.ref('product.list0').id,
+        self.sale_order1 = self.env['sale.order'].sudo().create({
+            'partner_id': self.partner.id,
+            'order_line': [
+                Command.create({
+                    'product_id': self.product1.id,
+                    'price_unit': 12,
+                    'tax_ids': [Command.set([])],
+                })
+            ],
             'picking_policy': 'direct',
         })
-        sale_order1.action_confirm()
+        self.sale_order1.action_confirm()
 
         # confirm the purchase order
-        purchase_order1 = self.env['purchase.order'].search([('group_id', '=', sale_order1.procurement_group_id.id)])
-        purchase_order1.button_confirm()
+        self.purchase_order1 = self.env['purchase.order'].search([('reference_ids', '=', self.sale_order1.stock_reference_ids.id)])
+        self.purchase_order1.button_confirm()
 
         # validate the dropshipping picking
-        self.assertEqual(len(sale_order1.picking_ids), 1)
-        self.assertEqual(sale_order1.picking_ids.move_lines._is_dropshipped(), True)
-        wizard = sale_order1.picking_ids.button_validate()
-        immediate_transfer = self.env[wizard['res_model']].browse(wizard['res_id'])
-        immediate_transfer.process()
-        self.assertEqual(sale_order1.picking_ids.state, 'done')
+        self.assertEqual(len(self.sale_order1.picking_ids), 1)
+        # To be sure the following action and those who follow can be
+        # processed by Inventory's user, we need to empty the cache, so records'
+        # data will be fetched again (testing access rights) instead of reusing cache
+        self.env.invalidate_all()
+        self.sale_order1.with_user(self.res_users_stock_user).picking_ids.button_validate()
+        self.assertEqual(self.sale_order1.picking_ids.state, 'done')
 
         # create the vendor bill
-        vendor_bill1 = self.env['account.invoice'].create({
-            'partner_id': vendor1.id,
-            'purchase_id': purchase_order1.id,
-            'account_id': vendor1.property_account_payable_id.id,
-            'type': 'in_invoice',
-        })
-        vendor_bill1.purchase_order_change()
-        vendor_bill1.action_invoice_open()
+        move_form = Form(self.env['account.move'].with_context(default_move_type='in_invoice'))
+        move_form.partner_id = vendor1
+        with mute_logger('odoo.tests.form.onchange'):  # Mute "x PO lines added to the bill" notification
+            move_form.purchase_vendor_bill_id = self.env['purchase.bill.union'].browse(-self.purchase_order1.id)
+        move_form.invoice_date = move_form.date
+        for i in range(len(self.purchase_order1.order_line)):
+            with move_form.invoice_line_ids.edit(i) as line_form:
+                line_form.tax_ids.clear()
+                if bill_price:
+                    line_form.price_unit = bill_price
+        self.vendor_bill1 = move_form.save()
+        self.vendor_bill1.action_post()
 
         # create the customer invoice
-        customer_invoice1_id = sale_order1.action_invoice_create()
-        customer_invoice1 = self.env['account.invoice'].browse(customer_invoice1_id)
-        customer_invoice1.action_invoice_open()
+        self.customer_invoice1 = self.sale_order1._create_invoices()
+        self.customer_invoice1.action_post()
 
-        all_amls = vendor_bill1.move_id.line_ids + customer_invoice1.move_id.line_ids
-        if sale_order1.picking_ids.move_lines.account_move_ids:
-            all_amls |= sale_order1.picking_ids.move_lines.account_move_ids.line_ids
+        all_amls = self.vendor_bill1.line_ids + self.customer_invoice1.line_ids
+        if self.sale_order1.picking_ids.move_ids.account_move_id:
+            all_amls |= self.sale_order1.picking_ids.move_ids.account_move_id.line_ids
         return all_amls
 
     def _check_results(self, expected_aml, expected_aml_count, all_amls):
@@ -107,74 +116,74 @@ class TestStockValuation(AccountingTestCase):
     # Continental
     # -------------------------------------------------------------------------
     def test_dropship_standard_perpetual_continental_ordered(self):
-        self.env.user.company_id.anglo_saxon_accounting = False
-        self.product1.product_tmpl_id.cost_method = 'standard'
+        self.env.company.anglo_saxon_accounting = False
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'standard'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'order'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (8.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
 
         self._check_results(expected_aml, 4, all_amls)
 
     def test_dropship_standard_perpetual_continental_delivered(self):
-        self.env.user.company_id.anglo_saxon_accounting = False
-        self.product1.product_tmpl_id.cost_method = 'standard'
+        self.env.company.anglo_saxon_accounting = False
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'standard'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'delivery'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (8.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
 
         self._check_results(expected_aml, 4, all_amls)
 
     def test_dropship_fifo_perpetual_continental_ordered(self):
-        self.env.user.company_id.anglo_saxon_accounting = False
-        self.product1.product_tmpl_id.cost_method = 'fifo'
+        self.env.company.anglo_saxon_accounting = False
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'fifo'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'order'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (8.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
 
         self._check_results(expected_aml, 4, all_amls)
 
     def test_dropship_fifo_perpetual_continental_delivered(self):
-        self.env.user.company_id.anglo_saxon_accounting = False
+        self.env.company.anglo_saxon_accounting = False
 
-        self.product1.product_tmpl_id.cost_method = 'fifo'
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'fifo'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'delivery'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (8.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
 
         self._check_results(expected_aml, 4, all_amls)
@@ -183,88 +192,140 @@ class TestStockValuation(AccountingTestCase):
     # Anglosaxon
     # -------------------------------------------------------------------------
     def test_dropship_standard_perpetual_anglosaxon_ordered(self):
-        self.env.user.company_id.anglo_saxon_accounting = True
-        self.product1.product_tmpl_id.cost_method = 'standard'
+        self.env.company.anglo_saxon_accounting = True
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'standard'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'order'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (10.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
-            self.acc_stock_in:   (8.0, 10.0),
-            self.acc_stock_out:  (10.0, 10.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
-        # Interim IN is not balanced because because there's a difference between the po line
-        # price unit and the standard price. We could set a price difference account on the
-        # category to compensate.
 
-        self._check_results(expected_aml, 8, all_amls)
+        self._check_results(expected_aml, 4, all_amls)
 
     def test_dropship_standard_perpetual_anglosaxon_delivered(self):
-        self.env.user.company_id.anglo_saxon_accounting = True
-        self.product1.product_tmpl_id.cost_method = 'standard'
+        self.env.company.anglo_saxon_accounting = True
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'standard'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'delivery'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (10.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
-            self.acc_stock_in:   (8.0, 10.0),
-            self.acc_stock_out:  (10.0, 10.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
-        # Interim IN is not balanced because because there's a difference between the po line
-        # price unit and the standard price. We could set a price difference account on the
-        # category to compensate.
 
-        self._check_results(expected_aml, 8, all_amls)
+        self._check_results(expected_aml, 4, all_amls)
 
     def test_dropship_fifo_perpetual_anglosaxon_ordered(self):
-        self.env.user.company_id.anglo_saxon_accounting = True
-        self.product1.product_tmpl_id.cost_method = 'fifo'
+        self.env.company.anglo_saxon_accounting = True
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'fifo'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'order'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (8.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
-            self.acc_stock_in:   (8.0, 8.0),
-            self.acc_stock_out:  (8.0, 8.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
 
-        self._check_results(expected_aml, 8, all_amls)
+        self._check_results(expected_aml, 4, all_amls)
 
     def test_dropship_fifo_perpetual_anglosaxon_delivered(self):
-        self.env.user.company_id.anglo_saxon_accounting = True
-        self.product1.product_tmpl_id.cost_method = 'fifo'
+        self.env.company.anglo_saxon_accounting = True
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'fifo'
         self.product1.product_tmpl_id.standard_price = 10
-        self.product1.product_tmpl_id.valuation = 'real_time'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
         self.product1.product_tmpl_id.invoice_policy = 'delivery'
 
         all_amls = self._dropship_product1()
 
         expected_aml = {
-            self.acc_payable:    (0.0, 8.0),
-            self.acc_expense:    (8.0, 0.0),
-            self.acc_receivable: (12.0, 0.0),
-            self.acc_sale:       (0.0, 12.0),
-            self.acc_stock_in:   (8.0, 8.0),
-            self.acc_stock_out:  (8.0, 8.0),
+            self.company_data['default_account_payable'].id:        (0.0, 8.0),
+            self.company_data['default_account_expense'].id:        (8.0, 0.0),
+            self.company_data['default_account_receivable'].id:     (12.0, 0.0),
+            self.company_data['default_account_revenue'].id:        (0.0, 12.0),
         }
+        self._check_results(expected_aml, 4, all_amls)
 
-        self._check_results(expected_aml, 8, all_amls)
+    def test_dropship_average_no_std_price_impact(self):
+        """ Test that a dropship move does not impact the avco computation of the
+        standard price
+        """
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'average'
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
+        # in move @ 10
+        in_move = self.env['stock.move'].create({
+            'product_id': self.product1.id,
+            'location_id': self.supplier_location.id,
+            'location_dest_id': self.stock_location.id,
+            'product_uom_qty': 1,
+            'value_manual': 10,
+        })
+        in_move._action_confirm()
+        in_move._action_assign()
+        in_move.move_line_ids.quantity = 1
+        in_move.picked = True
+        in_move._action_done()
+        self.assertEqual(self.product1.standard_price, 10)
 
+        # dropship @ 8
+        self._dropship_product1(bill_price=8)
+
+        # check that standard price is still 10
+        self.assertEqual(self.product1.standard_price, 10)
+
+    def test_dropship_return_to_internal_location_is_valued(self):
+        """Returning a dropshipped delivery into the company's own stock, instead
+        of back to the vendor, brings the goods into inventory. The outgoing
+        dropship never enters own stock and stays unvalued, but the returned move
+        lands in a stock location: it is a valued incoming move, so the stock
+        valuation account is debited when the period is closed.
+        """
+        self.env.user.group_ids |= self.env.ref('stock.group_stock_multi_locations')
+        self.env.company.anglo_saxon_accounting = True
+        self.product1.product_tmpl_id.categ_id.property_cost_method = 'standard'
+        self.product1.product_tmpl_id.standard_price = 10
+        self.product1.product_tmpl_id.categ_id.property_valuation = 'real_time'
+        self.product1.product_tmpl_id.invoice_policy = 'order'
+
+        self._dropship_product1()
+
+        # the outgoing dropship never enters the company's stock: unvalued
+        self.assertRecordValues(self.product1, [{'total_value': 0.0, 'qty_available': 0.0}])
+
+        # return the delivery into an internal stock location, not to the vendor
+        return_picking = self.sale_order1.picking_ids._create_return()
+        return_picking.move_ids.product_uom_qty = 1.0
+        return_picking.action_assign()
+        return_picking.location_dest_id = self.stock_location
+        return_picking.button_validate()
+
+        # landing in a stock location, the return is a valued incoming move
+        return_move = return_picking.move_ids
+        self.assertFalse(return_move._is_dropshipped_returned())
+        self.assertRecordValues(return_move, [{'is_in': True, 'is_valued': True}])
+        self.assertRecordValues(self.product1, [{'total_value': 10.0, 'qty_available': 1.0}])
+
+        # close the period to debit the stock valuation account for the goods
+        # brought back into inventory
+        closing_move = self.env['account.move'].browse(
+            self.env.company.action_close_stock_valuation(auto_post=True)['res_id'])
+        stock_valuation_account = self.company_data['default_account_stock_valuation']
+        valuation_aml = closing_move.line_ids.filtered(
+            lambda line: line.account_id == stock_valuation_account)
+        self.assertRecordValues(valuation_aml, [{'debit': 10.0, 'credit': 0.0}])

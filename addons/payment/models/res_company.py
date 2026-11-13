@@ -1,31 +1,99 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import api, fields, models
 
 
 class ResCompany(models.Model):
-    _inherit = 'res.company'
+    _inherit = "res.company"
 
-    payment_acquirer_onboarding_state = fields.Selection([('not_done', "Not done"), ('just_done', "Just done"), ('done', "Done")], string="State of the onboarding payment acquirer step", default='not_done')
-    # YTI FIXME: Check if it's really needed on the company. Should be enough on the wizard
-    payment_onboarding_payment_method = fields.Selection([
-        ('paypal', "PayPal"),
-        ('stripe', "Stripe"),
-        ('manual', "Manual"),
-        ('other', "Other"),
-    ], string="Selected onboarding payment method")
+    onboarding_payment_module = fields.Selection(
+        string="Onboarding Payment Module",
+        selection=[
+            ("mercado_pago", "Mercado Pago"),
+            ("razorpay", "Razorpay"),
+            ("stripe", "Stripe"),
+        ],
+        compute="_compute_onboarding_payment_module",
+    )
+    # Labels to be displayed on the payment buttons
+    pay_now_label = fields.Char(
+        string="Pay Now Label",
+        help="The label to be displayed on the payment buttons for 'Pay Now' payment methods.",
+        default="Pay now",
+        translate=True,
+    )
+    pay_later_label = fields.Char(
+        string="Pay Later Label",
+        help="The label to be displayed on the payment buttons for 'Pay Later' payment methods.",
+        default="Confirm",
+        translate=True,
+    )
 
-    @api.model
-    def action_open_payment_onboarding_payment_acquirer(self):
-        """ Called by onboarding panel above the customer invoice list."""
-        # Fail if there are no existing accounts
-        self.env.user.company_id.get_chart_of_accounts_or_fail()
+    @api.depends("currency_id", "country_id")
+    def _compute_onboarding_payment_module(self):
+        for company in self:
+            if company.currency_id.name == "INR":
+                company.onboarding_payment_module = "razorpay"
+            elif company.country_id.is_stripe_supported_country:
+                company.onboarding_payment_module = "stripe"
+            elif company.country_id.is_mercado_pago_supported_country:
+                company.onboarding_payment_module = "mercado_pago"
+            else:
+                company.onboarding_payment_module = None
 
-        action = self.env.ref('payment.action_open_payment_onboarding_payment_acquirer_wizard').read()[0]
-        return action
+    @api.model_create_multi
+    def create(self, vals_list):
+        companies = super().create(vals_list)
 
-    def get_account_invoice_onboarding_steps_states_names(self):
-        """ Override. """
-        steps = super(ResCompany, self).get_account_invoice_onboarding_steps_states_names()
-        return steps + ['payment_acquirer_onboarding_state']
+        # Duplicate installed providers in the new companies.
+        providers_sudo = (
+            self
+            .env["payment.provider"]
+            .sudo()
+            .search([
+                ("company_id", "=", self.env.user.company_id.id),
+                ("module_state", "=", "installed"),
+            ])
+        )
+        providers_sudo._copy_for_companies(companies)
+
+        return companies
+
+    def _start_payment_onboarding(self, menu_id=None):
+        """Install the onboarding module, configure the provider and run the onboarding action.
+
+        Note: `self.ensure_one()`
+
+        :param int menu_id: The menu from which the onboarding is started, as an `ir.ui.menu` id.
+        :return: The action returned by `action_start_onboarding`.
+        :rtype: dict
+        """
+        self.ensure_one()
+        if not self.onboarding_payment_module:
+            return False
+
+        # Install the onboarding module if needed.
+        onboarding_module = (
+            self
+            .env["ir.module.module"]
+            .sudo()  # In sudo mode to search the onboarding module.
+            .search([("name", "=", f"payment_{self.onboarding_payment_module}")])
+        )
+        onboarding_module.filtered(lambda m: m.state == "uninstalled").button_immediate_install()
+
+        # Create a new env including the freshly installed module.
+        new_env = api.Environment(self.env.cr, self.env.uid, self.env.context)
+
+        # Configure the provider.
+        provider_code = self.onboarding_payment_module
+        provider = new_env["payment.provider"].search(
+            [
+                ("code", "=", provider_code),
+                *self.env["payment.provider"]._check_company_domain(self),
+            ],
+            limit=1,
+        )
+        if not provider:
+            return False
+
+        return provider.action_start_onboarding(menu_id=menu_id)

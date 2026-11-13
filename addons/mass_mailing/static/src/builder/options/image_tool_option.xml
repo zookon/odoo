@@ -1,0 +1,12 @@
+<templates>
+    <t t-name="mass_mailing.ImageToolOption" t-inherit="html_builder.ImageToolOption">
+        <xpath expr="//ImageShapeOption" position="attributes">
+            <attribute name="withAnimatedShapes">false</attribute>
+        </xpath>
+        <xpath expr="//ImageTransformOption" position="replace"/>
+        <xpath expr="//MediaSizeOption" position="attributes">
+            <attribute name="t-if">this.massMailingState.isImgFluid</attribute>
+        </xpath>
+    </t>
+
+</templates>

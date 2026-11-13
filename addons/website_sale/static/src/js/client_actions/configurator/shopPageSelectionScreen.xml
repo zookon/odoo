@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+    <t t-name="website_sale.Configurator.ShopPageSelectionScreen">
+        <t t-call="website_sale.Configurator.EcomStyleSelectionScreen" styles="this.shopPageStyles">
+            Choose your <b class="text-info">Online Catalog Template</b>
+        </t>
+    </t>
+
+</templates>

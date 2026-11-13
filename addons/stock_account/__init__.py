@@ -1,94 +1,60 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+from odoo import fields
+
 from . import models
+from . import report
 from . import wizard
 
-from odoo import api, SUPERUSER_ID, _, tools
 
-def _configure_journals(cr, registry):
-    """Setting journal and property field (if needed)"""
+def _post_init_hook(env):
+    _configure_journals(env)
+    _create_product_value(env)
+    _configure_stock_account_company_data(env)
 
-    env = api.Environment(cr, SUPERUSER_ID, {})
 
-    # if we already have a coa installed, create journal and set property field
-    company_ids = env['res.company'].search([('chart_template_id', '!=', False)])
-
-    for company_id in company_ids:
-        # Check if property exists for stock account journal exists
-        properties = env['ir.property'].search([
-            ('name', '=', 'property_stock_journal'),
-            ('company_id', '=', company_id.id)])
-
-        # If not, check if you can find a journal that is already there with the same name, otherwise create one
-        if not properties:
-            journal_id = env['account.journal'].search([
-                ('name', '=', _('Stock Journal')),
-                ('company_id', '=', company_id.id),
-                ('type', '=', 'general')], limit=1).id
-            if not journal_id:
-              journal_id = env['account.journal'].create({
-                'name': _('Stock Journal'),
-                'type': 'general',
-                'code': 'STJ',
-                'company_id': company_id.id,
-                'show_on_dashboard': False
-              }).id
-            vals = {
-                'name': 'property_stock_journal',
-                'fields_id': env['ir.model.fields'].search([
-                    ('name', '=', 'property_stock_journal'),
-                    ('model', '=', 'product.category'),
-                    ('relation', '=', 'account.journal')], limit=1).id,
-                'company_id': company_id.id,
-                'value': 'account.journal,' + str(journal_id)
+def _create_product_value(env):
+    product_vals_list = []
+    products = env['product.product'].with_context(prefetch_fields=False).search([('type', '=', 'consu'), ('tracking', '!=', None)])
+    for company in env['res.company'].search([]):
+        products = products.with_company(company)
+        product_vals_list += [
+            {
+                'product_id': product.id,
+                'quantity': product.qty_available,
+                'new_cost': product.standard_price,
+                'new_value': product.standard_price * product.qty_available,
+                'value': product.standard_price,
+                'date': fields.Date.today(),
+                'company_id': company.id,
+                'description': 'Initial cost',
             }
-            env['ir.property'].create(vals)
-
-        # Property Stock Accounts
-        todo_list = [
-            'property_stock_account_input_categ_id',
-            'property_stock_account_output_categ_id',
-            'property_stock_valuation_account_id',
+            for product in products if not product.company_id or product.company_id == company
         ]
+    env['product.value'].with_context(prefetch_fields=False).create(product_vals_list)
 
-        for record in todo_list:
-            account = getattr(company_id, record)
-            value = account and 'account.account,' + str(account.id) or False
-            if value:
-                field_id = env['ir.model.fields'].search([
-                  ('name', '=', record),
-                  ('model', '=', 'product.category'),
-                  ('relation', '=', 'account.account')
-                ], limit=1).id
-                vals = {
-                    'name': record,
-                    'company_id': company_id.id,
-                    'fields_id': field_id,
-                    'value': value,
-                }
-                properties = env['ir.property'].search([
-                    ('name', '=', record),
-                    ('company_id', '=', company_id.id),
-                ])
-                if properties:
-                    properties.write(vals)
-                else:
-                    # create the property
-                    env['ir.property'].create(vals)
 
-    stock_account = env.ref('account.demo_stock_account', False)
-    if stock_account:
-        account_id = env['account.account'].search([('tag_ids', '=', stock_account.id)], limit=1).id
-        fields_id = env['ir.model.fields'].search([('model', '=', 'product.category'), ('name', '=', 'property_stock_valuation_account_id')], limit=1).id
-        if not account_id:
-            account_id = env['account.account'].search([('user_type_id', '=', env.ref('account.data_account_type_current_assets').id)], limit=1).id
-        if account_id:
-            xml_id = 'stock_account.property_stock_valuation_account_id'
-            vals = {
-                'name': 'property_stock_valuation_account_id',
-                'fields_id': fields_id,
-                'value': 'account.account,'+str(account_id),
-                'company_id': env.ref('base.main_company').id,
-            }
-            env['ir.property']._load_records([dict(xml_id=xml_id, values=vals)])
+def _configure_journals(env):
+    for company in env['res.company'].search([('chart_template', '!=', False)], order="parent_path"):
+        journal = env['account.journal'].search([
+            ('code', '=', 'STJ'),
+            ('company_id', '=', company.id),
+            ('type', '=', 'general')], limit=1)
+        if journal:
+            env['ir.model.data']._update_xmlids([{
+                'xml_id': f"account.{company.id}_inventory_valuation",
+                'record': journal,
+                'noupdate': True,
+            }])
+
+
+def _configure_stock_account_company_data(env):
+    env['account.chart.template']._load_pre_defined_data({
+        'res.company': {
+            'account_production_wip_account_id',
+            'account_production_wip_overhead_account_id',
+        },
+        'stock.location': {
+            'valuation_account_id',
+        },
+    })

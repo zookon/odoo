@@ -1,0 +1,65 @@
+import { AttachmentView } from "@mail/core/common/attachment_view";
+import { Chatter } from "@mail/chatter/web_portal_project/chatter";
+import { MailPopoutPlugin } from "@mail/core/common/mail_popout_plugin";
+
+import { signal, types, usePlugin } from "@odoo/owl";
+
+import { SIZES } from "@web/core/ui/ui_utils";
+import { useService } from "@web/core/utils/hooks";
+import { patch } from "@web/core/utils/patch";
+import { FormRenderer } from "@web/views/form/form_renderer";
+
+patch(FormRenderer.prototype, {
+    setup() {
+        super.setup();
+        this.mailComponents = {
+            AttachmentView,
+            Chatter,
+        };
+        if (this.env.services["mail.store"]) {
+            this.mailStore = useService("mail.store");
+            this.thread = signal(null, {
+                type: types.instanceOf(this.mailStore["mail.thread"]),
+            });
+        }
+        this.uiService = useService("ui");
+        this.mailPopout = usePlugin(MailPopoutPlugin);
+    },
+    /**
+     * @returns {boolean}
+     */
+    hasFile() {
+        if (!this.mailStore || !this.props.record.resId) {
+            return false;
+        }
+        this.thread.set(
+            this.mailStore["mail.thread"].insert({
+                id: this.props.record.resId,
+                model: this.props.record.resModel,
+            })
+        );
+        return this.thread().attachmentsInWebClientView.length > 0;
+    },
+    mailLayout(hasAttachmentContainer) {
+        const xxl = this.uiService.size >= SIZES.XXL;
+        const hasFile = this.hasFile();
+        const hasChatter = !!this.mailStore;
+        const hasExternalWindow = !!this.mailPopout.externalWindow;
+        if (hasExternalWindow && hasFile && hasAttachmentContainer) {
+            if (xxl) {
+                return "EXTERNAL_COMBO_XXL"; // chatter on the side, attachment in separate tab
+            }
+            return "EXTERNAL_COMBO"; // chatter on the bottom, attachment in separate tab
+        }
+        if (hasChatter) {
+            if (xxl) {
+                if (hasAttachmentContainer && hasFile) {
+                    return "COMBO"; // chatter on the bottom, attachment on the side
+                }
+                return "SIDE_CHATTER"; // chatter on the side, no attachment
+            }
+            return "BOTTOM_CHATTER"; // chatter on the bottom, no attachment
+        }
+        return "NONE";
+    },
+});

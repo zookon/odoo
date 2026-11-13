@@ -1,114 +1,123 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-
+import contextlib
+import json
 import logging
+import logging.config
 import logging.handlers
 import os
 import platform
-import pprint
-from . import release
 import sys
 import threading
+import time
+import tomllib
+import traceback
+import warnings
+from unittest import mock
 
-import psycopg2
-
-import odoo
-from . import sql_db
-from . import tools
+from . import release, tools
+from .logging import *  # noqa: F403
+from .logging import ColoredFormatter, PostgreSQLHandler
 
 _logger = logging.getLogger(__name__)
 
-def log(logger, level, prefix, msg, depth=None):
-    indent=''
-    indent_after=' '*len(prefix)
-    for line in (prefix + pprint.pformat(msg, depth=depth)).split('\n'):
-        logger.log(level, indent+line)
-        indent=indent_after
 
-path_prefix = os.path.realpath(os.path.dirname(os.path.dirname(__file__)))
+real_time = time.time.__call__  # ensure we have a non patched time when using freezegun
 
-class PostgreSQLHandler(logging.Handler):
-    """ PostgreSQL Loggin Handler will store logs in the database, by default
-    the current database, can be set using --log-db=DBNAME
-    """
-    def emit(self, record):
-        ct = threading.current_thread()
-        ct_db = getattr(ct, 'dbname', None)
-        dbname = tools.config['log_db'] if tools.config['log_db'] and tools.config['log_db'] != '%d' else ct_db
-        if not dbname:
-            return
-        with tools.ignore(Exception), tools.mute_logger('odoo.sql_db'), sql_db.db_connect(dbname, allow_uri=True).cursor() as cr:
-            cr.autocommit(True)
-            msg = tools.ustr(record.msg)
-            if record.args:
-                msg = msg % record.args
-            traceback = getattr(record, 'exc_text', '')
-            if traceback:
-                msg = "%s\n%s" % (msg, traceback)
-            # we do not use record.levelname because it may have been changed by ColoredFormatter.
-            levelname = logging.getLevelName(record.levelno)
 
-            val = ('server', ct_db, record.name, levelname, msg, record.pathname[len(path_prefix)+1:], record.lineno, record.funcName)
-            cr.execute("""
-                INSERT INTO ir_logging(create_date, type, dbname, name, level, message, path, line, func)
-                VALUES (NOW() at time zone 'UTC', %s, %s, %s, %s, %s, %s, %s, %s)
-            """, val)
+class LogRecord(logging.LogRecord):
+    def __init__(self, name, level, pathname, lineno, msg, args, exc_info, func=None, sinfo=None, **kwargs):
+        super().__init__(name, level, pathname, lineno, msg, args, exc_info, func=func, sinfo=sinfo, **kwargs)
+        self.thread_native = threading.get_native_id()
+        self.dbname = getattr(threading.current_thread(), 'dbname', '?')
+        from . import modules  # noqa: PLC0415
+        self.test = None
+        if time.time.__call__ != real_time:
+            self.faked_created = self.created
+            self.created = real_time()
+        if modules.module.current_test:
+            with contextlib.suppress(Exception):
+                self.test = modules.module.current_test.get_log_metadata(self)
 
-BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, _NOTHING, DEFAULT = range(10)
-#The background is set with 40 plus the number of the color, and the foreground with 30
-#These are the sequences need to get colored ouput
-RESET_SEQ = "\033[0m"
-COLOR_SEQ = "\033[1;%dm"
-BOLD_SEQ = "\033[1m"
-COLOR_PATTERN = "%s%s%%s%s" % (COLOR_SEQ, COLOR_SEQ, RESET_SEQ)
-LEVEL_COLOR_MAPPING = {
-    logging.DEBUG: (BLUE, DEFAULT),
-    logging.INFO: (GREEN, DEFAULT),
-    logging.WARNING: (YELLOW, DEFAULT),
-    logging.ERROR: (RED, DEFAULT),
-    logging.CRITICAL: (WHITE, RED),
-}
-
-class DBFormatter(logging.Formatter):
-    def format(self, record):
-        record.pid = os.getpid()
-        record.dbname = getattr(threading.currentThread(), 'dbname', '?')
-        return logging.Formatter.format(self, record)
-
-class ColoredFormatter(DBFormatter):
-    def format(self, record):
-        fg_color, bg_color = LEVEL_COLOR_MAPPING.get(record.levelno, (GREEN, DEFAULT))
-        record.levelname = COLOR_PATTERN % (30 + fg_color, 40 + bg_color, record.levelname)
-        return DBFormatter.format(self, record)
-
-_logger_init = False
+showwarning = None
 def init_logger():
-    global _logger_init
-    if _logger_init:
+    global showwarning  # noqa: PLW0603
+    if logging.getLogRecordFactory() is LogRecord:
         return
-    _logger_init = True
 
-    logging.addLevelName(25, "INFO")
+    logging.setLogRecordFactory(LogRecord)
+
     logging.captureWarnings(True)
+    # must be after `logging.captureWarnings` so we override *that* instead of
+    # the other way around
+    showwarning = warnings.showwarning
+    warnings.showwarning = showwarning_with_traceback
 
+    # enable deprecation warnings (disabled by default)
+    warnings.simplefilter('default', category=DeprecationWarning)
+    warnings.filterwarnings('default', category=PendingDeprecationWarning)
+    # https://github.com/urllib3/urllib3/issues/2680
+    warnings.filterwarnings('ignore', r'^\'urllib3.contrib.pyopenssl\' module is deprecated.+', category=DeprecationWarning)
+    # ignore a bunch of warnings we can't really fix ourselves
+    for module in [
+        'babel.util', # deprecated parser module, no release yet
+        'zeep.loader',# zeep using defusedxml.lxml
+        'reportlab.lib.rl_safe_eval',# reportlab importing ABC from collections
+        'ofxparse',# ofxparse importing ABC from collections
+        'astroid',  # deprecated imp module (fixed in 2.5.1)
+        'requests_toolbelt', # importing ABC from collections (fixed in 0.9)
+    ]:
+        warnings.filterwarnings('ignore', category=DeprecationWarning, module=module)
+
+    # rsjmin triggers this with Python 3.10+ (that warning comes from the C code and has no `module`)
+    warnings.filterwarnings('ignore', r'^PyUnicode_FromUnicode\(NULL, size\) is deprecated', category=DeprecationWarning)
+    # the SVG guesser thing always compares str and bytes, ignore it
+    warnings.filterwarnings('ignore', category=BytesWarning, module='odoo.tools.image')
+    # reportlab does a bunch of bytes/str mixing in a hashmap
+    warnings.filterwarnings('ignore', category=BytesWarning, module='reportlab.platypus.paraparser')
+
+    # need to be adapted later but too muchwork for this pr.
+    warnings.filterwarnings('ignore', r'^datetime.datetime.utcnow\(\) is deprecated and scheduled for removal in a future version.*', category=DeprecationWarning)
+
+    # pkg_ressouce is used in google-auth < 1.23.0 (removed in https://github.com/googleapis/google-auth-library-python/pull/596)
+    # unfortunately, in ubuntu jammy and noble, the google-auth version is 1.5.1
+    # starting from noble, the default pkg_ressource version emits a warning on import, triggered when importing
+    # google-auth
+    warnings.filterwarnings('ignore', r'pkg_resources is deprecated as an API.+', category=DeprecationWarning)
+    warnings.filterwarnings('ignore', r'Deprecated call to \`pkg_resources.declare_namespace.+', category=DeprecationWarning)
+
+    # This warning is triggered library only during the python precompilation which does not occur on readonly filesystem
+    warnings.filterwarnings("ignore", r'invalid escape sequence', category=DeprecationWarning, module=".*vobject")
+    warnings.filterwarnings("ignore", r'invalid escape sequence', category=SyntaxWarning, module=".*vobject")
     from .tools.translate import resetlocale
     resetlocale()
 
-    # create a format for log messages and dates
-    format = '%(asctime)s %(pid)s %(levelname)s %(dbname)s %(name)s: %(message)s'
+    if conf := tools.config['log_config']:
+        with open(conf, 'rb') as fobj:
+            if conf.endswith('.toml'):
+                conf = tomllib.load(fobj)
+            else:
+                conf = json.load(fobj)
+            # since we create a bunch of loggers at import, if this is enabled
+            # (default) none of the loggers created before loading the config
+            # will fire unless they're forcefully enabled in the config file
+            conf['disable_existing_loggers'] = False
+        logging.config.dictConfig(conf)
+        if not conf.get('keep_odoo_default', False):
+            return
+
     # Normal Handler on stderr
     handler = logging.StreamHandler()
+    formatter = ColoredFormatter()
 
     if tools.config['syslog']:
         # SysLog Handler
         if os.name == 'nt':
-            handler = logging.handlers.NTEventLogHandler("%s %s" % (release.description, release.version))
+            handler = logging.handlers.NTEventLogHandler(f"{release.description} {release.version}")
         elif platform.system() == 'Darwin':
             handler = logging.handlers.SysLogHandler('/var/run/log')
         else:
             handler = logging.handlers.SysLogHandler('/dev/log')
-        format = '%s %s' % (release.description, release.version) \
-                + ':%(dbname)s:%(levelname)s:%(name)s:%(message)s'
+        formatter = logging.Formatter(f'{release.description} {release.version}:%(dbname)s:%(levelname)s:%(name)s:%(message)s')
 
     elif tools.config['logfile']:
         # LogFile Handler
@@ -118,38 +127,17 @@ def init_logger():
             dirname = os.path.dirname(logf)
             if dirname and not os.path.isdir(dirname):
                 os.makedirs(dirname)
-            if tools.config['logrotate'] is not False:
-                if tools.config['workers'] > 1:
-                    # TODO: fallback to regular file logging in master for safe(r) defaults?
-                    #
-                    # Doing so here would be a good idea but also might break
-                    # situations were people do log-shipping of rotated data?
-                    _logger.warn("WARNING: built-in log rotation is not reliable in multi-worker scenarios and may incur significant data loss. "
-                                 "It is strongly recommended to use an external log rotation utility or use system loggers (--syslog) instead.")
-                handler = logging.handlers.TimedRotatingFileHandler(filename=logf, when='D', interval=1, backupCount=30)
-            elif os.name == 'posix':
+            if os.name == 'posix':
                 handler = logging.handlers.WatchedFileHandler(logf)
             else:
                 handler = logging.FileHandler(logf)
         except Exception:
             sys.stderr.write("ERROR: couldn't create the logfile directory. Logging to the standard output.\n")
 
-    # Check that handler.stream has a fileno() method: when running OpenERP
-    # behind Apache with mod_wsgi, handler.stream will have type mod_wsgi.Log,
-    # which has no fileno() method. (mod_wsgi.Log is what is being bound to
-    # sys.stderr when the logging.StreamHandler is being constructed above.)
-    def is_a_tty(stream):
-        return hasattr(stream, 'fileno') and os.isatty(stream.fileno())
-
-    if os.name == 'posix' and isinstance(handler, logging.StreamHandler) and is_a_tty(handler.stream):
-        formatter = ColoredFormatter(format)
-    else:
-        formatter = DBFormatter(format)
     handler.setFormatter(formatter)
-
     logging.getLogger().addHandler(handler)
 
-    if tools.config['log_db']:
+    if log_db := tools.config['log_db']:
         db_levels = {
             'debug': logging.DEBUG,
             'info': logging.INFO,
@@ -157,7 +145,7 @@ def init_logger():
             'error': logging.ERROR,
             'critical': logging.CRITICAL,
         }
-        postgresqlHandler = PostgreSQLHandler()
+        postgresqlHandler = PostgreSQLHandler(log_db)
         postgresqlHandler.setLevel(int(db_levels.get(tools.config['log_db_level'], tools.config['log_db_level'])))
         logging.getLogger().addHandler(postgresqlHandler)
 
@@ -168,7 +156,7 @@ def init_logger():
 
     logging_configurations = DEFAULT_LOG_CONFIGURATION + pseudo_config + logconfig
     for logconfig_item in logging_configurations:
-        loggername, level = logconfig_item.split(':')
+        loggername, level = logconfig_item.strip().split(':')
         level = getattr(logging, level, logging.INFO)
         logger = logging.getLogger(loggername)
         logger.setLevel(level)
@@ -176,19 +164,49 @@ def init_logger():
     for logconfig_item in logging_configurations:
         _logger.debug('logger level set: "%s"', logconfig_item)
 
+    if tools.config['syslog']:
+        # temporarily restore normal to skip useless stracktrace
+        with mock.patch.object(warnings, "showwarning", showwarning):
+            warnings.warn_explicit(
+                "The --syslog option is deprecated since Odoo 20, "
+                "switch to --log-config and configure a syslog handler.",
+                category=DeprecationWarning,
+                filename='<argv>',
+                lineno=1,
+            )
 
 DEFAULT_LOG_CONFIGURATION = [
-    'odoo.http.rpc.request:INFO',
-    'odoo.http.rpc.response:INFO',
     ':INFO',
 ]
 PSEUDOCONFIG_MAPPER = {
-    'debug_rpc_answer': ['odoo:DEBUG', 'odoo.sql_db:INFO', 'odoo.http.rpc:DEBUG'],
-    'debug_rpc': ['odoo:DEBUG', 'odoo.sql_db:INFO', 'odoo.http.rpc.request:DEBUG'],
     'debug': ['odoo:DEBUG', 'odoo.sql_db:INFO'],
     'debug_sql': ['odoo.sql_db:DEBUG'],
     'info': [],
-    'warn': ['odoo:WARNING', 'werkzeug:WARNING'],
-    'error': ['odoo:ERROR', 'werkzeug:ERROR'],
-    'critical': ['odoo:CRITICAL', 'werkzeug:CRITICAL'],
+    'runbot': ['odoo:RUNBOT'],
+    'warn': ['odoo:WARNING'],
+    'error': ['odoo:ERROR'],
+    'critical': ['odoo:CRITICAL'],
 }
+
+IGNORE = {
+    'Comparison between bytes and int', # a.foo != False or some shit, we don't care
+}
+def showwarning_with_traceback(message, category, filename, lineno, file=None, line=None):
+    if category is BytesWarning and message.args[0] in IGNORE:
+        return
+
+    # find the stack frame matching (filename, lineno)
+    filtered = []
+    for frame in traceback.extract_stack():
+        if frame.name == '__call__' and frame.filename.endswith('/odoo/http/router.py'):
+            # we don't care about the frames above our wsgi entrypoint
+            filtered.clear()
+        if 'importlib' not in frame.filename:
+            filtered.append(frame)
+        if frame.filename == filename and frame.lineno == lineno:
+            break
+    return showwarning(
+        message, category, filename, lineno,
+        file=file,
+        line=''.join(traceback.format_list(filtered))
+    )

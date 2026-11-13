@@ -1,137 +1,76 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
+
+# When using quotation marks in translation strings, please use curly quotes (“”)
+# instead of straight quotes (""). On Linux, the keyboard shortcuts are:
+# AltGr + V for the opening curly quotes “
+# AltGr + B for the closing curly quotes ”
+
+from __future__ import annotations
+
 import codecs
 import fnmatch
+import functools
 import inspect
 import io
+import json
 import locale
 import logging
 import os
+import polib
 import re
 import tarfile
-import tempfile
-import threading
-from collections import defaultdict
+import typing
+from collections import defaultdict, namedtuple
+from collections.abc import Iterable, Iterator
+from contextlib import suppress
 from datetime import datetime
+from difflib import get_close_matches
 from os.path import join
+from pathlib import Path
+from tokenize import generate_tokens, STRING, NEWLINE, INDENT, DEDENT
 
 from babel.messages import extract
 from lxml import etree, html
+from markupsafe import escape, Markup
+from psycopg2.extras import Json
 
 import odoo
-from . import config, pycompat
-from .misc import file_open, get_iso_codes, SKIPPED_ELEMENT_TYPES
-from .osutil import walksymlinks
+from odoo.exceptions import UserError, ValidationError
+from .config import config
+from .i18n import format_list
+from .misc import file_open, file_path, frozendict, split_every, OrderedSet, SKIPPED_ELEMENT_TYPES
+from .sql import SQL
+from odoo.tools.constants import IN_MAX
+
+if typing.TYPE_CHECKING:
+    import types
+
+    from collections.abc import Callable
+    from typing import Any, Literal
+    from odoo.api import Environment
+    from odoo.orm.fields_textual import BaseString
+    from odoo.orm.models import BaseModel
+
+__all__ = [
+    "LazyTranslate",
+    "_",
+    "get_iso_codes",
+    "html_translate",
+    "mark_as_copy",
+    "xml_translate",
+]
 
 _logger = logging.getLogger(__name__)
 
-# used to notify web client that these translations should be loaded in the UI
-WEB_TRANSLATION_COMMENT = "openerp-web"
+PYTHON_TRANSLATION_COMMENT = 'odoo-python'
+
+# translation used for javascript code in web client
+JAVASCRIPT_TRANSLATION_COMMENT = 'odoo-javascript'
 
 SKIPPED_ELEMENTS = ('script', 'style', 'title')
 
-_LOCALE2WIN32 = {
-    'af_ZA': 'Afrikaans_South Africa',
-    'sq_AL': 'Albanian_Albania',
-    'ar_SA': 'Arabic_Saudi Arabia',
-    'eu_ES': 'Basque_Spain',
-    'be_BY': 'Belarusian_Belarus',
-    'bs_BA': 'Bosnian_Bosnia and Herzegovina',
-    'bg_BG': 'Bulgarian_Bulgaria',
-    'ca_ES': 'Catalan_Spain',
-    'hr_HR': 'Croatian_Croatia',
-    'zh_CN': 'Chinese_China',
-    'zh_TW': 'Chinese_Taiwan',
-    'cs_CZ': 'Czech_Czech Republic',
-    'da_DK': 'Danish_Denmark',
-    'nl_NL': 'Dutch_Netherlands',
-    'et_EE': 'Estonian_Estonia',
-    'fa_IR': 'Farsi_Iran',
-    'ph_PH': 'Filipino_Philippines',
-    'fi_FI': 'Finnish_Finland',
-    'fr_FR': 'French_France',
-    'fr_BE': 'French_France',
-    'fr_CH': 'French_France',
-    'fr_CA': 'French_France',
-    'ga': 'Scottish Gaelic',
-    'gl_ES': 'Galician_Spain',
-    'ka_GE': 'Georgian_Georgia',
-    'de_DE': 'German_Germany',
-    'el_GR': 'Greek_Greece',
-    'gu': 'Gujarati_India',
-    'he_IL': 'Hebrew_Israel',
-    'hi_IN': 'Hindi',
-    'hu': 'Hungarian_Hungary',
-    'is_IS': 'Icelandic_Iceland',
-    'id_ID': 'Indonesian_Indonesia',
-    'it_IT': 'Italian_Italy',
-    'ja_JP': 'Japanese_Japan',
-    'kn_IN': 'Kannada',
-    'km_KH': 'Khmer',
-    'ko_KR': 'Korean_Korea',
-    'lo_LA': 'Lao_Laos',
-    'lt_LT': 'Lithuanian_Lithuania',
-    'lat': 'Latvian_Latvia',
-    'ml_IN': 'Malayalam_India',
-    'mi_NZ': 'Maori',
-    'mn': 'Cyrillic_Mongolian',
-    'no_NO': 'Norwegian_Norway',
-    'nn_NO': 'Norwegian-Nynorsk_Norway',
-    'pl': 'Polish_Poland',
-    'pt_PT': 'Portuguese_Portugal',
-    'pt_BR': 'Portuguese_Brazil',
-    'ro_RO': 'Romanian_Romania',
-    'ru_RU': 'Russian_Russia',
-    'sr_CS': 'Serbian (Cyrillic)_Serbia and Montenegro',
-    'sk_SK': 'Slovak_Slovakia',
-    'sl_SI': 'Slovenian_Slovenia',
-    #should find more specific locales for Spanish countries,
-    #but better than nothing
-    'es_AR': 'Spanish_Spain',
-    'es_BO': 'Spanish_Spain',
-    'es_CL': 'Spanish_Spain',
-    'es_CO': 'Spanish_Spain',
-    'es_CR': 'Spanish_Spain',
-    'es_DO': 'Spanish_Spain',
-    'es_EC': 'Spanish_Spain',
-    'es_ES': 'Spanish_Spain',
-    'es_GT': 'Spanish_Spain',
-    'es_HN': 'Spanish_Spain',
-    'es_MX': 'Spanish_Spain',
-    'es_NI': 'Spanish_Spain',
-    'es_PA': 'Spanish_Spain',
-    'es_PE': 'Spanish_Spain',
-    'es_PR': 'Spanish_Spain',
-    'es_PY': 'Spanish_Spain',
-    'es_SV': 'Spanish_Spain',
-    'es_UY': 'Spanish_Spain',
-    'es_VE': 'Spanish_Spain',
-    'sv_SE': 'Swedish_Sweden',
-    'ta_IN': 'English_Australia',
-    'th_TH': 'Thai_Thailand',
-    'tr_TR': 'Turkish_Turkey',
-    'uk_UA': 'Ukrainian_Ukraine',
-    'vi_VN': 'Vietnamese_Viet Nam',
-    'tlh_TLH': 'Klingon',
-
-}
-
-# These are not all English small words, just those that could potentially be isolated within views
-ENGLISH_SMALL_WORDS = set("as at by do go if in me no of ok on or to up us we".split())
-
-
 # these direct uses of CSV are ok.
 import csv # pylint: disable=deprecated-module
-class UNIX_LINE_TERMINATOR(csv.excel):
-    lineterminator = '\n'
-
-csv.register_dialect("UNIX", UNIX_LINE_TERMINATOR)
-
-
-# FIXME: holy shit this whole thing needs to be cleaned up hard it's a mess
-def encode(s):
-    assert isinstance(s, pycompat.text_type)
-    return s
 
 # which elements are translated inline
 TRANSLATED_ELEMENTS = {
@@ -141,141 +80,244 @@ TRANSLATED_ELEMENTS = {
     'sup', 'time', 'u', 'var', 'wbr', 'text',
 }
 
-# which attributes must be translated
+# Attributes from QWeb views that must be translated.
+# ⚠ Note that it implicitly includes their t-attf-* equivalent.
 TRANSLATED_ATTRS = {
-    'string', 'help', 'sum', 'avg', 'confirm', 'placeholder', 'alt', 'title', 'aria-label',
+    'string', 'add-label', 'help', 'sum', 'avg', 'confirm', 'placeholder', 'alt', 'title', 'aria-label',
     'aria-keyshortcuts', 'aria-placeholder', 'aria-roledescription', 'aria-valuetext',
+    'value_label', 'data-tooltip', 'label', 'confirm-label', 'cancel-label', 'confirm-title',
 }
 
-TRANSLATED_ATTRS = TRANSLATED_ATTRS | {'t-attf-' + attr for attr in TRANSLATED_ATTRS}
+TRANSLATED_ATTRS.update({f't-attf-{attr}' for attr in TRANSLATED_ATTRS})
+
+# {column value of "ir_model_fields"."translate": orm field.translate}
+FIELD_TRANSLATE = {
+    None: False,
+    'standard': True,
+}
+
+
+def get_iso_codes(lang: str) -> str:
+    if lang.find('_') != -1:
+        lang_items = lang.split('_')
+        if lang_items[0] == lang_items[1].lower():
+            lang = lang_items[0]
+    return lang
+
+
+def _get_frame(stack_level: int = 0) -> types.FrameType | None:
+    from odoo.tools.safe_eval.runtime import safe_call as wrapper_func  # noqa: PLC0415
+
+    stack_level += 1  # +1 to skip this function
+    frame = origin_frame = inspect.currentframe()
+
+    while frame:
+        if frame.f_code is not wrapper_func.__code__:
+            if stack_level == 0:
+                return frame
+            stack_level -= 1
+        frame = frame.f_back
+
+    _logger.warning(
+        'Impossible to retrieve frame for translation language, skipping translation %s',
+        origin_frame, stack_info=True,
+    )
+    return None
+
+
+def is_translatable_attrib(key, node):
+    if not key:
+        return False
+    if 't-call' not in node.attrib and key in TRANSLATED_ATTRS:
+        return True
+    return key.endswith('.translate')
+
+def is_translatable_attrib_value(node):
+    # check if the value attribute of a node must be translated
+    classes = node.attrib.get('class', '').split(' ')
+    return (
+        (node.tag == 'input' and node.attrib.get('type', 'text') == 'text')
+        and 'datetimepicker-input' not in classes
+        or (node.tag == 'input' and node.attrib.get('type') == 'hidden')
+        and 'o_translatable_input_hidden' in classes
+    )
+
+def is_translatable_attrib_text(node):
+    return node.tag == 'field' and node.attrib.get('widget', '') == 'url'
+
+
+# This should match the list provided to OWL (see translatableAttributes).
+OWL_TRANSLATED_ATTRS = {
+    "alt",
+    "aria-label",
+    "aria-placeholder",
+    "aria-roledescription",
+    "aria-valuetext",
+    "data-tooltip",
+    "label",
+    "placeholder",
+    "title",
+}
 
 avoid_pattern = re.compile(r"\s*<!DOCTYPE", re.IGNORECASE | re.MULTILINE | re.UNICODE)
-node_pattern = re.compile(r"<[^>]*>(.*)</[^<]*>", re.DOTALL | re.MULTILINE | re.UNICODE)
+space_pattern = re.compile(r"[\s\uFEFF]*")  # web_editor uses \uFEFF as ZWNBSP
 
+# regexpr for string formatting and extract ( ruby-style )|( jinja-style  ) used in `_compile_format`
+FORMAT_REGEX = re.compile(r'(?:#\{(.+?)\})|(?:\{\{(.+?)\}\})')
+
+def translate_format_string_expression(term, callback):
+    expressions = {}
+    def add(exp_py):
+        index = len(expressions)
+        expressions[str(index)] = exp_py
+        return '{{%s}}' % index
+    term_without_py = FORMAT_REGEX.sub(lambda g: add(g.group(0)), term)
+    translated_value = callback(term_without_py)
+    if translated_value:
+        return FORMAT_REGEX.sub(lambda g: expressions.get(g.group(0)[2:-2], 'None'), translated_value)
 
 def translate_xml_node(node, callback, parse, serialize):
     """ Return the translation of the given XML/HTML node.
 
+        :param node:
         :param callback: callback(text) returns translated text or None
         :param parse: parse(text) returns a node (text is unicode)
         :param serialize: serialize(node) returns unicode text
     """
 
     def nonspace(text):
-        return bool(text) and not text.isspace()
+        """ Return whether ``text`` is a string with non-space characters. """
+        return bool(text) and not space_pattern.fullmatch(text)
 
-    def concat(text1, text2):
-        return text2 if text1 is None else text1 + (text2 or "")
-
-    def append_content(node, source):
-        """ Append the content of ``source`` node to ``node``. """
-        if len(node):
-            node[-1].tail = concat(node[-1].tail, source.text)
-        else:
-            node.text = concat(node.text, source.text)
-        for child in source:
-            node.append(child)
-
-    def translate_text(text):
-        """ Return the translation of ``text`` (the term to translate is without
-            surrounding spaces), or a falsy value if no translation applies.
+    def is_force_inline(node):
+        """ Return whether ``node`` is marked as it should be translated as
+            one term.
         """
-        term = text.strip()
-        trans = term and callback(term)
-        return trans and text.replace(term, trans)
+        return "o_translate_inline" in node.attrib.get("class", "").split()
 
-    def translate_content(node):
-        """ Return ``node`` with its content translated inline. """
-        # serialize the node that contains the stuff to translate
-        text = serialize(node)
-        # retrieve the node's content and translate it
-        match = node_pattern.match(text)
-        trans = translate_text(match.group(1))
-        if trans:
-            # replace the content, and convert it back to an XML node
-            text = text[:match.start(1)] + trans + text[match.end(1):]
-            try:
-                node = parse(text)
-            except etree.ParseError:
-                # fallback: escape the translation as text
-                node = etree.Element(node.tag, node.attrib, node.nsmap)
-                node.text = trans
-        return node
+    def translatable(node, force_inline=False):
+        """ Return whether the given node can be translated as a whole. """
+        # Some specific nodes (e.g., text highlights) have an auto-updated DOM
+        # structure that makes them impossible to translate.
+        # The introduction of a translation `<span>` in the middle of their
+        # hierarchy breaks their functionalities. We need to force them to be
+        # translated as a whole using the `o_translate_inline` class.
+        force_inline = force_inline or is_force_inline(node)
+        return (
+            (force_inline or node.tag in TRANSLATED_ELEMENTS)
+            # Nodes with directives are not translatable. Directives usually
+            # start with `t-`, but this prefix is optional for `groups` (see
+            # `_compile_directive_groups` which reads `t-groups` and `groups`)
+            and not any(key.startswith("t-") or key == 'groups' or key.endswith(".translate") for key in node.attrib)
+            and all(translatable(child, force_inline) for child in node)
+        )
+
+    def hastext(node, pos=0, force_inline=False):
+        """ Return whether the given node contains some text to translate at the
+            given child node position.  The text may be before the child node,
+            inside it, or after it.
+        """
+        force_inline = force_inline or is_force_inline(node)
+        return (
+            # there is some text before node[pos]
+            nonspace(node[pos-1].tail if pos else node.text)
+            or (
+                pos < len(node)
+                and translatable(node[pos], force_inline)
+                and (
+                    any(  # attribute to translate
+                        val and (
+                            is_translatable_attrib(key, node) or
+                            (key == 'value' and is_translatable_attrib_value(node[pos])) or
+                            (key == 'text' and is_translatable_attrib_text(node[pos]))
+                        )
+                        for key, val in node[pos].attrib.items()
+                    )
+                    # node[pos] contains some text to translate
+                    or hastext(node[pos], 0, force_inline)
+                    # node[pos] has no text, but there is some text after it
+                    or hastext(node, pos + 1, force_inline)
+                )
+            )
+        )
 
     def process(node):
-        """ If ``node`` can be translated inline, return ``(has_text, node)``,
-            where ``has_text`` is a boolean that tells whether ``node`` contains
-            some actual text to translate. Otherwise return ``(None, result)``,
-            where ``result`` is the translation of ``node`` except for its tail.
-        """
+        """ Translate the given node. """
         if (
-            isinstance(node, SKIPPED_ELEMENT_TYPES) or
-            node.tag in SKIPPED_ELEMENTS or
-            node.get('t-translation', "").strip() == "off" or
-            node.tag == 'attribute' and node.get('name') not in TRANSLATED_ATTRS or
-            node.getparent() is None and avoid_pattern.match(node.text or "")
+            isinstance(node, SKIPPED_ELEMENT_TYPES)
+            or node.tag in SKIPPED_ELEMENTS
+            or node.get('t-translation', "").strip() == "off"
+            or node.tag == 'attribute' and node.get('name') not in ('value', 'text') and not is_translatable_attrib(node.get('name'), node)
+            or node.getparent() is None and avoid_pattern.match(node.text or "")
         ):
-            return (None, node)
+            return
 
-        # make an element like node that will contain the result
-        result = etree.Element(node.tag, node.attrib, node.nsmap)
+        pos = 0
+        while True:
+            # check for some text to translate at the given position
+            if hastext(node, pos):
+                # move all translatable children nodes from the given position
+                # into a <div> element
+                div = etree.Element('div')
+                div.text = (node[pos-1].tail if pos else node.text) or ''
+                while pos < len(node) and translatable(node[pos], is_force_inline(node)):
+                    div.append(node[pos])
 
-        # use a "todo" node to translate content by parts
-        todo = etree.Element('div', nsmap=node.nsmap)
-        if avoid_pattern.match(node.text or ""):
-            result.text = node.text
-        else:
-            todo.text = node.text
-        todo_has_text = nonspace(todo.text)
+                # translate the content of the <div> element as a whole
+                content = serialize(div)[5:-6]
+                original = content.strip()
+                translated = callback(original)
+                if translated:
+                    result = content.replace(original, translated)
+                    # <div/> is used to auto fix crapy result
+                    result_elem = parse_html(f"<div>{result}</div>")
+                    # change the tag to <span/> which is one of TRANSLATED_ELEMENTS
+                    # so that 'result_elem' can be checked by translatable and hastext
+                    result_elem.tag = 'span'
+                    if translatable(result_elem) and hastext(result_elem):
+                        if node.tag.lower() == 'option' and len(result_elem) and result_elem[0].get('data-oe-translation-source-sha'):
+                            # In 'edit_translations' context, a <span> wrapper
+                            # is put in 'result_elem' to let the user translate
+                            # fields in the frontend.
+                            # But <span> can't be inside an <option> element,
+                            # so we put it in an attribute instead.
+                            # In this context, we can skip replacing the node
+                            # content.
+                            node.set('data-oe-translation-span-wrapper', etree.tostring(result_elem[0]))
+                        else:
+                            div = result_elem
+                            if pos:
+                                node[pos - 1].tail = div.text
+                            else:
+                                node.text = div.text
 
-        # process children recursively
-        for child in node:
-            child_has_text, child = process(child)
-            if child_has_text is None:
-                # translate the content of todo and append it to result
-                append_content(result, translate_content(todo) if todo_has_text else todo)
-                # add translated child to result
-                result.append(child)
-                # move child's untranslated tail to todo
-                todo = etree.Element('div', nsmap=node.nsmap)
-                todo.text, child.tail = child.tail, None
-                todo_has_text = nonspace(todo.text)
-            else:
-                # child is translatable inline; add it to todo
-                todo.append(child)
-                todo_has_text = todo_has_text or child_has_text
+                # move the content of the <div> element back inside node
+                while len(div) > 0:
+                    node.insert(pos, div[0])
+                    pos += 1
 
-        # determine whether node is translatable inline
-        if (
-            node.tag in TRANSLATED_ELEMENTS and
-            not (result.text or len(result)) and
-            not any(name.startswith("t-") for name in node.attrib)
-        ):
-            # complete result and return it
-            append_content(result, todo)
-            result.tail = node.tail
-            has_text = todo_has_text or nonspace(result.text) or nonspace(result.tail)
-            return (has_text, result)
+            if pos >= len(node):
+                break
 
-        # translate the content of todo and append it to result
-        append_content(result, translate_content(todo) if todo_has_text else todo)
+            # node[pos] is not translatable as a whole, process it recursively
+            process(node[pos])
+            pos += 1
 
-        # translate the required attributes
-        for name, value in result.attrib.items():
-            if name in TRANSLATED_ATTRS:
-                result.set(name, translate_text(value) or value)
+        # translate the attributes of the node
+        for key, val in node.attrib.items():
+            if nonspace(val):
+                if (
+                    is_translatable_attrib(key, node) or
+                    (key == 'value' and is_translatable_attrib_value(node)) or
+                    (key == 'text' and is_translatable_attrib_text(node))
+                ):
+                    if key.startswith('t-'):
+                        value = translate_format_string_expression(val.strip(), callback)
+                    else:
+                        value = callback(val.strip())
+                    node.set(key, value or val)
 
-        # add the untranslated tail to result
-        result.tail = node.tail
-
-        return (None, result)
-
-    has_text, node = process(node)
-    if has_text is True:
-        # translate the node as a whole
-        wrapped = etree.Element('div')
-        wrapped.append(node)
-        return translate_content(wrapped)[0]
+    process(node)
 
     return node
 
@@ -286,10 +328,53 @@ def parse_xml(text):
 def serialize_xml(node):
     return etree.tostring(node, method='xml', encoding='unicode')
 
+
+MODIFIER_ATTRS = {"invisible", "readonly", "required", "column_invisible", "attrs"}
+def xml_term_adapter(term_en):
+    """
+    Returns an `adapter(term)` function that will ensure the modifiers are copied
+    from the base `term_en` to the translated `term` when the XML structure of
+    both terms match. `term_en` and any input `term` to the adapter must be valid
+    XML terms. Using the adapter only makes sense if `term_en` contains some tags
+    from TRANSLATED_ELEMENTS.
+    """
+    orig_node = parse_xml(f"<div>{term_en}</div>")
+
+    def same_struct_iter(left, right):
+        if left.tag != right.tag or len(left) != len(right):
+            raise ValueError("Non matching struct")
+        yield left, right
+        left_iter = left.iterchildren()
+        right_iter = right.iterchildren()
+        for lc, rc in zip(left_iter, right_iter):
+            yield from same_struct_iter(lc, rc)
+
+    def adapter(term):
+        new_node = parse_xml(f"<div>{term}</div>")
+        try:
+            for orig_n, new_n in same_struct_iter(orig_node, new_node):
+                removed_attrs = [k for k in new_n.attrib if k in MODIFIER_ATTRS and k not in orig_n.attrib]
+                for k in removed_attrs:
+                    del new_n.attrib[k]
+                keep_attrs = {k: v for k, v in orig_n.attrib.items()}
+                new_n.attrib.update(keep_attrs)
+        except ValueError:  # non-matching structure
+            return None
+
+        # remove tags <div> and </div> from result
+        return serialize_xml(new_node)[5:-6]
+
+    return adapter
+
+
 _HTML_PARSER = etree.HTMLParser(encoding='utf8')
 
 def parse_html(text):
-    return html.fragment_fromstring(text, parser=_HTML_PARSER)
+    try:
+        parse = html.fragment_fromstring(text, parser=_HTML_PARSER)
+    except (etree.ParserError, TypeError) as e:
+        raise UserError(_("Error while parsing view:\n\n%s") % e) from e
+    return parse
 
 def serialize_html(node):
     return etree.tostring(node, method='html', encoding='unicode')
@@ -313,6 +398,16 @@ def xml_translate(callback, value):
         # remove tags <div> and </div> from result
         return serialize_xml(result)[5:-6]
 
+def xml_term_converter(value):
+    """ Convert the HTML fragment ``value`` to XML if necessary
+    """
+    # wrap value inside a div and parse it as HTML
+    div = f"<div>{value}</div>"
+    root = etree.fromstring(div, etree.HTMLParser())
+    # root is html > body > div
+    # serialize div as XML and discard surrounding tags
+    return etree.tostring(root[0][0], encoding='unicode')[5:-6]
+
 def html_translate(callback, value):
     """ Translate an HTML value (string), using `callback` for translating text
         appearing in `value`.
@@ -325,134 +420,824 @@ def html_translate(callback, value):
         root = parse_html("<div>%s</div>" % value)
         result = translate_xml_node(root, callback, parse_html, serialize_html)
         # remove tags <div> and </div> from result
-        value = serialize_html(result)[5:-6]
+        value = serialize_html(result)[5:-6].replace('\xa0', '&nbsp;')
     except ValueError:
         _logger.exception("Cannot translate malformed HTML, using source value instead")
 
     return value
 
+def html_term_converter(value):
+    """ Convert the HTML fragment ``value`` to XML if necessary
+    """
+    # wrap value inside a div and parse it as HTML
+    div = f"<div>{value}</div>"
+    root = etree.fromstring(div, etree.HTMLParser())
+    # root is html > body > div
+    # serialize div as HTML and discard surrounding tags
+    return etree.tostring(root[0][0], encoding='unicode', method='html')[5:-6]
 
-#
-# Warning: better use self.env['ir.translation']._get_source if you can
-#
-def translate(cr, name, source_type, lang, source=None):
-    if source and name:
-        cr.execute('select value from ir_translation where lang=%s and type=%s and name=%s and src=%s and md5(src)=md5(%s)', (lang, source_type, str(name), source, source))
-    elif name:
-        cr.execute('select value from ir_translation where lang=%s and type=%s and name=%s', (lang, source_type, str(name)))
-    elif source:
-        cr.execute('select value from ir_translation where lang=%s and type=%s and src=%s and md5(src)=md5(%s)', (lang, source_type, source, source))
-    res_trans = cr.fetchone()
-    res = res_trans and res_trans[0] or False
-    return res
 
-class GettextAlias(object):
+def get_text_content(term):
+    """ Return the textual content of the given term. """
+    content = html.fromstring(term).text_content()
+    return " ".join(content.split())
 
-    def _get_db(self):
-        # find current DB based on thread/worker db name (see netsvc)
-        db_name = getattr(threading.currentThread(), 'dbname', None)
-        if db_name:
-            return odoo.sql_db.db_connect(db_name)
+def is_text(term):
+    """ Return whether the term has only text. """
+    it = html.fromstring(f"<root>{term}</root>").iter()
+    next(it)  # consume <root>
+    return next(it, None) is None
 
-    def _get_cr(self, frame, allow_create=True):
-        # try, in order: cr, cursor, self.env.cr, self.cr,
-        # request.env.cr
-        if 'cr' in frame.f_locals:
-            return frame.f_locals['cr'], False
-        if 'cursor' in frame.f_locals:
-            return frame.f_locals['cursor'], False
-        s = frame.f_locals.get('self')
-        if hasattr(s, 'env'):
-            return s.env.cr, False
-        if hasattr(s, 'cr'):
-            return s.cr, False
-        try:
-            from odoo.http import request
-            return request.env.cr, False
-        except RuntimeError:
-            pass
-        if allow_create:
-            # create a new cursor
-            db = self._get_db()
-            if db is not None:
-                return db.cursor(), True
-        return None, False
 
-    def _get_uid(self, frame):
-        # try, in order: uid, user, self.env.uid
-        if 'uid' in frame.f_locals:
-            return frame.f_locals['uid']
-        if 'user' in frame.f_locals:
-            return int(frame.f_locals['user'])      # user may be a record
-        s = frame.f_locals.get('self')
-        return s.env.uid
+xml_translate.get_text_content = get_text_content
+html_translate.get_text_content = get_text_content
 
-    def _get_lang(self, frame):
-        # try, in order: context.get('lang'), kwargs['context'].get('lang'),
-        # self.env.lang, self.localcontext.get('lang'), request.env.lang
-        lang = None
-        if frame.f_locals.get('context'):
-            lang = frame.f_locals['context'].get('lang')
-        if not lang:
-            kwargs = frame.f_locals.get('kwargs', {})
-            if kwargs.get('context'):
-                lang = kwargs['context'].get('lang')
-        if not lang:
-            s = frame.f_locals.get('self')
-            if hasattr(s, 'env'):
-                lang = s.env.lang
-            if not lang:
-                if hasattr(s, 'localcontext'):
-                    lang = s.localcontext.get('lang')
-            if not lang:
-                try:
-                    from odoo.http import request
-                    lang = request.env.lang
-                except RuntimeError:
-                    pass
-            if not lang:
-                # Last resort: attempt to guess the language of the user
-                # Pitfall: some operations are performed in sudo mode, and we
-                #          don't know the original uid, so the language may
-                #          be wrong when the admin language differs.
-                (cr, dummy) = self._get_cr(frame, allow_create=False)
-                uid = self._get_uid(frame)
-                if cr and uid:
-                    env = odoo.api.Environment(cr, uid, {})
-                    lang = env['res.users'].context_get()['lang']
-        return lang
+xml_translate.term_converter = xml_term_converter
+html_translate.term_converter = html_term_converter
 
-    def __call__(self, source):
-        res = source
-        cr = None
-        is_new_cr = False
-        try:
-            frame = inspect.currentframe()
-            if frame is None:
-                return source
-            frame = frame.f_back
-            if not frame:
-                return source
-            lang = self._get_lang(frame)
-            if lang:
-                cr, is_new_cr = self._get_cr(frame)
-                if cr:
-                    # Try to use ir.translation to benefit from global cache if possible
-                    env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, {})
-                    res = env['ir.translation']._get_source(None, ('code','sql_constraint'), lang, source)
-                else:
-                    _logger.debug('no context cursor detected, skipping translation for "%r"', source)
+xml_translate.is_text = is_text
+html_translate.is_text = is_text
+
+xml_translate.term_adapter = xml_term_adapter
+
+FIELD_TRANSLATE['html_translate'] = html_translate
+FIELD_TRANSLATE['xml_translate'] = xml_translate
+
+
+"""
+Field data value for translated fields:
+
+- `None`: Database value is NULL and no translation exists.
+- `dict`: Partial translations with fallback values. Values for untranslated languages
+  may be filled with the `en_US` value after `fetch`.
+  e.g. `{'fr_FR': 'French', 'nl_NL': 'English'}`.
+- `StoredTranslations`: Complete translations. Values for untranslated languages will
+  fallback to the `en_US` value when accessed via `__getitem__` from cache.
+  e.g. `StoredTranslations({'en_US': 'English', 'fr_FR': 'French'})`.
+"""
+
+
+class StoredTranslations(dict):
+    """Dictionary-based cache value that stores the raw JSON translations from the database.
+
+    This provides easier write operations at the cost of slower cache reads, as it implements
+    custom fallback logic in `__getitem__`. The `'en_US'` key is expected to be present as the
+    default fallback language.
+    """
+    __slots__ = ()
+
+    @staticmethod
+    def fallback_langs(lang: str) -> tuple[str, ...]:
+        if lang == '_en_US':
+            return '_en_US', 'en_US'
+        if lang == 'en_US':
+            return ('en_US',)
+        if lang.startswith('_'):
+            return lang, lang[1:], '_en_US', 'en_US'
+        return lang, 'en_US'
+
+    @staticmethod
+    def _get_translation_dictionary(field: BaseString, from_lang_value, to_lang_values):
+        """ Build a dictionary from terms in from_lang_value to terms in to_lang_values
+
+        :param str from_lang_value: from xml/html
+        :param dict to_lang_values: {lang: lang_value}
+
+        :return: {from_lang_term: {lang: lang_term}}
+        :rtype: dict
+        """
+        if not isinstance(from_lang_value, str):
+            return defaultdict(lambda: defaultdict(dict))
+        if callable(field.translate):
+            from_lang_terms = ParsedTranslation(field, from_lang_value).terms if from_lang_value else []
+        else:
+            # Ensure translation terms are stringified.
+            # Double quotes inside Markup are not escaped when the value is used as a polib.POEntry msgid.
+            from_lang_terms = [str(from_lang_value)]
+        dictionary = defaultdict(lambda: defaultdict(dict))
+        if not from_lang_terms:
+            return dictionary
+        dictionary.update({from_lang_term: defaultdict(dict) for from_lang_term in from_lang_terms})
+
+        for lang, to_lang_value in to_lang_values.items():
+            if callable(field.translate):
+                to_lang_terms = ParsedTranslation(field, to_lang_value).terms if to_lang_value else []
             else:
-                _logger.debug('no translation language detected, skipping translation for "%r" ', source)
-        except Exception:
-            _logger.debug('translation went wrong for "%r", skipped', source)
-                # if so, double-check the root/base translations filenames
-        finally:
-            if cr and is_new_cr:
-                cr.close()
-        return res
+                to_lang_terms = [str(to_lang_value)] if isinstance(to_lang_value, str) else []
+            if len(from_lang_terms) != len(to_lang_terms):
+                for from_lang_term in from_lang_terms:
+                    dictionary[from_lang_term][lang] = from_lang_term
+            else:
+                for from_lang_term, to_lang_term in zip(from_lang_terms, to_lang_terms):
+                    dictionary[from_lang_term][lang] = to_lang_term
+        return dictionary
 
-_ = GettextAlias()
+    def __getitem__(self, key):
+        """ Retrieve the translation for the specified language code with automatic fallback.
+
+        :param key: Language code (non-empty string).
+                    Fallback logic:
+                    - For normal language codes (e.g., 'fr_FR'):
+                    Tries: key -> 'en_US'
+                    - For technical language codes (prefixed with '_', e.g., '_fr_FR'):
+                    Tries: key -> key[1:] -> '_en_US' -> 'en_US'
+
+                    Note: This fallback behavior is consistent with ``field.to_sql``
+                    when ``prefetch_lang=False`` for translated fields
+
+        :return: The translation value for the language code.
+        """
+        # Direct dict method calls for performance optimization (bypass super())
+        if (res := dict.get(self, key)) is not None:
+            return res
+        if key[0] == '_':
+            if (res := dict.get(self, key[1:])) is not None:
+                return res
+            if (res := dict.get(self, '_en_US')) is not None:
+                return res
+        try:
+            return dict.__getitem__(self, 'en_US')
+        except KeyError:
+            _logger.warning("StoredTranslations %s has no translation for 'en_US'", dict(self))
+            # return the same behavior as ``field.to_sql`` when ``prefetch_lang=False``
+            # if 'en_US' is missing for a NOT NULL value
+            return None
+
+    def __contains__(self, key) -> bool:
+        return True
+
+    def copy(self) -> StoredTranslations:
+        return StoredTranslations(self)
+
+    def get(self, key, default=None):
+        return self[key]
+
+    def normalize(self, env: Environment, field: BaseString) -> StoredTranslations | None:
+        """Check and auto fix issues for stored translations and return a new StoredTranslations instance or None"""
+        return self._validate(env, field, auto_fix=True)
+
+    def validate(self, env: Environment, field: BaseString) -> None:
+        """Validate stored translations against soft constraints for the translated field"""
+        self._validate(env, field, auto_fix=False)
+
+    def _validate(self, env: Environment, field: BaseString, *, check_structure: bool = True, auto_fix: bool = False) -> StoredTranslations | None:
+        """Validate stored translations against soft constraints for the translated field"""
+        fixed_self = self.copy()
+        issues = []
+
+        active_langs = env['res.lang']._get_active_by('code')
+        valid_langs = active_langs.keys() | {'en_US'}
+        if callable(field.translate):
+            valid_langs |= {'_' + lang for lang in valid_langs}
+
+        # clean up invalid languages and drop None values
+        for k, v in self.items():
+            if k not in valid_langs:
+                if not auto_fix:
+                    raise ValidationError(env._("Translations %(translations)s for field %(field)s has invalid language '%(language)s'", translations=self, field=field, language=k))
+                # Unlike other issues (usually coding errors), invalid languages are typically
+                # caused by deactivating languages in res.lang; clean them up silently.
+                fixed_self.pop(k)
+            elif v is None:
+                if not auto_fix:
+                    raise ValidationError(env._("Translations %(translations)s for field %(field)s has None value for language '%(language)s'", translations=self, field=field, language=k))
+                issues.append(f"It has None value for language '{k}'.")
+                fixed_self.pop(k)
+
+        # en_US must exist
+        if not dict.__contains__(fixed_self, 'en_US'):  # noqa: PLC2801
+            if not auto_fix:
+                raise ValidationError(env._("Translations %(translations)s for field %(field)s must have 'en_US'", translations=self, field=field))
+            issues.append("It has no 'en_US'.")
+            if not fixed_self:
+                return None
+            fixed_self['en_US'] = next(iter(fixed_self.values()))
+
+        # check technical languages which start with '_'
+        assert field.translate
+        if callable(field.translate):
+            for k, v in list(fixed_self.items()):
+                if k.startswith('_') and not dict.__contains__(fixed_self, k[1:]):  # noqa: PLC2801
+                    if not auto_fix:
+                        raise ValidationError(env._("Translations %(translations)s for field %(field)s has technical language %(technical_language)s but not corresponding language '%(language)s'", translations=self, field=field, technical_language=k, language=k[1:]))
+                    issues.append(f"It has technical language '{k}' but not corresponding language '{k[1:]}'.")
+                    fixed_self[k[1:]] = fixed_self['en_US']
+
+        if check_structure and callable(field.translate):
+            translations = {k: fixed_self['_' + k] for k in fixed_self if not k.startswith('_')}
+            # all translations must share the same structure
+            if len({*translations.values()}) > 1:
+                translation_en = translations['en_US']
+                structure_en = ParsedTranslation(field, translation_en).structure
+                for k, v in translations.items():
+                    if v != translation_en and ParsedTranslation(field, v).structure != structure_en:
+                        if not auto_fix:
+                            raise ValidationError(env._("Translations %(translations)s for field %(field)s have different structures", translations=self, field=field))
+                        issues.append(f"Its translation for language '{k}' has different structure from 'en_US.'")
+                        fixed_self.pop(k, None)
+                        fixed_self.pop('_' + k, None)
+
+        if issues:
+            _logger.info(
+                "Auto fix StoredTranslations for field %s from %s to %s because:\n%s",
+                field, self, fixed_self, ",\n".join(issues)
+            )
+
+        return fixed_self
+
+    def written(self, env: Environment, field: BaseString, translation_dict: dict[str, ParsedTranslation], *, adapt_close_terms: bool = False, delay_translations: bool = False) -> StoredTranslations | None:
+        """ Apply written translations and build a new stored mapping.
+
+        :param env: Current Odoo environment, used for validation and
+                    language-aware errors.
+        :param field: A model_terms translated field (``callable(field.translate)``).
+        :param translation_dict: Mapping ``{lang_code: ParsedTranslation}`` for
+                                 languages explicitly written in this update.
+        :param adapt_close_terms: If ``True`` and supported by
+                                  ``field.translate.term_adapter``, remap old
+                                  term translations to close new terms.
+        :param delay_translations: If ``True``, keep current non-written
+                                   language values and store recomputed values
+                                   in technical keys (``_lang``). If ``False``,
+                                   write recomputed values directly.
+        :return: A new validated ``StoredTranslations`` result, or ``None`` when no
+                 valid translation can be kept.
+        """
+        assert callable(field.translate)  # model translated field is not supported
+        valid_self = self._validate(env, field, check_structure=False, auto_fix=True)
+
+        if not translation_dict:
+            return valid_self
+
+        if not valid_self:
+            return StoredTranslations({
+                'en_US': next(iter(translation_dict.values())).value,
+                **{k: v.value for k, v in translation_dict.items()},
+            })
+
+        # assert all(not key.startswith('_') for key in translation_dict)
+        # assert len({v.structure for v in translation_dict.values())}) <= 1
+
+        # use the first matched language as base language if its written translation is the same as before
+        # otherwise, use the first write language as the base language
+        # in practice, it is always recommended to use the env.lang value as the first key of translation_dict
+        translate_terms_only = False
+        base_lang = next(
+            (k for k, v in translation_dict.items() if v.value == valid_self['_' + k] and (translate_terms_only := True)),
+            next(iter(translation_dict))
+        )
+
+        if translate_terms_only:
+            # Base language value is unchanged; update only term translations for non-base languages.
+            for k, v in translation_dict.items():
+                valid_self[k] = v.value  # update new translations
+                valid_self.pop('_' + k, None)  # drop old technical sycnhronized translations for updated languages
+            return valid_self
+
+        base_value = translation_dict[base_lang].value
+        base_terms = translation_dict[base_lang].terms
+        base_terms_set = set(base_terms)
+        other_old_translations = {
+            k: valid_self['_' + k]
+            for k in valid_self
+            if not k.startswith('_')
+            and k not in translation_dict
+        }
+
+        # parse the translation term mapping for old non-update translations
+        translation_dictionary = StoredTranslations._get_translation_dictionary(field, valid_self['_' + base_lang], other_old_translations)
+
+        # best effort to migrate old translation terms to new close translation terms
+        get_text_content = field.translate.get_text_content if hasattr(field.translate, 'get_text_content') else lambda term: term
+        is_text = field.translate.is_text if hasattr(field.translate, 'is_text') else lambda term: True
+        term_adapter = field.translate.term_adapter if adapt_close_terms and hasattr(field.translate, 'term_adapter') else None
+        text2terms = defaultdict(list[str])
+        for term in base_terms:
+            if term_text := get_text_content(term):
+                text2terms[term_text].append(term)
+        for old_term in list(translation_dictionary):
+            if old_term in base_terms_set:
+                continue
+            old_term_text = get_text_content(old_term)
+            # Find the new base term text which is most similar to the old term's text (fuzzy match, cutoff 0.9)
+            closest_text = next(iter(get_close_matches(old_term_text, text2terms, n=1, cutoff=0.9)), None)
+            if closest_text is None:
+                continue
+            # Among new base terms sharing that text, find the specific new base term closest to the old term
+            closest_term = get_close_matches(old_term, text2terms[closest_text], n=1, cutoff=0)[0]
+            if closest_term in translation_dictionary:
+                continue
+            old_is_text = is_text(old_term)
+            closest_is_text = is_text(closest_term)
+            if not old_is_text and closest_is_text:
+                # Don't migrate translations for a old non-text term to a new text term
+                # in case the new text term is used for TRANSLATED_ATTRS
+                continue
+            if not closest_is_text and term_adapter:
+                adapter = term_adapter(closest_term)
+                if adapter(old_term) is None:
+                    # Don't migrate if old term and closest_term have different structures when adapter is applied
+                    continue
+                translation_dictionary[closest_term] = {k: adapter(v) for k, v in translation_dictionary.pop(old_term).items()}
+            else:
+                translation_dictionary[closest_term] = translation_dictionary.pop(old_term)
+
+        # use the old translation mapping to get new translations for the not directly updated languages
+        other_new_translations = {
+            l: field.translate(lambda term: translation_dictionary.get(term, {l: None})[l], base_value)
+            for l in other_old_translations
+        }
+
+        # update self for not directly updated languages
+        if delay_translations:
+            for k, v in other_new_translations.items():
+                if v == valid_self[k]:
+                    valid_self.pop('_' + k, None)
+                else:
+                    valid_self['_' + k] = v
+        else:
+            for k, v in other_new_translations.items():
+                valid_self.pop('_' + k, None)
+                valid_self[k] = other_new_translations[k]
+
+        # update self for directly updated languages
+        for k, v in translation_dict.items():
+            # remove old technical synchronized translations
+            valid_self.pop('_' + k, None)
+            # use new updated translations
+            valid_self[k] = v.value
+        return valid_self
+
+    def translated(
+        self,
+        env: Environment,
+        field: BaseString,
+        source_lang: str,
+        term_updates: dict[str, dict[str, str]],
+        *,
+        digest: Callable[[str], str] | None = None,
+        overwrite: bool = True,
+        delay_translations: bool = False,
+    ) -> StoredTranslations | None:
+        """ Apply term-level translations and build a new stored mapping.
+
+        :param env: Current Odoo environment, used for validation and
+                    language-aware errors.
+        :param field: A model_terms translated field (``callable(field.translate)``).
+        :param source_lang: Language of the source terms in ``term_updates``.
+        :param term_updates: Mapping ``{lang_code: {source_term: translated_term}}``
+                             for languages explicitly updated in this call.
+        :param digest: Optional digest function for source terms in ``term_updates``
+                       when the caller sends digested source keys.
+        :param overwrite: Controls merge priority between incoming ``term_updates`` and
+                          the prior term mappings derived from the stored field value.
+                          When ``True`` (default), incoming updates take priority; when
+                          ``False``, prior mappings take priority. Prior mappings are those
+                          where the stored term differs from the source term (``term != src``).
+                          see ``TestStoredTranslations.test_translated_overwrite_false`` for more details.
+        :param delay_translations: If ``True``, keep current non-updated language
+                                   values and store recomputed values in technical
+                                   keys (``_lang``). If ``False``, write recomputed
+                                   values directly.
+        :return: A new validated ``StoredTranslations`` result, or ``None`` when no
+                 valid translation can be kept.
+        """
+        assert callable(field.translate)
+        valid_self = self._validate(env, field, check_structure=False, auto_fix=True)
+        if not valid_self:
+            return None
+
+        # For updated languages, use the latest synchronized value as base.
+        if not delay_translations:
+            for lang in term_updates:
+                if dict.__contains__(valid_self, f'_{lang}'):  # noqa: PLC2801
+                    valid_self[lang] = valid_self.pop(f'_{lang}')
+
+        term_updates = {lang: src2term for lang, src2term in term_updates.items() if src2term}
+        if not term_updates:
+            return valid_self
+
+        old_source_lang_value = valid_self['_' + source_lang]
+        old_values_to_translate = {
+            lang: value
+            for lang in term_updates
+            if (value := valid_self['_' + lang]) != old_source_lang_value
+        }
+        # {source_term: {lang: translated_term}}
+        old_translation_dictionary = StoredTranslations._get_translation_dictionary(field, old_source_lang_value, old_values_to_translate)
+
+        if digest:
+            # replace digested old source terms with real old source terms
+            digested2term = {
+                digest(old_term): old_term
+                for old_term in old_translation_dictionary
+            }
+            term_updates = {
+                lang: {
+                    digested2term[src]: term
+                    for src, term in src2term.items()
+                    if src in digested2term
+                }
+                for lang, src2term in term_updates.items()
+            }
+
+        for lang, src2term in term_updates.items():
+            old_src2term = {src: term for src, lang2term in old_translation_dictionary.items() if (term := lang2term.get(lang)) and term != src}
+            new_src2term = {**old_src2term, **src2term} if overwrite else {**src2term, **old_src2term}
+            translation = field.translate(new_src2term.get, old_source_lang_value)
+            if field.type == 'html':
+                # a hack to sanitize html
+                translation = field._validated_cache_value(translation, env)
+            if delay_translations:
+                valid_self['_' + lang] = translation
+                valid_self.setdefault(lang, valid_self['en_US'])
+            else:
+                valid_self[lang] = translation
+        return valid_self
+
+    def extract_term_translations(self, env: Environment, field: BaseString, source_lang: str, target_langs: set[str] | None = None, *, include_identical: bool = False) -> dict[str, dict[str, str]]:
+        """ Extract per-language term mappings from stored model_terms translations.
+
+        :param env: Odoo environment
+        :param field: A model_terms translated field (``callable(field.translate)``).
+        :param source_lang: Language of the source terms to extract against
+        :param target_langs: if provided, restrict output to these language codes
+        :param include_identical: if True, also keep terms where translated_term == source_term
+        :return: the terms mapping for each target language {lang: {src_term: translated_term}}
+        """
+        assert callable(field.translate)
+        valid_self = self._validate(env, field, check_structure=False, auto_fix=True)
+        if not valid_self:
+            return {}
+
+        source_value = valid_self['_' + source_lang]
+
+        target_lang_values = {
+            lang: value
+            for lang in valid_self
+            if not lang.startswith('_')
+            and lang != source_lang and (target_langs is None or lang in target_langs)
+            and (value := valid_self['_' + lang]) != source_value
+        }
+        if not target_lang_values and not include_identical:
+            return {}
+
+        # {source_term: {lang: translated_term}}
+        translation_dictionary = StoredTranslations._get_translation_dictionary(field, source_value, target_lang_values)
+
+        # Invert to {lang: {source_term: translated_term}}
+        result: dict[str, dict[str, str]] = {}
+        for source_term, lang2term in translation_dictionary.items():
+            for lang, translated_term in lang2term.items():
+                if include_identical or source_term != translated_term:
+                    result.setdefault(lang, {})[source_term] = translated_term
+
+        if include_identical:
+            for lang in env['res.lang']._get_active_by('code') if target_langs is None else target_langs:
+                if lang not in result:
+                    result[lang] = {source_term: source_term for source_term in translation_dictionary}
+
+        return result
+
+
+class ParsedTranslation:
+    def __init__(self, field: BaseString, value: str):
+        assert isinstance(value, str)
+        self.value: str = value
+
+        assert callable(field.translate)
+        self.terms: list[str] = []
+
+        def translate_func(term):
+            self.terms.append(term)
+            return 'X'
+
+        self.structure = field.translate(translate_func, value)
+
+
+def adapt_translated_field_value(
+    env: Environment,
+    field: BaseString,
+    val: StoredTranslations | dict[str, str] | str | Literal[False] | None,
+    adapter: Callable[[str, str], str],
+) -> StoredTranslations | dict[str, str] | str | Literal[False] | None:
+    """Apply an adapter to a translated field value, handling all supported value formats.
+
+    Translated fields accept either a plain string (single language) or a dict mapping
+    language codes to translated strings. This function applies the adapter to each
+    value, preserving None and False as-is.
+
+    :param env: the Odoo environment
+    :param field: the translated field
+    :param val: the value to adapt; can be a dict {lang: value}, a plain string,
+                or None/False
+    :param adapter: callable(lang, value) -> str; receives language code and value,
+                    returns the adapted value for each translation
+    :return: the adapted value in the same format as ``val``
+    """
+    if val is None or val is False:
+        return val
+    if not isinstance(val, dict):
+        return adapter(env.lang or 'en_US', val)
+    assert field.translate
+    adapted = {k: adapter(k, v) for k, v in val.items() if k == 'en_US' or env['res.lang']._lang_get(k)}
+    if isinstance(val, StoredTranslations):
+        model = env[field.model_name]
+        return StoredTranslations({
+            k: cache_v
+            for k, v in adapted.items()
+            if (cache_v := field.convert_to_cache(v, model)) is not None
+        })
+    return adapted
+
+
+def mark_as_copy(field_name: str) -> Callable[[BaseModel], Any]:
+    """Factory for a :attr:`~odoo.fields.Field.copy` callable that appends `` (copy)``.
+
+    Usage::
+
+        name = fields.Char(..., copy=mark_as_copy('name'))
+    """
+    def _mark_as_copy(record):
+        field = record._fields[field_name]
+        assert field.type == 'char'
+        env = record.env
+        assert not callable(field.translate)
+        if field.translate:
+            translations = record._get_stored_translations(field_name)
+            if not translations:
+                return False
+            return adapt_translated_field_value(
+                env, field, translations,
+                lambda lang, v: record.with_context(lang=lang).env._('%s (copy)', v),
+            )
+        if record[field_name] is False:
+            return record[field_name]
+        return env._('%s (copy)', record[field_name])
+
+    return _mark_as_copy
+
+
+def get_translation(module: str, lang: str, source: str, args: tuple | dict) -> str:
+    """Translate and format using a module, language, source text and args."""
+    # get the translation by using the language
+    assert lang, "missing language for translation"
+    if lang == 'en_US':
+        translation = source
+    else:
+        assert module, "missing module name for translation"
+        translation = code_translations.get_python_translations(module, lang).get(source, source)
+    # skip formatting if we have no args
+    if not args:
+        return translation
+    # we need to check the args for markup values and for lazy translations
+    args_is_dict = isinstance(args, dict)
+    if any(isinstance(a, Markup) for a in (args.values() if args_is_dict else args)):
+        translation = escape(translation)
+    if any(isinstance(a, LazyGettext) for a in (args.values() if args_is_dict else args)):
+        if args_is_dict:
+            args = {k: v._translate(lang) if isinstance(v, LazyGettext) else v for k, v in args.items()}
+        else:
+            args = tuple(v._translate(lang) if isinstance(v, LazyGettext) else v for v in args)
+    if any(isinstance(a, Iterable) and not isinstance(a, (str, bytes)) for a in (args.values() if args_is_dict else args)):
+        # automatically format list-like arguments in a localized way
+        def process_translation_arg(v):
+            return format_list(env=None, lst=v, lang_code=lang) if isinstance(v, Iterable) and not isinstance(v, (str, bytes)) else v
+        if args_is_dict:
+            args = {k: process_translation_arg(v) for k, v in args.items()}
+        else:
+            args = tuple(process_translation_arg(v) for v in args)
+    # format
+    try:
+        return translation % args
+    except (TypeError, ValueError, KeyError):
+        bad = translation
+        # fallback: apply to source before logging exception (in case source fails)
+        translation = source % args
+        _logger.exception('Bad translation %r for string %r', bad, source)
+    return translation
+
+
+def get_translated_module(arg: str | int | typing.Any) -> str:  # frame not represented as hint
+    """Get the addons name.
+
+    :param arg: can be any of the following:
+                str ("name_of_module") returns itself;
+                str (__name__) use to resolve module name;
+                int is number of frames to go back to the caller;
+                frame of the caller function
+    """
+    if isinstance(arg, str):
+        if arg.startswith('odoo.addons.'):
+            # get the name of the module
+            return arg.split('.')[2]
+        if '.' in arg or not arg:
+            # module name is not in odoo.addons.
+            return 'base'
+        else:
+            return arg
+    else:
+        if isinstance(arg, int):
+            frame = _get_frame(arg)
+        else:
+            frame = arg
+        if not frame:
+            return 'base'
+        if (module_name := frame.f_globals.get("__name__")) and module_name.startswith('odoo.addons.'):
+            # just a quick lookup because `get_resource_from_path is slow compared to this`
+            return module_name.split('.')[2]
+        path = inspect.getfile(frame)
+        from odoo.modules import get_resource_from_path  # noqa: PLC0415
+        path_info = get_resource_from_path(path)
+        return path_info[0] if path_info else 'base'
+
+
+def _get_cr(frame):
+    # try, in order: cr, cursor, self.env.cr, self.cr,
+    # request.env.cr
+    if 'cr' in frame.f_locals:
+        return frame.f_locals['cr']
+    if 'cursor' in frame.f_locals:
+        return frame.f_locals['cursor']
+    if (local_self := frame.f_locals.get('self')) is not None:
+        if (local_env := getattr(local_self, 'env', None)) is not None:
+            return local_env.cr
+        if (cr := getattr(local_self, 'cr', None)) is not None:
+            return cr
+    if (req := odoo.http.request) and (env := req.env):
+        return env.cr
+    return None
+
+
+def _get_uid(frame) -> int | None:
+    # try, in order: uid, user, self.env.uid
+    if 'uid' in frame.f_locals:
+        return frame.f_locals['uid']
+    if 'user' in frame.f_locals:
+        from odoo.models import BaseModel  # noqa: PLC0415
+        user = frame.f_locals['user']           # user may be a record
+        if isinstance(user, int) or (isinstance(user, BaseModel) and user._name == 'res.users'):
+            return int(user)
+    if (local_self := frame.f_locals.get('self')) is not None:
+        if hasattr(local_self, 'env') and (uid := local_self.env.uid):
+            return uid
+    return None
+
+
+def _get_lang(frame, default_lang='') -> str:
+    # get from: context.get('lang'), kwargs['context'].get('lang'),
+    if local_context := frame.f_locals.get('context'):
+        if lang := local_context.get('lang'):
+            return lang
+    if (local_kwargs := frame.f_locals.get('kwargs')) and (local_context := local_kwargs.get('context')):
+        if lang := local_context.get('lang'):
+            return lang
+    # get from self.env
+    log_level = logging.WARNING
+    local_self = frame.f_locals.get('self')
+    local_env = local_self is not None and getattr(local_self, 'env', None)
+    if local_env:
+        if lang := local_env.lang:
+            return lang
+        # we found the env, in case we fail, just log in debug
+        log_level = logging.DEBUG
+    # get from request?
+    if (req := odoo.http.request) and (env := req.env) and (lang := env.lang):
+        return lang
+    # Last resort: attempt to guess the language of the user
+    # Pitfall: some operations are performed in sudo mode, and we
+    #          don't know the original uid, so the language may
+    #          be wrong when the admin language differs.
+    cr = _get_cr(frame)
+    uid = _get_uid(frame)
+    if cr and uid:
+        from odoo import api  # noqa: PLC0415
+        env = api.Environment(cr, uid, {})
+        if lang := env['res.users'].context_get().get('lang'):
+            return lang
+    # fallback
+    if default_lang:
+        _logger.debug('no translation language detected, fallback to %s', default_lang)
+        return default_lang
+    # give up
+    _logger.log(log_level, 'no translation language detected, skipping translation %s', frame, stack_info=True)
+    return ''
+
+
+def _get_translation_source(stack_level: int, module: str = '', lang: str = '', default_lang: str = '') -> tuple[str, str]:
+    if not (module and lang):
+        frame = _get_frame(stack_level + 1)  # +1 to skip this function
+        lang = lang or _get_lang(frame, default_lang)
+    if lang and lang != 'en_US':
+        return get_translated_module(module or frame), lang
+    else:
+        # we don't care about the module for 'en_US'
+        return module or 'base', 'en_US'
+
+
+def get_text_alias(source: str, /, *args, **kwargs):
+    assert not (args and kwargs)
+    assert isinstance(source, str)
+    module, lang = _get_translation_source(1)
+    return get_translation(module, lang, source, args or kwargs)
+
+
+@functools.total_ordering
+class LazyGettext:
+    """ Lazy code translated term.
+
+    Similar to get_text_alias but the translation lookup will be done only at
+    __str__ execution.
+    This eases the search for terms to translate as lazy evaluated strings
+    are declared early.
+
+    A code using translated global variables such as:
+
+    ```
+    _lt = LazyTranslate(__name__)
+    LABEL = _lt("User")
+
+    def _compute_label(self):
+        env = self.with_env(lang=self.partner_id.lang).env
+        self.user_label = env._(LABEL)
+    ```
+
+    works as expected (unlike the classic get_text_alias implementation).
+    """
+
+    __slots__ = ('_args', '_default_lang', '_module', '_source')
+
+    def __init__(self, source, /, *args, _module='', _default_lang='', **kwargs):
+        assert not (args and kwargs)
+        assert isinstance(source, str)
+        self._source = source
+        self._args = args or kwargs
+        self._module = get_translated_module(_module or 2)
+        self._default_lang = _default_lang
+
+    def _translate(self, lang: str = '') -> str:
+        module, lang = _get_translation_source(2, self._module, lang, default_lang=self._default_lang)
+        return get_translation(module, lang, self._source, self._args)
+
+    def __repr__(self):
+        """ Show for the debugger"""
+        args = {'_module': self._module, '_default_lang': self._default_lang, '_args': self._args}
+        return f"_lt({self._source!r}, **{args!r})"
+
+    def __str__(self):
+        """ Translate."""
+        return self._translate()
+
+    def __eq__(self, other):
+        if not isinstance(other, LazyGettext):
+            return False
+        return (self._source == other._source and self._args == other._args and
+                self._module == other._module and self._default_lang == other._default_lang)
+
+    def __hash__(self):
+        raise NotImplementedError()
+
+    def __lt__(self, other):
+        raise NotImplementedError()
+
+    def __add__(self, other):
+        if isinstance(other, str):
+            return self._translate() + other
+        elif isinstance(other, LazyGettext):
+            return self._translate() + other._translate()
+        return NotImplemented
+
+    def __radd__(self, other):
+        if isinstance(other, str):
+            return other + self._translate()
+        return NotImplemented
+
+
+class LazyTranslate:
+    """ Lazy translation template.
+
+    Usage:
+    ```
+    _lt = LazyTranslate(__name__)
+    MYSTR = _lt('Translate X')
+    ```
+
+    You may specify a `default_lang` to fallback to a given language on error
+    """
+    module: str
+    default_lang: str
+
+    def __init__(self, module: str, *, default_lang: str = '') -> None:
+        self.module = module = get_translated_module(module or 2)
+        # set the default lang to en_US for lazy translations in the base module
+        self.default_lang = default_lang or ('en_US' if module == 'base' else '')
+
+    def __call__(self, source: str, *args, **kwargs) -> LazyGettext:
+        return LazyGettext(source, *args, **kwargs, _module=self.module, _default_lang=self.default_lang)
+
+
+_ = get_text_alias
+_lt = LazyGettext
 
 
 def quote(s):
@@ -472,289 +1257,377 @@ def unquote(str):
     """Returns unquoted PO term string, with special PO characters unescaped"""
     return re_escaped_char.sub(_sub_replacement, str[1:-1])
 
-# class to handle po files
-class PoFile(object):
-    def __init__(self, buffer):
-        # TextIOWrapper closes its underlying buffer on close *and* can't
-        # handle actual file objects (on python 2)
-        self.buffer = codecs.StreamReaderWriter(
-            stream=buffer,
-            Reader=codecs.getreader('utf-8'),
-            Writer=codecs.getwriter('utf-8')
-        )
+
+def parse_xmlid(xmlid: str, default_module: str) -> tuple[str, str]:
+    split_id = xmlid.split('.', maxsplit=1)
+    if len(split_id) == 1:
+        return default_module, split_id[0]
+    return split_id[0], split_id[1]
+
+
+def translation_file_reader(source, fileformat='po', module=None):
+    """ Iterate over translation file to return Odoo translation entries """
+    if fileformat == 'csv':
+        if module is not None:
+            # if `module` is provided, we are reading a data file located in that module
+            return CSVDataFileReader(source, module)
+        return CSVFileReader(source)
+    if fileformat == 'po':
+        return PoFileReader(source)
+    if fileformat == 'xml':
+        assert module
+        return XMLDataFileReader(source, module)
+    _logger.info('Bad file format: %s', fileformat)
+    raise Exception(_('Bad file format: %s', fileformat))
+
+class CSVFileReader:
+    def __init__(self, source):
+        _reader = codecs.getreader('utf-8')
+        self.source = csv.DictReader(_reader(source), quotechar='"', delimiter=',')
+        self.prev_code_src = ""
 
     def __iter__(self):
-        self.buffer.seek(0)
-        self.lines = self._get_lines()
-        self.lines_count = len(self.lines)
+        for entry in self.source:
 
-        self.first = True
-        self.extra_lines= []
-        return self
+            # determine <module>.<imd_name> from res_id
+            if entry["res_id"] and entry["res_id"].isnumeric():
+                # res_id is an id or line number
+                entry["res_id"] = int(entry["res_id"])
+            elif not entry.get("imd_name"):
+                # res_id is an external id and must follow <module>.<name>
+                entry["module"], entry["imd_name"] = entry["res_id"].split(".")
+                entry["res_id"] = None
+            if entry["type"] == "model" or entry["type"] == "model_terms":
+                entry["imd_model"] = entry["name"].partition(',')[0]
 
-    def _get_lines(self):
-        lines = self.buffer.readlines()
-        # remove the BOM (Byte Order Mark):
-        if len(lines):
-            lines[0] = lines[0].lstrip(u"\ufeff")
+            if entry["type"] == "code":
+                if entry["src"] == self.prev_code_src:
+                    # skip entry due to unicity constrain on code translations
+                    continue
+                self.prev_code_src = entry["src"]
 
-        lines.append('') # ensure that the file ends with at least an empty line
-        return lines
+            yield entry
 
-    def cur_line(self):
-        return self.lines_count - len(self.lines)
 
-    def next(self):
-        trans_type = name = res_id = source = trad = None
-        if self.extra_lines:
-            trans_type, name, res_id, source, trad, comments = self.extra_lines.pop(0)
-            if not res_id:
-                res_id = '0'
-        else:
-            comments = []
-            targets = []
-            line = None
-            fuzzy = False
-            while not line:
-                if 0 == len(self.lines):
-                    raise StopIteration()
-                line = self.lines.pop(0).strip()
-            while line.startswith('#'):
-                if line.startswith('#~ '):
-                    break
-                if line.startswith('#.'):
-                    line = line[2:].strip()
-                    if not line.startswith('module:'):
-                        comments.append(line)
-                elif line.startswith('#:'):
-                    # Process the `reference` comments. Each line can specify
-                    # multiple targets (e.g. model, view, code, selection,
-                    # ...). For each target, we will return an additional
-                    # entry.
-                    for lpart in line[2:].strip().split(' '):
-                        trans_info = lpart.strip().split(':',2)
-                        if trans_info and len(trans_info) == 2:
-                            # looks like the translation trans_type is missing, which is not
-                            # unexpected because it is not a GetText standard. Default: 'code'
-                            trans_info[:0] = ['code']
-                        if trans_info and len(trans_info) == 3:
-                            # this is a ref line holding the destination info (model, field, record)
-                            targets.append(trans_info)
-                elif line.startswith('#,') and (line[2:].strip() == 'fuzzy'):
-                    fuzzy = True
-                line = self.lines.pop(0).strip()
-            if not self.lines:
-                raise StopIteration()
-            while not line:
-                # allow empty lines between comments and msgid
-                line = self.lines.pop(0).strip()
-            if line.startswith('#~ '):
-                while line.startswith('#~ ') or not line.strip():
-                    if 0 == len(self.lines):
-                        raise StopIteration()
-                    line = self.lines.pop(0)
-                # This has been a deprecated entry, don't return anything
-                return next(self)
+class CSVDataFileReader:
+    def __init__(self, source, module: str):
+        """Read the translations in CSV data file.
 
-            if not line.startswith('msgid'):
-                raise Exception("malformed file: bad line: %s" % line)
-            source = unquote(line[6:])
-            line = self.lines.pop(0).strip()
-            if not source and self.first:
-                self.first = False
-                # if the source is "" and it's the first msgid, it's the special
-                # msgstr with the information about the translate and the
-                # translator; we skip it
-                self.extra_lines = []
-                while line:
-                    line = self.lines.pop(0).strip()
-                return next(self)
+        :param source: the input stream
+        :param module: the CSV file is considered as a data file possibly
+                       containing terms translated with the `@` syntax
+        """
+        _reader = codecs.getreader('utf-8')
+        self.module = module
+        self.model = os.path.splitext((os.path.basename(source.name)))[0].split('-')[0]
+        self.source = csv.DictReader(_reader(source), quotechar='"', delimiter=',')
+        self.prev_code_src = ""
 
-            while not line.startswith('msgstr'):
-                if not line:
-                    raise Exception('malformed file at %d'% self.cur_line())
-                source += unquote(line)
-                line = self.lines.pop(0).strip()
-
-            trad = unquote(line[7:])
-            line = self.lines.pop(0).strip()
-            while line:
-                trad += unquote(line)
-                line = self.lines.pop(0).strip()
-
-            if targets and not fuzzy:
-                # Use the first target for the current entry (returned at the
-                # end of this next() call), and keep the others to generate
-                # additional entries (returned the next next() calls).
-                trans_type, name, res_id = targets.pop(0)
-                for t, n, r in targets:
-                    if t == trans_type == 'code': continue
-                    self.extra_lines.append((t, n, r, source, trad, comments))
-
-        if name is None:
-            if not fuzzy:
-                _logger.warning('Missing "#:" formatted comment at line %d for the following source:\n\t%s',
-                                self.cur_line(), source[:30])
-            return next(self)
-        return trans_type, name, res_id, source, trad, '\n'.join(comments)
-    __next__ = next
-
-    def write_infos(self, modules):
-        import odoo.release as release
-        self.buffer.write(u"# Translation of %(project)s.\n" \
-                          "# This file contains the translation of the following modules:\n" \
-                          "%(modules)s" \
-                          "#\n" \
-                          "msgid \"\"\n" \
-                          "msgstr \"\"\n" \
-                          '''"Project-Id-Version: %(project)s %(version)s\\n"\n''' \
-                          '''"Report-Msgid-Bugs-To: \\n"\n''' \
-                          '''"POT-Creation-Date: %(now)s\\n"\n'''        \
-                          '''"PO-Revision-Date: %(now)s\\n"\n'''         \
-                          '''"Last-Translator: <>\\n"\n''' \
-                          '''"Language-Team: \\n"\n'''   \
-                          '''"MIME-Version: 1.0\\n"\n''' \
-                          '''"Content-Type: text/plain; charset=UTF-8\\n"\n'''   \
-                          '''"Content-Transfer-Encoding: \\n"\n'''       \
-                          '''"Plural-Forms: \\n"\n'''    \
-                          "\n"
-
-                          % { 'project': release.description,
-                              'version': release.version,
-                              'modules': ''.join("#\t* %s\n" % m for m in modules),
-                              'now': datetime.utcnow().strftime('%Y-%m-%d %H:%M')+"+0000",
-                            }
-                          )
-
-    def write(self, modules, tnrs, source, trad, comments=None):
-
-        plurial = len(modules) > 1 and 's' or ''
-        self.buffer.write(u"#. module%s: %s\n" % (plurial, ', '.join(modules)))
-
-        if comments:
-            self.buffer.write(u''.join(('#. %s\n' % c for c in comments)))
-
-        code = False
-        for typy, name, res_id in tnrs:
-            self.buffer.write(u"#: %s:%s:%s\n" % (typy, name, res_id))
-            if typy == 'code':
-                code = True
-
-        if code:
-            # only strings in python code are python formatted
-            self.buffer.write(u"#, python-format\n")
-
-        msg = (
-            u"msgid %s\n"
-            u"msgstr %s\n\n"
-        ) % (
-            quote(pycompat.text_type(source)), 
-            quote(pycompat.text_type(trad))
+    def __iter__(self):
+        translated_fnames = sorted(
+            [fname.split('@', maxsplit=1) for fname in self.source.fieldnames or [] if '@' in fname],
+            key=lambda x: x[1],  # Put fallback languages first
         )
-        self.buffer.write(msg)
+        for entry in self.source:
+            for fname, lang in translated_fnames:
+                module, imd_name = parse_xmlid(entry['id'], self.module)
+                yield {
+                    'type': 'model',
+                    'imd_model': self.model,
+                    'imd_name': imd_name,
+                    'lang': lang,
+                    'value': entry[f"{fname}@{lang}"],
+                    'src': entry[fname],
+                    'module': module,
+                    'name': f"{self.model},{fname}",
+                }
+
+
+class XMLDataFileReader:
+    def __init__(self, source, module: str):
+        try:
+            tree = etree.parse(source)
+        except etree.LxmlSyntaxError:
+            _logger.warning("Error parsing XML file %s", source)
+            tree = etree.fromstring('<data/>')
+        self.source = tree
+        self.module = module
+
+    def __iter__(self):
+        for record in self.source.xpath("//field[contains(@name, '@')]/.."):
+            vals = {field.attrib['name']: field.text for field in record.xpath("field")}
+            translated_fnames = sorted(
+                [fname.split('@', maxsplit=1) for fname in vals if '@' in fname],
+                key=lambda x: x[1],  # Put fallback languages first
+            )
+            for fname, lang in translated_fnames:
+                module, imd_name = parse_xmlid(record.attrib['id'], self.module)
+                yield {
+                    'type': 'model',
+                    'imd_model': record.attrib['model'],
+                    'imd_name': imd_name,
+                    'lang': lang,
+                    'value': vals[f"{fname}@{lang}"],
+                    'src': vals[fname],
+                    'module': module,
+                    'name': f"{record.attrib['model']},{fname}",
+                }
+
+
+class PoFileReader:
+    """ Iterate over po file to return Odoo translation entries """
+    def __init__(self, source):
+
+        def get_pot_path(source_name):
+            # when fileobj is a TemporaryFile, its name is an inter in P3, a string in P2
+            if isinstance(source_name, str) and source_name.endswith('.po'):
+                # Normally the path looks like /path/to/xxx/i18n/lang.po
+                # and we try to find the corresponding
+                # /path/to/xxx/i18n/xxx.pot file.
+                # (Sometimes we have 'i18n_extra' instead of just 'i18n')
+                path = Path(source_name)
+                filename = path.parent.parent.name + '.pot'
+                pot_path = path.with_name(filename)
+                return pot_path.exists() and str(pot_path) or False
+            return False
+
+        # polib accepts a path or the file content as a string, not a fileobj
+        if isinstance(source, str):
+            self.pofile = polib.pofile(source)
+            pot_path = get_pot_path(source)
+        else:
+            # either a BufferedIOBase or result from NamedTemporaryFile
+            self.pofile = polib.pofile(source.read().decode())
+            pot_path = get_pot_path(source.name)
+
+        if pot_path:
+            # Make a reader for the POT file
+            # (Because the POT comments are correct on GitHub but the
+            # PO comments tends to be outdated. See LP bug 933496.)
+            self.pofile.merge(polib.pofile(pot_path))
+
+    def __iter__(self):
+        for entry in self.pofile:
+            if entry.obsolete:
+                continue
+
+            # in case of moduleS keep only the first
+            match = re.match(r"(module[s]?): (\w+)", entry.comment)
+            _, module = match.groups()
+            comments = "\n".join([c for c in entry.comment.split('\n') if not c.startswith('module:')])
+            source = entry.msgid
+            translation = entry.msgstr
+            found_code_occurrence = False
+            for occurrence, line_number in entry.occurrences:
+                match = re.match(r'(model|model_terms):([\w.]+),([\w]+):(\w+)\.([^ ]+)', occurrence)
+                if match:
+                    type, model_name, field_name, module, xmlid = match.groups()
+                    yield {
+                        'type': type,
+                        'imd_model': model_name,
+                        'name': model_name+','+field_name,
+                        'imd_name': xmlid,
+                        'res_id': None,
+                        'src': source,
+                        'value': translation,
+                        'comments': comments,
+                        'module': module,
+                    }
+                    continue
+
+                match = re.match(r'(code):([\w/.]+)', occurrence)
+                if match:
+                    type, name = match.groups()
+                    if found_code_occurrence:
+                        # unicity constrain on code translation
+                        continue
+                    found_code_occurrence = True
+                    yield {
+                        'type': type,
+                        'name': name,
+                        'src': source,
+                        'value': translation,
+                        'comments': comments,
+                        'res_id': int(line_number),
+                        'module': module,
+                    }
+                    continue
+
+                match = re.match(r'(selection):([\w.]+),([\w]+)', occurrence)
+                if match:
+                    _logger.info("Skipped deprecated occurrence %s", occurrence)
+                    continue
+
+                match = re.match(r'(sql_constraint|constraint):([\w.]+)', occurrence)
+                if match:
+                    _logger.info("Skipped deprecated occurrence %s", occurrence)
+                    continue
+                _logger.error("malformed po file: unknown occurrence: %s", occurrence)
+
+def TranslationFileWriter(target, fileformat='po', lang=None):
+    """ Iterate over translation file to return Odoo translation entries """
+    if fileformat == 'csv':
+        return CSVFileWriter(target)
+
+    if fileformat == 'po':
+        return PoFileWriter(target, lang=lang)
+
+    if fileformat == 'tgz':
+        return TarFileWriter(target, lang=lang)
+
+    raise Exception(_('Unrecognized extension: must be one of '
+                      '.csv, .po, or .tgz (received .%s).') % fileformat)
+
+
+_writer = codecs.getwriter('utf-8')
+class CSVFileWriter:
+    def __init__(self, target):
+        self.writer = csv.writer(_writer(target), dialect='UNIX')
+        # write header first
+        self.writer.writerow(("module","type","name","res_id","src","value","comments"))
+
+
+    def write_rows(self, rows):
+        for module, type, name, res_id, src, trad, comments in rows:
+            comments = '\n'.join(comments)
+            self.writer.writerow((module, type, name, res_id, src, trad, comments))
+
+
+class PoFileWriter:
+    """ Iterate over po file to return Odoo translation entries """
+    def __init__(self, target, lang):
+
+        self.buffer = target
+        self.lang = lang
+        self.po = polib.POFile()
+
+    def write_rows(self, rows):
+        # we now group the translations by source. That means one translation per source.
+        grouped_rows = {}
+        modules = set()
+        for module, type, name, res_id, src, trad, comments in rows:
+            row = grouped_rows.setdefault(src, {})
+            row.setdefault('modules', set()).add(module)
+            if not row.get('translation') and trad != src:
+                row['translation'] = trad
+            row.setdefault('tnrs', []).append((type, name, res_id))
+            row.setdefault('comments', set()).update(comments)
+            modules.add(module)
+
+        for src, row in sorted(grouped_rows.items()):
+            if not self.lang:
+                # translation template, so no translation value
+                row['translation'] = ''
+            elif not row.get('translation'):
+                row['translation'] = ''
+            self.add_entry(sorted(row['modules']), sorted(row['tnrs']), src, row['translation'], sorted(row['comments']))
+
+        import odoo.release as release
+        self.po.header = "Translation of %s.\n" \
+                    "This file contains the translation of the following modules:\n" \
+                    "%s" % (release.description, ''.join("\t* %s\n" % m for m in modules))
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M+0000')
+        self.po.metadata = {
+            'Project-Id-Version': "%s %s" % (release.description, release.version),
+            'Report-Msgid-Bugs-To': '',
+            'POT-Creation-Date': now,
+            'PO-Revision-Date': now,
+            'Last-Translator': '',
+            'Language-Team': '',
+            'MIME-Version': '1.0',
+            'Content-Type': 'text/plain; charset=UTF-8',
+            'Content-Transfer-Encoding': '',
+            'Plural-Forms': '',
+        }
+
+        # buffer expects bytes
+        self.buffer.write(str(self.po).encode())
+
+    def add_entry(self, modules, tnrs, source, trad, comments=None):
+        entry = polib.POEntry(
+            msgid=source,
+            msgstr=trad,
+        )
+        plural = len(modules) > 1 and 's' or ''
+        entry.comment = "module%s: %s" % (plural, ', '.join(modules))
+        if comments:
+            entry.comment += "\n" + "\n".join(comments)
+        occurrences = OrderedSet()
+        for type_, *ref in tnrs:
+            if type_ == "code":
+                fpath, lineno = ref
+                name = f"code:{fpath}"
+                # lineno is set to 0 to avoid creating diff in PO files every
+                # time the code is moved around
+                lineno = "0"
+            else:
+                field_name, xmlid = ref
+                name = f"{type_}:{field_name}:{xmlid}"
+                lineno = None   # no lineno for model/model_terms sources
+            occurrences.add((name, lineno))
+        entry.occurrences = list(occurrences)
+        self.po.append(entry)
+
+
+class TarFileWriter:
+
+    def __init__(self, target, lang):
+        self.tar = tarfile.open(fileobj=target, mode='w|gz')
+        self.lang = lang
+
+    def write_rows(self, rows):
+        rows_by_module = defaultdict(list)
+        for row in rows:
+            module = row[0]
+            rows_by_module[module].append(row)
+
+        for mod, modrows in rows_by_module.items():
+            with io.BytesIO() as buf:
+                po = PoFileWriter(buf, lang=self.lang)
+                po.write_rows(modrows)
+                buf.seek(0)
+
+                info = tarfile.TarInfo(
+                    join(mod, 'i18n', '{basename}.{ext}'.format(
+                        basename=self.lang or mod,
+                        ext='po' if self.lang else 'pot',
+                    )))
+                # addfile will read <size> bytes from the buffer so
+                # size *must* be set first
+                info.size = len(buf.getvalue())
+
+                self.tar.addfile(info, fileobj=buf)
+
+        self.tar.close()
 
 
 # Methods to export the translation file
-
-def trans_export(lang, modules, buffer, format, cr):
-
-    def _process(format, modules, rows, buffer, lang):
-        if format == 'csv':
-            writer = pycompat.csv_writer(buffer, dialect='UNIX')
-            # write header first
-            writer.writerow(("module","type","name","res_id","src","value","comments"))
-            for module, type, name, res_id, src, trad, comments in rows:
-                comments = '\n'.join(comments)
-                writer.writerow((module, type, name, res_id, src, trad, comments))
-
-        elif format == 'po':
-            writer = PoFile(buffer)
-            writer.write_infos(modules)
-
-            # we now group the translations by source. That means one translation per source.
-            grouped_rows = {}
-            for module, type, name, res_id, src, trad, comments in rows:
-                row = grouped_rows.setdefault(src, {})
-                row.setdefault('modules', set()).add(module)
-                if not row.get('translation') and trad != src:
-                    row['translation'] = trad
-                row.setdefault('tnrs', []).append((type, name, res_id))
-                row.setdefault('comments', set()).update(comments)
-
-            for src, row in sorted(grouped_rows.items()):
-                if not lang:
-                    # translation template, so no translation value
-                    row['translation'] = ''
-                elif not row.get('translation'):
-                    row['translation'] = ''
-                writer.write(row['modules'], row['tnrs'], src, row['translation'], row['comments'])
-
-        elif format == 'tgz':
-            rows_by_module = defaultdict(list)
-            for row in rows:
-                module = row[0]
-                rows_by_module[module].append(row)
-
-            with tarfile.open(fileobj=buffer, mode='w|gz') as tar:
-                for mod, modrows in rows_by_module.items():
-                    with io.BytesIO() as buf:
-                        _process('po', [mod], modrows, buf, lang)
-                        buf.seek(0)
-
-                        info = tarfile.TarInfo(
-                            join(mod, 'i18n', '{basename}.{ext}'.format(
-                                basename=lang or mod,
-                                ext='po' if lang else 'pot',
-                            )))
-                        # addfile will read <size> bytes from the buffer so
-                        # size *must* be set first
-                        info.size = len(buf.getvalue())
-
-                        tar.addfile(info, fileobj=buf)
-        else:
-            raise Exception(_('Unrecognized extension: must be one of '
-                '.csv, .po, or .tgz (received .%s).') % format)
-
-    translations = trans_generate(lang, modules, cr)
-    modules = set(t[0] for t in translations)
-    _process(format, modules, translations, buffer, lang)
-    del translations
+# pylint: disable=redefined-builtin
+def trans_export(lang, modules, buffer, format, env):
+    reader = TranslationModuleReader(env.cr, modules=modules, lang=lang)
+    if not reader:
+        return False
+    writer = TranslationFileWriter(buffer, fileformat=format, lang=lang)
+    writer.write_rows(reader)
+    return True
 
 
-def trans_parse_rml(de):
-    res = []
-    for n in de:
-        for m in n:
-            if isinstance(m, SKIPPED_ELEMENT_TYPES) or not m.text:
-                continue
-            string_list = [s.replace('\n', ' ').strip() for s in re.split('\[\[.+?\]\]', m.text)]
-            for s in string_list:
-                if s:
-                    res.append(s.encode("utf8"))
-        res.extend(trans_parse_rml(n))
-    return res
+def trans_export_records(lang, model_name, ids, buffer, format, env):
+    reader = TranslationRecordReader(env.cr, model_name, ids, lang=lang)
+    if not reader:
+        return False
+    writer = TranslationFileWriter(buffer, fileformat=format, lang=lang)
+    writer.write_rows(reader)
+    return True
 
 
-def _push(callback, term, source_line):
-    """ Sanity check before pushing translation terms """
-    term = (term or "").strip()
-    # Avoid non-char tokens like ':' '...' '.00' etc.
-    if len(term) > 8 or any(x.isalpha() for x in term):
-        callback(term, source_line)
+def is_meaningful_term(term):
+    """ Returns True if the given term is a meaningful translation term that should be exported.
 
-
-# tests whether an object is in a list of modules
-def in_modules(object_name, modules):
-    if 'all' in modules:
-        return True
-
-    module_dict = {
-        'ir': 'base',
-        'res': 'base',
-    }
-    module = object_name.split('.')[0]
-    module = module_dict.get(module, module)
-    return module in modules
+    This is used to filter out terms that are unlikely to be translated, such as purely numeric strings,
+    punctuation, or empty strings.
+    """
+    return bool(term and any(c.isalpha() for c in term.strip()))
 
 
 def _extract_translatable_qweb_terms(element, callback):
@@ -772,14 +1645,24 @@ def _extract_translatable_qweb_terms(element, callback):
         if isinstance(el, SKIPPED_ELEMENT_TYPES): continue
         if (el.tag.lower() not in SKIPPED_ELEMENTS
                 and "t-js" not in el.attrib
-                and not ("t-jquery" in el.attrib and "t-operation" not in el.attrib)
+                and not (el.tag == 'attribute' and not is_translatable_attrib(el.get('name'), el))
                 and el.get("t-translation", '').strip() != "off"):
-            _push(callback, el.text, el.sourceline)
-            for att in ('title', 'alt', 'label', 'placeholder'):
-                if att in el.attrib:
-                    _push(callback, el.attrib[att], el.sourceline)
+
+            callback(el.text, el.sourceline)
+            # heuristic: tags with names starting with an uppercase letter are
+            # component nodes
+            is_component = (
+                el.tag[0].isupper()
+                or "t-call" in el.attrib
+                or "t-call-slot" in el.attrib
+                or "t-component" in el.attrib
+                or "t-set-slot" in el.attrib
+            )
+            for attr in el.attrib:
+                if (not is_component and attr in OWL_TRANSLATED_ATTRS) or (is_component and attr.endswith(".translate")):
+                    callback(el.attrib[attr], el.sourceline)
             _extract_translatable_qweb_terms(el, callback)
-        _push(callback, el.tail, el.sourceline)
+        callback(el.tail, el.sourceline)
 
 
 def babel_extract_qweb(fileobj, keywords, comment_tags, options):
@@ -796,370 +1679,690 @@ def babel_extract_qweb(fileobj, keywords, comment_tags, options):
     :rtype: Iterable
     """
     result = []
+
     def handle_text(text, lineno):
-        result.append((lineno, None, text, []))
+        text = (text or "").strip()
+        if is_meaningful_term(text):
+            result.append((lineno, None, text, []))
+
     tree = etree.parse(fileobj)
     _extract_translatable_qweb_terms(tree.getroot(), handle_text)
     return result
 
 
-def trans_generate(lang, modules, cr):
-    env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, {})
-    to_translate = set()
+def extract_formula_terms(formula):
+    """Extract strings in a spreadsheet formula which are arguments to '_t' functions
 
-    def push_translation(module, type, name, id, source, comments=None):
-        # empty and one-letter terms are ignored, they probably are not meant to be
-        # translated, and would be very hard to translate anyway.
-        sanitized_term = (source or '').strip()
-        try:
-            # verify the minimal size without eventual xml tags
-            # wrap to make sure html content like '<a>b</a><c>d</c>' is accepted by lxml
-            wrapped = u"<div>%s</div>" % sanitized_term
-            node = etree.fromstring(wrapped)
-            sanitized_term = etree.tostring(node, encoding='unicode', method='text')
-        except etree.ParseError:
-            pass
-        # remove non-alphanumeric chars
-        sanitized_term = re.sub(r'\W+', '', sanitized_term)
-        if not sanitized_term or len(sanitized_term) <= 1:
+        >>> extract_formula_terms('=_t("Hello") + _t("Raoul")')
+        ["Hello", "Raoul"]
+    """
+    tokens = generate_tokens(io.StringIO(formula).readline)
+    tokens = (token for token in tokens if token.type not in {NEWLINE, INDENT, DEDENT})
+    for t1 in tokens:
+        if t1.string != '_t':
+            continue
+        t2 = next(tokens, None)
+        if t2 and t2.string == '(':
+            t3 = next(tokens, None)
+            t4 = next(tokens, None)
+            if t4 and t4.string == ')' and t3 and t3.type == STRING:
+                yield t3.string[1:][:-1] # strip leading and trailing quotes
+
+
+def extract_spreadsheet_terms(fileobj, keywords, comment_tags, options):
+    """Babel message extractor for spreadsheet data files.
+
+    :param fileobj: the file-like object the messages should be extracted from
+    :param keywords: a list of keywords (i.e. function names) that should
+                     be recognized as translation functions
+    :param comment_tags: a list of translator tags to search for and
+                         include in the results
+    :param options: a dictionary of additional options (optional)
+    :return: an iterator over ``(lineno, funcname, message, comments)``
+             tuples
+    """
+    terms = set()
+    data = json.load(fileobj)
+    for sheet in data.get('sheets', []):
+        for cell in sheet['cells'].values():
+            # 'cell' was an object in versions <saas-18.1
+            content = cell if isinstance(cell, str) else cell.get('content', '')
+            if content.startswith('='):
+                terms.update(extract_formula_terms(content))
+            else:
+                markdown_link = re.fullmatch(r'\[(.+)\]\(.+\)', content)
+                if markdown_link:
+                    terms.add(markdown_link[1])
+        for figure in sheet['figures']:
+            if figure['tag'] == 'chart':
+                title = figure['data']['title']
+                if isinstance(title, str):
+                    terms.add(title)
+                elif 'text' in title:
+                    terms.add(title['text'])
+                if 'axesDesign' in figure['data']:
+                    terms.update(
+                        axes.get('title', {}).get('text', '') for axes in figure['data']['axesDesign'].values()
+                    )
+                if 'text' in (baselineDescr := figure['data'].get('baselineDescr', {})):
+                    terms.add(baselineDescr['text'])
+                if 'text' in (keyDescr := figure['data'].get('keyDescr', {})):
+                    terms.add(keyDescr['text'])
+            if figure['tag'] == 'carousel':
+                title = figure['data'].get('title', {})
+                if 'text' in title:
+                    terms.add(title['text'])
+                items = figure['data'].get('items', [])
+                for item in items:
+                    if 'title' in item:
+                        terms.add(item['title'])
+                chartDefinitions = figure['data'].get('chartDefinitions', {}).values()
+                for chartDefinition in chartDefinitions:
+                    if 'title' in chartDefinition and isinstance(chartDefinition['title'], dict) and 'text' in chartDefinition['title']:
+                        terms.add(chartDefinition['title']['text'])
+
+    terms.update(global_filter['label'] for global_filter in data.get('globalFilters', []))
+    for odoo_list in data.get('lists', {}).values():
+        if not odoo_list.get('translateHeaders', False):
+            continue
+        columns = odoo_list.get('columns', [])
+        for column in columns:
+            if isinstance(column, dict) and 'string' in column:
+                terms.add(column['string'])
+    return (
+        (0, None, term, [])
+        for term in terms
+        if any(x.isalpha() for x in term)
+    )
+
+ImdInfo = namedtuple('ExternalId', ['name', 'model', 'res_id', 'module'])
+
+
+class TranslationReader:
+    def __init__(self, cr, lang=None):
+        self._cr = cr
+        self._lang = lang or 'en_US'
+        from odoo import api  # noqa: PLC0415
+        self.env = api.Environment(cr, api.SUPERUSER_ID, {})
+        self._to_translate = []
+
+    def __bool__(self):
+        return bool(self._to_translate)
+
+    def __iter__(self):
+        for module, source, name, res_id, ttype, comments, _record_id, value in self._to_translate:
+            yield (module, ttype, name, res_id, source, value, comments)
+
+    def _push_translation(self, module, ttype, name, res_id, source, comments=None, record_id=None, value=None):
+        """ Insert a translation that will be used in the file generation
+        In po file will create an entry
+        #: <ttype>:<name>:<res_id>
+        #, <comment>
+        msgid "<source>"
+        record_id is the database id of the record being translated
+        """
+        if is_meaningful_term(source):
+            self._to_translate.append((module, source, name, res_id, ttype, tuple(comments or ()), record_id, value))
+
+    def _export_imdinfo(self, model: str, imd_per_id: dict[int, ImdInfo]):
+        records = self._get_translatable_records(imd_per_id.values())
+        if not records:
             return
 
-        tnx = (module, source, name, id, type, tuple(comments or ()))
-        to_translate.add(tnx)
-
-    query = 'SELECT name, model, res_id, module FROM ir_model_data'
-    query_models = """SELECT m.id, m.model, imd.module
-                      FROM ir_model AS m, ir_model_data AS imd
-                      WHERE m.id = imd.res_id AND imd.model = 'ir.model'"""
-
-    if 'all_installed' in modules:
-        query += ' WHERE module IN ( SELECT name FROM ir_module_module WHERE state = \'installed\') '
-        query_models += " AND imd.module in ( SELECT name FROM ir_module_module WHERE state = 'installed') "
-
-    if 'all' not in modules:
-        query += ' WHERE module IN %s'
-        query_models += ' AND imd.module IN %s'
-        query_param = (tuple(modules),)
-    else:
-        query += ' WHERE module != %s'
-        query_models += ' AND imd.module != %s'
-        query_param = ('__export__',)
-
-    query += ' ORDER BY module, model, name'
-    query_models += ' ORDER BY module, model'
-
-    cr.execute(query, query_param)
-
-    for (xml_name, model, res_id, module) in cr.fetchall():
-        xml_name = "%s.%s" % (module, xml_name)
-
-        if model not in env:
-            _logger.error(u"Unable to find object %r", model)
-            continue
-
-        record = env[model].browse(res_id)
-        if not record._translate:
-            # explicitly disabled
-            continue
-
-        if not record.exists():
-            _logger.warning(u"Unable to find object %r with id %d", model, res_id)
-            continue
-
-        if model==u'ir.model.fields':
-            try:
-                field_name = record.name
-            except AttributeError as exc:
-                _logger.error(u"name error in %s: %s", xml_name, str(exc))
-                continue
-            field_model = env.get(record.model)
-            if (field_model is None or not field_model._translate or
-                    field_name not in field_model._fields):
-                continue
-            field = field_model._fields[field_name]
-
-            if isinstance(getattr(field, 'selection', None), (list, tuple)):
-                name = "%s,%s" % (record.model, field_name)
-                for dummy, val in field.selection:
-                    push_translation(module, 'selection', name, 0, val)
-
-        for field_name, field in record._fields.items():
-            if field.translate:
-                name = model + "," + field_name
-                try:
-                    value = record[field_name] or ''
-                except Exception:
+        env = records.env
+        for record in records.with_context(check_translations=True):
+            export_module = record.name if model == 'ir.module.module' else imd_per_id[record.id].module
+            xml_module = imd_per_id[record.id].module
+            xml_name = "%s.%s" % (xml_module, imd_per_id[record.id].name)
+            for field_name, field in record._fields.items():
+                # ir_actions_actions.name is filtered because unlike other inherited fields,
+                # this field is inherited as postgresql inherited columns.
+                # From our business perspective, the parent column is no need to be translated,
+                # but it is need to be set to jsonb column, since the child columns need to be translated
+                # And export the parent field may make one value to be translated twice in transifex
+                #
+                # Some ir_model_fields.field_description are filtered
+                # because their fields have falsy attribute export_string_translation
+                if (
+                        not (field.translate and field.store)
+                        or str(field) == 'ir.actions.actions.name'
+                        or (str(field) == 'ir.model.fields.field_description'
+                            and not env[record.model]._fields[record.name].export_string_translation)
+                ):
                     continue
-                for term in set(field.get_trans_terms(value)):
-                    push_translation(module, 'model', name, xml_name, term)
+                name = model + "," + field_name
+                value_en = record[field_name] or ''
+                value_lang = record.with_context(lang=self._lang)[field_name] or ''
+                trans_type = 'model_terms' if callable(field.translate) else 'model'
+                try:
+                    translation_dictionary = StoredTranslations._get_translation_dictionary(field, value_en, {self._lang: value_lang})
+                except Exception:
+                    _logger.exception("Failed to extract terms from %s %s", xml_name, name)
+                    continue
+                for term_en, term_langs in translation_dictionary.items():
+                    term_lang = term_langs.get(self._lang)
+                    self._push_translation(export_module, trans_type, name, xml_name, term_en, record_id=record.id, value=term_lang if term_lang != term_en else '')
 
-        # End of data for ir.model.data query results
+    def _get_translatable_records(self, imd_records):
+        """ Filter the records that are translatable
 
-    def push_constraint_msg(module, term_type, model, msg):
-        if not callable(msg):
-            push_translation(encode(module), term_type, encode(model), 0, msg)
+        A record is considered as untranslatable if:
+        - it does not exist
+        - the model is flagged with _translate=False
+        - it is a field of a model flagged with _translate=False
+        - it is a selection of a field of a model flagged with _translate=False
 
-    def push_local_constraints(module, model, cons_type='sql_constraints'):
-        """ Climb up the class hierarchy and ignore inherited constraints from other modules. """
-        term_type = 'sql_constraint' if cons_type == 'sql_constraints' else 'constraint'
-        msg_pos = 2 if cons_type == 'sql_constraints' else 1
-        for cls in model.__class__.__mro__:
-            if getattr(cls, '_module', None) != module:
-                continue
-            constraints = getattr(cls, '_local_' + cons_type, [])
-            for constraint in constraints:
-                push_constraint_msg(module, term_type, model._name, constraint[msg_pos])
-            
-    cr.execute(query_models, query_param)
-
-    for (_, model, module) in cr.fetchall():
-        if model not in env:
+        :param records: a list of namedtuple ImdInfo belonging to the same model
+        """
+        model = next(iter(imd_records)).model
+        if model not in self.env:
             _logger.error("Unable to find object %r", model)
-            continue
-        Model = env[model]
-        if Model._constraints:
-            push_local_constraints(module, Model, 'constraints')
-        if Model._sql_constraints:
-            push_local_constraints(module, Model, 'sql_constraints')
+            return self.env["_unknown"].browse()
 
-    installed_modules = [
-        m['name']
-        for m in env['ir.module.module'].search_read([('state', '=', 'installed')], fields=['name'])
-    ]
+        if not self.env[model]._translate:
+            return self.env[model].browse()
 
-    path_list = [(path, True) for path in odoo.modules.module.ad_paths]
-    # Also scan these non-addon paths
-    for bin_path in ['osv', 'report', 'modules', 'service', 'tools']:
-        path_list.append((os.path.join(config['root_path'], bin_path), True))
-    # non-recursive scan for individual files in root directory but without
-    # scanning subdirectories that may contain addons
-    path_list.append((config['root_path'], False))
-    _logger.debug("Scanning modules at paths: %s", path_list)
+        res_ids = [r.res_id for r in imd_records]
+        records = self.env[model].browse(res_ids).exists()
+        if len(records) < len(res_ids):
+            missing_ids = set(res_ids) - set(records.ids)
+            missing_records = [f"{r.module}.{r.name}" for r in imd_records if r.res_id in missing_ids]
+            _logger.warning("Unable to find records of type %r with external ids %s", model, ', '.join(missing_records))
+            if not records:
+                return records
 
-    def get_module_from_path(path):
-        for (mp, rec) in path_list:
-            mp = os.path.join(mp, '')
-            dirname = os.path.join(os.path.dirname(path), '')
-            if rec and path.startswith(mp) and dirname != mp:
-                path = path[len(mp):]
-                return path.split(os.path.sep)[0]
-        return 'base' # files that are not in a module are considered as being in 'base' module
+        if model == 'ir.model.fields.selection':
+            fields = defaultdict(list)
+            for selection in records:
+                fields[selection.field_id] = selection
+            for field, selection in fields.items():
+                field_name = field.name
+                field_model = self.env.get(field.model)
+                if (field_model is None or not field_model._translate or
+                        field_name not in field_model._fields):
+                    # the selection is linked to a model with _translate=False, remove it
+                    records -= selection
+        elif model == 'ir.model.fields':
+            for field in records:
+                field_name = field.name
+                field_model = self.env.get(field.model)
+                if (field_model is None or not field_model._translate or
+                        field_name not in field_model._fields):
+                    # the field is linked to a model with _translate=False, remove it
+                    records -= field
 
-    def verified_module_filepaths(fname, path, root):
+        return records
+
+
+class TranslationRecordReader(TranslationReader):
+    """ Retrieve translations for specified records, the reader will
+    1. create external ids for records without external ids
+    2. export translations for stored translated and inherited translated fields
+    :param cr: cursor to database to export
+    :param model_name: model_name for the records to export
+    :param ids: ids of the records to export
+    :param field_names: field names to export, if not set, export all translatable fields
+    :param lang: language code to retrieve the translations retrieve source terms only if not set
+    """
+    def __init__(self, cr, model_name, ids, field_names=None, lang=None):
+        super().__init__(cr, lang)
+        self._records = self.env[model_name].browse(ids)
+        self._field_names = field_names or list(self._records._fields.keys())
+
+        self._export_translatable_records(self._records, self._field_names)
+
+    def _export_translatable_records(self, records, field_names):
+        """ Export translations of all stored/inherited translated fields. Create external id if needed. """
+        if not records:
+            return
+
+        fields = records._fields
+
+        if records._inherits:
+            inherited_fields = defaultdict(list)
+            for field_name in field_names:
+                field = records._fields[field_name]
+                if field.translate and not field.store and field.inherited_field:
+                    inherited_fields[field.inherited_field.model_name].append(field_name)
+            for parent_mname, parent_fname in records._inherits.items():
+                if parent_mname in inherited_fields:
+                    self._export_translatable_records(records[parent_fname], inherited_fields[parent_mname])
+
+        if not any(fields[field_name].translate and fields[field_name].store for field_name in field_names):
+            return
+
+        records._BaseModel__ensure_xml_id()
+
+        model_name = records._name
+        query = """SELECT min(concat(module, '.', name)), res_id
+                             FROM ir_model_data
+                            WHERE model = %s
+                              AND res_id = ANY(%s)
+                         GROUP BY model, res_id"""
+
+        self._cr.execute(query, (model_name, records.ids))
+
+        imd_per_id = {
+            res_id: ImdInfo((tmp := module_xml_name.split('.', 1))[1], model_name, res_id, tmp[0])
+            for module_xml_name, res_id in self._cr.fetchall()
+        }
+
+        self._export_imdinfo(model_name, imd_per_id)
+
+
+class TranslationModuleReader(TranslationReader):
+    """ Retrieve translated records per module
+
+    :param cr: cursor to database to export
+    :param modules: list of modules to filter the exported terms, can be ['all']
+                    records with no external id are always ignored
+    :param lang: language code to retrieve the translations
+                 retrieve source terms only if not set
+    """
+
+    def __init__(self, cr, modules=None, lang=None):
+        super().__init__(cr, lang)
+        self._modules = modules or ['all']
+        import odoo.addons  # noqa: PLC0415
+        self._path_list = [(path, True) for path in odoo.addons.__path__]
+        self._installed_modules = [
+            m.name
+            for m in self.env['ir.module.module'].search_fetch([('state', '=', 'installed')], field_names=['name'])
+        ]
+
+        self._export_translatable_records()
+        self._export_translatable_resources()
+
+    def _export_translatable_records(self):
+        """ Export translations of all translated records having an external id """
+        modules = self._installed_modules if 'all' in self._modules else list(self._modules)
+        xml_defined = set()
+        for module in modules:
+            for filepath in get_datafile_translation_path(module):
+                fileformat = os.path.splitext(filepath)[-1][1:].lower()
+                with file_open(filepath, mode='rb') as source:
+                    for entry in translation_file_reader(source, fileformat=fileformat, module=module):
+                        xml_defined.add((entry['imd_model'], module, entry['imd_name']))
+
+        manifest_xmlids = [f'module_{module}' for module in modules]
+        imd_data = self.env.execute_query(SQL("""
+            SELECT min(name), model, res_id, module
+              FROM (
+                    SELECT name, model, res_id, module
+                      FROM ir_model_data
+                     WHERE module = ANY(%(modules)s)
+                       AND model != 'ir.module.module'
+
+                    UNION ALL
+
+                    SELECT name, model, res_id, module
+                      FROM ir_model_data
+                     WHERE model = 'ir.module.module'
+                       AND module = 'base'
+                       AND name = ANY(%(manifest_xmlids)s)
+                   ) AS imd
+          GROUP BY model, res_id, module
+        """, modules=modules, manifest_xmlids=manifest_xmlids))
+
+        records_per_model = defaultdict(dict)
+        for (imd_name, model, res_id, module) in imd_data:
+            if model != 'ir.module.module' and (model, module, imd_name) in xml_defined:
+                continue
+            records_per_model[model][res_id] = ImdInfo(imd_name, model, res_id, module)
+
+        for model, imd_per_id in records_per_model.items():
+            self._export_imdinfo(model, imd_per_id)
+
+    def _get_module_from_path(self, path):
+        dirname = os.path.join(os.path.dirname(path), '')
+        best_mp = max((
+            mpf for mp, rec in self._path_list
+            if rec and (mpf := os.path.join(mp, '')) and path.startswith(mpf) and dirname != mpf
+        ), key=len, default='')
+
+        if best_mp:
+            path = path[len(best_mp):]
+            return path.split(os.path.sep)[0]
+        return 'base'  # files that are not in a module are considered as being in 'base' module
+
+    def _verified_module_filepaths(self, fname, path, root):
         fabsolutepath = join(root, fname)
         frelativepath = fabsolutepath[len(path):]
         display_path = "addons%s" % frelativepath
-        module = get_module_from_path(fabsolutepath)
-        if ('all' in modules or module in modules) and module in installed_modules:
+        module = self._get_module_from_path(fabsolutepath)
+        if ('all' in self._modules or module in self._modules) and module in self._installed_modules:
             if os.path.sep != '/':
                 display_path = display_path.replace(os.path.sep, '/')
             return module, fabsolutepath, frelativepath, display_path
         return None, None, None, None
 
-    def babel_extract_terms(fname, path, root, extract_method="python", trans_type='code',
+    def _babel_extract_terms(self, fname, path, root, extract_method='odoo.tools.babel:extract_python', trans_type='code',
                                extra_comments=None, extract_keywords={'_': None}):
-        module, fabsolutepath, _, display_path = verified_module_filepaths(fname, path, root)
+
+        module, fabsolutepath, _, display_path = self._verified_module_filepaths(fname, path, root)
+        if not module:
+            return
         extra_comments = extra_comments or []
-        if not module: return
-        src_file = open(fabsolutepath, 'rb')
+        src_file = file_open(fabsolutepath, 'rb')
+        options = {}
+        if 'python' in extract_method:
+            options['encoding'] = 'UTF-8'
+            translations = code_translations.get_python_translations(module, self._lang)
+        else:
+            translations = code_translations.get_web_translations(module, self._lang)
+            translations = {tran['id']: tran['string'] for tran in translations['messages']}
         try:
-            for extracted in extract.extract(extract_method, src_file, keywords=extract_keywords):
+            for extracted in extract.extract(extract_method, src_file, keywords=extract_keywords, options=options):
                 # Babel 0.9.6 yields lineno, message, comments
                 # Babel 1.3 yields lineno, message, comments, context
                 lineno, message, comments = extracted[:3]
-                push_translation(module, trans_type, display_path, lineno,
-                                 encode(message), comments + extra_comments)
+                value = translations.get(message, '')
+                self._push_translation(module, trans_type, display_path, lineno,
+                                       message, comments + extra_comments, value=value)
         except Exception:
             _logger.exception("Failed to extract terms from %s", fabsolutepath)
         finally:
             src_file.close()
 
-    for (path, recursive) in path_list:
-        _logger.debug("Scanning files of modules at %s", path)
-        for root, dummy, files in walksymlinks(path):
-            for fname in fnmatch.filter(files, '*.py'):
-                babel_extract_terms(fname, path, root)
-            # mako provides a babel extractor: http://docs.makotemplates.org/en/latest/usage.html#babel
-            for fname in fnmatch.filter(files, '*.mako'):
-                babel_extract_terms(fname, path, root, 'mako', trans_type='report')
-            # Javascript source files in the static/src/js directory, rest is ignored (libs)
-            if fnmatch.fnmatch(root, '*/static/src/js*'):
-                for fname in fnmatch.filter(files, '*.js'):
-                    babel_extract_terms(fname, path, root, 'javascript',
-                                        extra_comments=[WEB_TRANSLATION_COMMENT],
-                                        extract_keywords={'_t': None, '_lt': None})
-            # QWeb template files
-            if fnmatch.fnmatch(root, '*/static/src/xml*'):
-                for fname in fnmatch.filter(files, '*.xml'):
-                    babel_extract_terms(fname, path, root, 'odoo.tools.translate:babel_extract_qweb',
-                                        extra_comments=[WEB_TRANSLATION_COMMENT])
-            if not recursive:
-                # due to topdown, first iteration is in first level
-                break
+    def _export_translatable_resources(self):
+        """ Export translations for static terms
 
-    out = []
-    # translate strings marked as to be translated
-    Translation = env['ir.translation']
-    for module, source, name, id, type, comments in sorted(to_translate):
-        trans = Translation._get_source(name, type, lang, source) if lang else ""
-        out.append((module, type, name, id, source, encode(trans) or '', comments))
-    return out
+        This will include:
+        - the python strings marked with _() or _lt()
+        - the javascript strings marked with _t() inside static/src/js/
+        - the strings inside Qweb files inside static/src/xml/
+        - the spreadsheet data files
+        """
+
+        # Also scan these non-addon paths
+        for bin_path in ['orm', 'osv', 'report', 'modules', 'service', 'tools']:
+            self._path_list.append((os.path.join(config.root_path, bin_path), True))
+        # non-recursive scan for individual files in root directory but without
+        # scanning subdirectories that may contain addons
+        self._path_list.append((config.root_path, False))
+        _logger.debug("Scanning modules at paths: %s", self._path_list)
+
+        spreadsheet_files_regex = re.compile(r".*_dashboard(\.osheet)?\.json$")
+
+        for (path, recursive) in self._path_list:
+            _logger.debug("Scanning files of modules at %s", path)
+            for root, _dummy, files in os.walk(path, followlinks=True):
+                for fname in fnmatch.filter(files, '*.py'):
+                    self._babel_extract_terms(fname, path, root, 'odoo.tools.babel:extract_python',
+                                              extra_comments=[PYTHON_TRANSLATION_COMMENT],
+                                              extract_keywords={'_': None, '_lt': None})
+                if fnmatch.fnmatch(root, '*/static/src*'):
+                    # Javascript source files
+                    for fname in fnmatch.filter(files, '*.js'):
+                        self._babel_extract_terms(fname, path, root, 'odoo.tools.babel:extract_javascript',
+                                                  extra_comments=[JAVASCRIPT_TRANSLATION_COMMENT],
+                                                  extract_keywords={'_t': None})
+                    # QWeb template files
+                    for fname in fnmatch.filter(files, '*.xml'):
+                        self._babel_extract_terms(fname, path, root, 'odoo.tools.translate:babel_extract_qweb',
+                                                  extra_comments=[JAVASCRIPT_TRANSLATION_COMMENT])
+                if fnmatch.fnmatch(root, '*/data/*'):
+                    for fname in filter(spreadsheet_files_regex.match, files):
+                        self._babel_extract_terms(fname, path, root, 'odoo.tools.translate:extract_spreadsheet_terms',
+                                                  extra_comments=[JAVASCRIPT_TRANSLATION_COMMENT])
+                if not recursive:
+                    # due to topdown, first iteration is in first level
+                    break
+
+        IrModuleModule = self.env['ir.module.module']
+        for module in self._modules:
+            for translation in IrModuleModule._extract_resource_attachment_translations(module, self._lang):
+                self._push_translation(*translation)
 
 
-def trans_load(cr, filename, lang, verbose=True, module_name=None, context=None):
-    try:
-        with file_open(filename, mode='rb') as fileobj:
-            _logger.info("loading %s", filename)
-            fileformat = os.path.splitext(filename)[-1][1:].lower()
-            result = trans_load_data(cr, fileobj, fileformat, lang, verbose=verbose, module_name=module_name, context=context)
-            return result
-    except IOError:
-        if verbose:
-            _logger.error("couldn't read translation file %s", filename)
-        return None
+def DeepDefaultDict():
+    return defaultdict(DeepDefaultDict)
 
 
-def trans_load_data(cr, fileobj, fileformat, lang, lang_name=None, verbose=True, module_name=None, context=None):
-    """Populates the ir_translation table."""
-    if verbose:
-        _logger.info('loading translation file for language %s', lang)
+class TranslationImporter:
+    """ Helper object for importing translation files to a database.
+    This class provides a convenient API to load the translations from many
+    files and import them all at once, which helps speeding up the whole import.
+    """
 
-    env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, context or {})
-    Lang = env['res.lang']
-    Translation = env['ir.translation']
+    def __init__(self, cr, verbose=True):
+        self.cr = cr
+        self.verbose = verbose
+        from odoo import api  # noqa: PLC0415
+        self.env = api.Environment(cr, api.SUPERUSER_ID, {})
 
-    try:
-        if not Lang.search_count([('code', '=', lang)]):
-            # lets create the language with locale information
-            Lang.load_lang(lang=lang, lang_name=lang_name)
+        # {model_name: {field_name: {xmlid: {lang: value}}}}
+        self.model_translations = DeepDefaultDict()
+        # {model_name: {field_name: {xmlid: {src: {lang: value}}}}}
+        self.model_terms_translations = DeepDefaultDict()
+        self.imported_langs = set()
 
-        # Parse also the POT: it will possibly provide additional targets.
-        # (Because the POT comments are correct on Launchpad but not the
-        # PO comments due to a Launchpad limitation. See LP bug 933496.)
-        pot_reader = []
+    def load_file(self, filepath, lang, xmlids=None, module=None):
+        """ Load translations from the given file path.
 
-        # now, the serious things: we read the language file
-        fileobj.seek(0)
-        if fileformat == 'csv':
-            reader = pycompat.csv_reader(fileobj, quotechar='"', delimiter=',')
-            # read the first line of the file (it contains columns titles)
-            fields = next(reader)
+        :param filepath: file path to open
+        :param lang: language code of the translations contained in the file;
+                     the language must be present and activated in the database
+        :param xmlids: if given, only translations for records with xmlid in xmlids will be loaded
+        :param module: if given, the file will be interpreted as a data file containing translations
+        """
+        with suppress(FileNotFoundError), file_open(filepath, mode='rb', env=self.env) as fileobj:
+            if self.verbose:
+                _logger.info('loading base translation file %s for language %s', filepath, lang)
+            fileformat = os.path.splitext(filepath)[-1][1:].lower()
+            self.load(fileobj, fileformat, lang, xmlids=xmlids, module=module)
 
-        elif fileformat == 'po':
-            reader = PoFile(fileobj)
-            fields = ['type', 'name', 'res_id', 'src', 'value', 'comments']
+    def load(self, fileobj, fileformat, lang, xmlids=None, module=None):
+        """Load translations from the given file object.
 
-            # Make a reader for the POT file and be somewhat defensive for the
-            # stable branch.
+        :param fileobj: buffer open to a translation file
+        :param fileformat: format of the `fielobj` file, one of 'po', 'csv', or 'xml'
+        :param lang: language code of the translations contained in `fileobj`;
+                     the language must be present and activated in the database
+        :param xmlids: if given, only translations for records with xmlid in xmlids will be loaded
+        :param module: if given, the file will be interpreted as a data file containing translations
+        """
+        if self.verbose:
+            _logger.info('loading translation file for language %s', lang)
+        if not self.env['res.lang']._lang_get(lang):
+            _logger.error("Couldn't read translation for lang '%s', language not found", lang)
+            return None
+        try:
+            fileobj.seek(0)
+            reader = translation_file_reader(fileobj, fileformat=fileformat, module=module)
+            self._load(reader, lang, xmlids)
+        except IOError:
+            iso_lang = get_iso_codes(lang)
+            filename = '[lang: %s][format: %s]' % (iso_lang or 'new', fileformat)
+            _logger.exception("couldn't read translation file %s", filename)
 
-            # when fileobj is a TemporaryFile, its name is an interget in P3, a string in P2
-            if isinstance(fileobj.name, str) and fileobj.name.endswith('.po'):
-                try:
-                    # Normally the path looks like /path/to/xxx/i18n/lang.po
-                    # and we try to find the corresponding
-                    # /path/to/xxx/i18n/xxx.pot file.
-                    # (Sometimes we have 'i18n_extra' instead of just 'i18n')
-                    addons_module_i18n, _ignored = os.path.split(fileobj.name)
-                    addons_module, i18n_dir = os.path.split(addons_module_i18n)
-                    addons, module = os.path.split(addons_module)
-                    pot_handle = file_open(os.path.join(
-                        addons, module, i18n_dir, module + '.pot'), mode='rb')
-                    pot_reader = PoFile(pot_handle)
-                except:
-                    pass
-
-        else:
-            _logger.info('Bad file format: %s', fileformat)
-            raise Exception(_('Bad file format: %s') % fileformat)
-
-        # Read the POT references, and keep them indexed by source string.
-        class Target(object):
-            def __init__(self):
-                self.value = None
-                self.targets = set()            # set of (type, name, res_id)
-                self.comments = None
-
-        pot_targets = defaultdict(Target)
-        for type, name, res_id, src, _ignored, comments in pot_reader:
-            if type is not None:
-                target = pot_targets[src]
-                target.targets.add((type, name, res_id))
-                target.comments = comments
-
-        # read the rest of the file
-        irt_cursor = Translation._get_import_cursor()
-
-        def process_row(row):
-            """Process a single PO (or POT) entry."""
-            # dictionary which holds values for this line of the csv file
-            # {'lang': ..., 'type': ..., 'name': ..., 'res_id': ...,
-            #  'src': ..., 'value': ..., 'module':...}
-            dic = dict.fromkeys(('type', 'name', 'res_id', 'src', 'value',
-                                 'comments', 'imd_model', 'imd_name', 'module'))
-            dic['lang'] = lang
-            dic.update(pycompat.izip(fields, row))
-
-            # discard the target from the POT targets.
-            src = dic['src']
-            if src in pot_targets:
-                target = pot_targets[src]
-                target.value = dic['value']
-                target.targets.discard((dic['type'], dic['name'], dic['res_id']))
-
-            # This would skip terms that fail to specify a res_id
-            res_id = dic['res_id']
-            if not res_id:
-                return
-
-            if isinstance(res_id, pycompat.integer_types) or \
-                    (isinstance(res_id, pycompat.string_types) and res_id.isdigit()):
-                dic['res_id'] = int(res_id)
-                if module_name:
-                    dic['module'] = module_name
-            else:
-                # res_id is an xml id
-                dic['res_id'] = None
-                dic['imd_model'] = dic['name'].split(',')[0]
-                if '.' in res_id:
-                    dic['module'], dic['imd_name'] = res_id.split('.', 1)
-                else:
-                    dic['module'], dic['imd_name'] = module_name, res_id
-
-            irt_cursor.push(dic)
-
-        # First process the entries from the PO file (doing so also fills/removes
-        # the entries from the POT file).
+    def _load(self, reader, lang, xmlids=None):
+        if xmlids and not isinstance(xmlids, set):
+            xmlids = set(xmlids)
+        valid_langs = get_base_langs(lang)
         for row in reader:
-            process_row(row)
+            if not row.get('value') or not row.get('src'):  # ignore empty translations
+                continue
+            if row.get('type') == 'code':  # ignore code translations
+                continue
+            if row.get('lang', lang) not in valid_langs:
+                continue
+            model_name = row.get('imd_model')
+            module_name = row['module']
+            if model_name not in self.env:
+                continue
+            field_name = row['name'].split(',')[1]
+            field = self.env[model_name]._fields.get(field_name)
+            if not field or not field.translate or not field.store:
+                continue
+            xmlid = module_name + '.' + row['imd_name']
+            if xmlids and xmlid not in xmlids:
+                continue
+            if row.get('type') == 'model' and field.translate is True:
+                self.model_translations[model_name][field_name][xmlid][lang] = row['value']
+                self.imported_langs.add(lang)
+            elif row.get('type') == 'model_terms' and callable(field.translate):
+                self.model_terms_translations[model_name][field_name][xmlid][row['src']][lang] = row['value']
+                self.imported_langs.add(lang)
 
-        # Then process the entries implied by the POT file (which is more
-        # correct w.r.t. the targets) if some of them remain.
-        pot_rows = []
-        for src, target in pot_targets.items():
-            if target.value:
-                for type, name, res_id in target.targets:
-                    pot_rows.append((type, name, res_id, src, target.value, target.comments))
-        pot_targets.clear()
-        for row in pot_rows:
-            process_row(row)
+    def save(self, overwrite=False, force_overwrite=False):
+        """ Save translations to the database.
 
-        irt_cursor.finish()
-        Translation.clear_caches()
-        if verbose:
-            _logger.info("translation file loaded successfully")
+        For a record with 'noupdate' in ``ir_model_data``, its existing translations
+        will be overwritten if ``force_overwrite or (not noupdate and overwrite)``.
 
-    except IOError:
-        iso_lang = get_iso_codes(lang)
-        filename = '[lang: %s][format: %s]' % (iso_lang or 'new', fileformat)
-        _logger.exception("couldn't read translation file %s", filename)
+        An existing translation means:
+        * model translation: the ``jsonb`` value in database has the language code as key;
+        * model terms translation: the term value in the language is different from the term value in ``en_US``.
+        """
+        if not self.model_translations and not self.model_terms_translations:
+            return
+
+        env = self.env
+        env.flush_all()
+
+        for model_name, model_dictionary in self.model_terms_translations.items():
+            Model = env[model_name]
+            model_table = Model._table
+            fields = Model._fields
+            # field_name, {xmlid: {src: {lang: value}}}
+            for field_name, field_dictionary in model_dictionary.items():
+                field = fields.get(field_name)
+                for sub_xmlids in split_every(IN_MAX, field_dictionary.keys()):
+                    # [module_name, imd_name, module_name, imd_name, ...]
+                    params = [xmlid.split('.', maxsplit=1) for xmlid in sub_xmlids]
+                    rows = env.execute_query(SQL("""
+                        SELECT m.id, imd.module || '.' || imd.name, m.%s, imd.noupdate
+                        FROM %s m, "ir_model_data" imd
+                        WHERE m.id = imd.res_id
+                        AND (%s)
+                    """, SQL.identifier(field_name), SQL.identifier(model_table), SQL(" OR ").join(
+                        SQL("(imd.module = %s AND imd.name = %s)", *param)
+                        for param in params
+                    )))
+
+                    # [id, translations, id, translations, ...]
+                    params = []
+                    for id_, xmlid, values, imd_noupdate in rows:
+                        if not values:
+                            continue
+                        _value_en = values.get('_en_US', values['en_US'])
+                        if not _value_en:
+                            continue
+
+                        # {src: {lang: term_lang}}
+                        record_dictionary = field_dictionary[xmlid]
+                        # {lang: {src: term_lang}}
+                        term_updates = {}
+                        for term_en, translations in record_dictionary.items():
+                            for lang, value in translations.items():
+                                term_updates.setdefault(lang, {})[term_en] = value
+                        do_overwrite = force_overwrite or (not imd_noupdate and overwrite)
+                        updated_values = dict(StoredTranslations(values).translated(
+                            env, field, env.lang or 'en_US', term_updates, overwrite=do_overwrite,
+                        ))
+                        changed_values = {}
+                        for lang in term_updates:
+                            new_val = updated_values.get(lang)
+                            if values.get(lang) != new_val:
+                                changed_values[lang] = new_val
+                            if f'_{lang}' in values:
+                                changed_values[f'_{lang}'] = None
+                        if changed_values:
+                            params.append((id_, Json(changed_values)))
+                    if params:
+                        env.execute_query(SQL("""
+                            UPDATE %(table)s AS m
+                            SET %(field_name)s = jsonb_strip_nulls(%(field_name)s || t.value)
+                            FROM (
+                                VALUES %(values)s
+                            ) AS t(id, value)
+                            WHERE m.id = t.id
+                        """, table=SQL.identifier(model_table), field_name=SQL.identifier(field_name), values=SQL(", ").join(
+                            SQL("(%s, %s::jsonb)", *param)
+                            for param in params
+                        )))
+
+        self.model_terms_translations.clear()
+
+        for model_name, model_dictionary in self.model_translations.items():
+            Model = env[model_name]
+            model_table = Model._table
+            for field_name, field_dictionary in model_dictionary.items():
+                for sub_field_dictionary in split_every(IN_MAX, field_dictionary.items()):
+                    # Parallel arrays + ORDINALITY preserve sub_field_dictionary order
+                    # so colliding xmlids merge deterministically in SQL.
+                    imd_modules, imd_names, values = [], [], []
+                    for xmlid, translations in sub_field_dictionary:
+                        module, name = xmlid.split('.', maxsplit=1)
+                        imd_modules.append(module)
+                        imd_names.append(name)
+                        values.append(Json(translations))
+
+                    field = SQL.identifier(field_name)
+                    if force_overwrite:
+                        value_query = SQL("m.%(field)s || merged.noupdate_value || merged.update_value", field=field)
+                    elif overwrite:
+                        value_query = SQL("merged.noupdate_value || m.%(field)s || merged.update_value", field=field)
+                    else:
+                        value_query = SQL("merged.noupdate_value || merged.update_value || m.%(field)s", field=field)
+
+                    # Single UPDATE via CTEs:
+                    # 1. input: unnest imported (module, name, translations) with ordinality
+                    # 2. entries: resolve xmlid → res_id and expand jsonb keys
+                    # 3. merged: aggregate per res_id
+                    env.execute_query(SQL("""
+                        WITH input(imd_module, imd_name, value, id) AS (
+                            SELECT * FROM unnest(%(imd_modules)s::text[], %(imd_names)s::text[], %(values)s::jsonb[]) WITH ORDINALITY
+                        ),
+                        entries AS (
+                            SELECT imd.res_id, imd.noupdate, input.id, translation.key, translation.value
+                            FROM input
+                            JOIN "ir_model_data" AS imd
+                            ON imd.model = %(model_name)s
+                            AND imd.module = input.imd_module
+                            AND imd.name = input.imd_name
+                            CROSS JOIN LATERAL jsonb_each(input.value) AS translation(key, value)
+                        ),
+                        merged AS (
+                            SELECT
+                                res_id,
+                                COALESCE(
+                                    jsonb_object_agg(key, value ORDER BY id ASC) FILTER (WHERE noupdate),
+                                    '{}'::jsonb
+                                ) AS noupdate_value,
+                                COALESCE(
+                                    jsonb_object_agg(key, value ORDER BY id ASC) FILTER (WHERE NOT noupdate),
+                                    '{}'::jsonb
+                                ) AS update_value
+                            FROM entries
+                            GROUP BY res_id
+                        )
+                        UPDATE %(table)s AS m
+                        SET %(field)s = %(value_query)s
+                        FROM merged
+                        WHERE m.id = merged.res_id
+                    """,
+                        imd_modules=imd_modules,
+                        imd_names=imd_names,
+                        values=values,
+                        model_name=model_name,
+                        table=SQL.identifier(model_table),
+                        field=field,
+                        value_query=value_query,
+                    ))
+
+        self.model_translations.clear()
+
+        env.invalidate_all()
+        env.transaction.invalidate_ormcache()
+        if self.verbose:
+            _logger.info("translations are loaded successfully")
 
 
 def get_locales(lang=None):
     if lang is None:
-        lang = locale.getdefaultlocale()[0]
-
-    if os.name == 'nt':
-        lang = _LOCALE2WIN32.get(lang, lang)
+        lang = locale.getlocale()[0]
 
     def process(enc):
         ln = locale._build_localename((lang, enc))
@@ -1196,11 +2399,370 @@ def resetlocale():
 
 def load_language(cr, lang):
     """ Loads a translation terms for a language.
+
     Used mainly to automate language loading at db initialization.
 
-    :param lang: language ISO code with optional _underscore_ and l10n flavor (ex: 'fr', 'fr_BE', but not 'fr-BE')
-    :type lang: str
+    :param cr:
+    :param str lang: language ISO code with optional underscore (``_``) and
+        l10n flavor (ex: 'fr', 'fr_BE', but not 'fr-BE')
     """
-    env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, {})
-    installer = env['base.language.install'].create({'lang': lang})
+    from odoo import api  # noqa: PLC0415
+    env = api.Environment(cr, api.SUPERUSER_ID, {})
+    lang_ids = env['res.lang'].with_context(active_test=False).search([('code', '=', lang)]).ids
+    installer = env['base.language.install'].create({'lang_ids': [(6, 0, lang_ids)]})
     installer.lang_install()
+
+
+def get_base_langs(lang: str) -> list[str]:
+    base_lang = lang.split('_', 1)[0]
+    langs = [base_lang]
+    # LAC (~non-peninsular) spanishes have a second base
+    if base_lang == 'es' and lang not in ('es_ES', 'es_419'):
+        langs.append('es_419')
+    # HK Chinese ~ Taiwan Chinese
+    if lang == 'zh_HK':
+        langs.append('zh_TW')
+    if lang != base_lang:
+        langs.append(lang)
+    return langs
+
+
+def get_po_paths(module_name: str, lang: str) -> Iterator[str]:
+    po_paths = (
+        join(module_name, dir_, filename + '.po')
+        for filename in get_base_langs(lang)
+        for dir_ in ('i18n', 'i18n_extra')
+    )
+    for path in po_paths:
+        with suppress(FileNotFoundError):
+            yield file_path(path)
+
+
+def get_datafile_translation_path(module_name: str) -> Iterator[str]:
+    from odoo.modules import Manifest  # noqa: PLC0415
+    # if we are importing a module, we have an env, hide warnings
+    manifest = Manifest.for_addon(module_name, display_warning=False) or {}
+    for data_type in ('data', 'demo'):
+        for path in manifest.get(data_type, ()):
+            if path.endswith(('.xml', '.csv')):
+                yield file_path(join(module_name, path))
+
+
+CHARSET_REGEX = re.compile(rb'Content-Type:[^\n]+charset=([\w_\-:\.]+)')
+
+
+def get_translations_for_references(po_path: str, references: Iterable[str]) -> dict[str, dict[str, str]]:
+    """A faster extractor of translations for the given references from a PO file.
+
+    The references should be location strings to look for in PO entries (comments starting with ``#:``).
+
+    We use a single-pass approach to read the file in binary mode, locate the relevant entries,
+    and parse only these entries in one go with ``polib``.
+
+    Since we parse the file manually, we have two requirements:
+    1. The PO file should be well-formed (valid after ``msgcat file.po``).
+    2. Each entry must be separated by at least two consecutive newlines.
+
+    :param str po_path: Path to the PO file.
+    :param Iterable[str] references: List of reference strings to look for.
+    :return: Dictionary mapping references to a dictionary mapping msgid to msgstr.
+    """
+    normalized_references = {ref.strip() for ref in references if ref and ref.strip()}
+    if not normalized_references:
+        return {}
+
+    try:
+        with file_open(po_path, 'rb') as po_file:
+            data = po_file.read()
+    except FileNotFoundError:
+        return {}
+
+    if not data:
+        return {}
+
+    # Normalize line endings to LF for consistent processing.
+    data = data.replace(b'\r\n', b'\n')
+
+    data_find = data.find
+    data_rfind = data.rfind
+    data_len = len(data)
+
+    double_newline = b'\n\n'
+    double_newline_len = 2
+
+    # Find the header entry and extract the encoding if present.
+    #
+    #                        [top of file comments]
+    # (header_start_pos) --> msgid ""[\n]
+    #                        msgstr ""[\n]
+    #                        "Content-Type: text/plain; charset=UTF-8\n"[\n]
+    #                        "X-key: value"[\n] <-- (header_end_pos)
+    #                        [\n]
+    #                        [first entry][\n]
+
+    header_start_pos = data_find(b'msgid ""\nmsgstr ""')
+    if header_start_pos == -1:
+        return {}
+
+    header_end_pos = data_find(double_newline, header_start_pos)
+    if header_end_pos == -1:
+        return {}
+
+    header_bytes = data[0: header_end_pos]
+    match = CHARSET_REGEX.search(header_bytes)
+    encoding = match.group(1).decode('ascii') if match else 'utf-8'
+
+    # Store the entries to concatenate later. The first entry is the header.
+    entries = [header_bytes]
+
+    encoded_references = {ref.encode(encoding, errors='ignore') for ref in normalized_references}
+    matched_entry_positions = set()
+    nl_hash_colon = b'\n#:'
+    nl_hash_colon_len = 3
+    search_start_pos = header_end_pos
+
+    while True:
+        search_start_pos = data_find(nl_hash_colon, search_start_pos)
+        if search_start_pos == -1:
+            break
+
+        line_end_pos = data_find(b'\n', search_start_pos + nl_hash_colon_len)
+        if line_end_pos == -1:
+            line_end_pos = data_len
+
+        line_bytes = data[search_start_pos + nl_hash_colon_len: line_end_pos]
+        refs_on_line = set(line_bytes.split())
+
+        if not encoded_references.isdisjoint(refs_on_line):
+            # We found a line with at least one reference we need. Find the entry boundaries:
+            #
+            #                       [previous entry][\n]
+            #                       [\n]
+            # (entry_start_pos) --> #. base[\n] <-- (full_reference_start)
+            #                       #: reference1 reference2[\n]
+            #                       msgid "source"[\n]
+            #                       msgstr ""[\n]
+            #                       "line1\n"[\n]
+            #                       "line2\n"[\n] <-- (entry_end_pos)
+            #                       [\n]
+            #                       [next entry]
+
+            entry_start_pos = data_rfind(double_newline, header_end_pos, search_start_pos)
+            if entry_start_pos == -1:
+                entry_start_pos = header_end_pos
+            else:
+                entry_start_pos += double_newline_len
+
+            if entry_start_pos not in matched_entry_positions:
+                # This entry has not been added to `entries` yet, so we add it now.
+                matched_entry_positions.add(entry_start_pos)
+
+                entry_end_pos = data_find(double_newline, search_start_pos)
+                if entry_end_pos == -1:
+                    entry_end_pos = data_len
+
+                entries.append(data[entry_start_pos:entry_end_pos])
+
+                search_start_pos = entry_end_pos
+                continue
+
+        search_start_pos = line_end_pos
+
+    if len(entries) == 1:
+        return {}
+
+    # Parse all entries in a single polib call.
+    filtered_po = polib.pofile(double_newline.join(entries).decode(encoding), encoding=encoding)
+
+    translations = defaultdict(dict)
+
+    for entry in filtered_po:
+        for occ in entry.occurrences:
+            occ_str = f'{occ[0]}:{occ[1]}' if occ[1] else occ[0]
+            if occ_str in normalized_references and entry.msgstr and entry.msgid:
+                translations[occ_str][entry.msgid] = entry.msgstr
+
+    return dict(translations)
+
+
+class CodeTranslations:
+    def __init__(self):
+        # {(module_name, lang): {src: value}}
+        self.python_translations = {}
+        # {(module_name, lang): {'message': [{'id': src, 'string': value}]}
+        self.web_translations = {}
+
+    @staticmethod
+    def _read_code_translations_file(fileobj, filter_func):
+        """ read and return code translations from fileobj with filter filter_func
+
+        :param func filter_func: a filter function to drop unnecessary code translations
+        """
+        # current, we assume the fileobj is from the source code, which only contains the translation for the current module
+        # don't use it in the import logic
+        translations = {}
+        fileobj.seek(0)
+        reader = translation_file_reader(fileobj, fileformat='po')
+        for row in reader:
+            if row.get('type') == 'code' and row.get('src') and filter_func(row):
+                translations[row['src']] = row['value']
+        return translations
+
+    @staticmethod
+    def _get_code_translations(module_name, lang, filter_func):
+        po_paths = get_po_paths(module_name, lang)
+        translations = {}
+        for po_path in po_paths:
+            try:
+                with file_open(po_path, mode='rb') as fileobj:
+                    p = CodeTranslations._read_code_translations_file(fileobj, filter_func)
+                translations.update(p)
+            except IOError:
+                iso_lang = get_iso_codes(lang)
+                filename = '[lang: %s][format: %s]' % (iso_lang or 'new', 'po')
+                _logger.exception("couldn't read translation file %s", filename)
+        return translations
+
+    def _load_python_translations(self, module_name, lang):
+        def filter_func(row):
+            return row.get('value') and PYTHON_TRANSLATION_COMMENT in row['comments']
+        translations = CodeTranslations._get_code_translations(module_name, lang, filter_func)
+        self.python_translations[module_name, lang] = frozendict(translations)
+
+    def _load_web_translations(self, module_name, lang):
+        def filter_func(row):
+            return row.get('value') and JAVASCRIPT_TRANSLATION_COMMENT in row['comments']
+        translations = CodeTranslations._get_code_translations(module_name, lang, filter_func)
+        self.web_translations[module_name, lang] = frozendict({
+            "messages": tuple(
+                frozendict({"id": src, "string": value})
+                for src, value in translations.items())
+        })
+
+    def get_python_translations(self, module_name, lang):
+        if (module_name, lang) not in self.python_translations:
+            self._load_python_translations(module_name, lang)
+        return self.python_translations[(module_name, lang)]
+
+    def get_web_translations(self, module_name, lang):
+        if (module_name, lang) not in self.web_translations:
+            self._load_web_translations(module_name, lang)
+        return self.web_translations[(module_name, lang)]
+
+
+code_translations = CodeTranslations()
+
+
+def _get_translation_upgrade_queries(cr, field):
+    """ Return a pair of lists ``migrate_queries, cleanup_queries`` of SQL queries. The queries in
+    ``migrate_queries`` do migrate the data from table ``_ir_translation`` to the corresponding
+    field's column, while the queries in ``cleanup_queries`` remove the corresponding data from
+    table ``_ir_translation``.
+    """
+    from odoo.modules.registry import Registry  # noqa: PLC0415
+    Model = Registry(cr.dbname)[field.model_name]
+    translation_name = f"{field.model_name},{field.name}"
+    migrate_queries = []
+    cleanup_queries = []
+
+    if field.translate is True:
+        emtpy_src = """'{"en_US": ""}'::jsonb"""
+        query = f"""
+            WITH t AS (
+                SELECT it.res_id as res_id, jsonb_object_agg(it.lang, it.value) AS value, bool_or(imd.noupdate) AS noupdate
+                  FROM _ir_translation it
+             LEFT JOIN ir_model_data imd
+                    ON imd.model = %s AND imd.res_id = it.res_id AND imd.module != '__export__'
+                 WHERE it.type = 'model' AND it.name = %s AND it.state = 'translated'
+              GROUP BY it.res_id
+            )
+            UPDATE {Model._table} m
+               SET "{field.name}" = CASE WHEN m."{field.name}" IS NULL THEN {emtpy_src} || t.value
+                                         WHEN t.noupdate IS FALSE THEN t.value || m."{field.name}"
+                                         ELSE m."{field.name}" || t.value
+                                     END
+              FROM t
+             WHERE t.res_id = m.id
+        """
+        migrate_queries.append(cr.mogrify(query, [Model._name, translation_name]).decode())
+
+        query = "DELETE FROM _ir_translation WHERE type = 'model' AND state = 'translated' AND name = %s"
+        cleanup_queries.append(cr.mogrify(query, [translation_name]).decode())
+
+    # upgrade model_terms translation: one update per field per record
+    if callable(field.translate):
+        cr.execute("SELECT code FROM res_lang WHERE active IS TRUE")
+        languages = {l[0] for l in cr.fetchall()}
+        field_name_sql = SQL.identifier('m', field.name)
+        table_sql = SQL.identifier(Model._table)
+        query = SQL("""
+            SELECT t.res_id, %s, t.value, t.noupdate
+              FROM t
+              JOIN %s m ON t.res_id = m.id
+        """, field_name_sql, table_sql)
+        if translation_name == 'ir.ui.view,arch_db':
+            cr.execute("SELECT id from ir_module_module WHERE name = 'website' AND state='installed'")
+            if cr.fetchone():
+                query = SQL("""
+                    SELECT t.res_id, %(field_name)s, t.value, t.noupdate, l.code
+                      FROM t
+                      JOIN %(table)s m ON t.res_id = m.id
+                      JOIN website w ON m.website_id = w.id
+                      JOIN res_lang l ON w.default_lang_id = l.id
+                    UNION
+                    SELECT t.res_id, %(field_name)s, t.value, t.noupdate, 'en_US'
+                      FROM t
+                      JOIN %(table)s m ON t.res_id = m.id
+                     WHERE m.website_id IS NULL
+                """, field_name=field_name_sql, table=table_sql)
+        cr.execute(SQL("""
+            WITH t0 AS (
+                -- aggregate translations by source term --
+                SELECT res_id, lang, jsonb_object_agg(src, value) AS value
+                  FROM _ir_translation
+                 WHERE type = 'model_terms' AND name = %s AND state = 'translated'
+              GROUP BY res_id, lang
+            ),
+            t AS (
+                -- aggregate translations by lang --
+                SELECT t0.res_id AS res_id, jsonb_object_agg(t0.lang, t0.value) AS value, bool_or(imd.noupdate) AS noupdate
+                  FROM t0
+             LEFT JOIN ir_model_data imd
+                    ON imd.model = %s AND imd.res_id = t0.res_id
+              GROUP BY t0.res_id
+            ) %s""", translation_name, Model._name, query))
+        for id_, new_translations, translations, noupdate, *extra in cr.fetchall():
+            if not new_translations:
+                continue
+            # new_translations contains translations updated from the latest po files
+            src_value = new_translations.pop('en_US')
+            src_terms = ParsedTranslation(field, src_value).terms
+            for lang, dst_value in new_translations.items():
+                terms_mapping = translations.setdefault(lang, {})
+                dst_terms = ParsedTranslation(field, dst_value).terms
+                for src_term, dst_term in zip(src_terms, dst_terms):
+                    if src_term == dst_term or noupdate:
+                        terms_mapping.setdefault(src_term, dst_term)
+                    else:
+                        terms_mapping[src_term] = dst_term
+            new_values = {
+                lang: field.translate(terms_mapping.get, src_value)
+                for lang, terms_mapping in translations.items()
+            }
+            if "en_US" not in new_values:
+                new_values["en_US"] = field.translate(lambda v: None, src_value)
+            if extra and extra[0] not in new_values:
+                new_values[extra[0]] = field.translate(lambda v: None, src_value)
+            elif not extra:
+                missing_languages = languages - set(translations)
+                if missing_languages:
+                    src_value = field.translate(lambda v: None, src_value)
+                    for lang in sorted(missing_languages):
+                        new_values[lang] = src_value
+            query = f'UPDATE "{Model._table}" SET "{field.name}" = %s WHERE id = %s'
+            migrate_queries.append(cr.mogrify(query, [Json(new_values), id_]).decode())
+
+        query = "DELETE FROM _ir_translation WHERE type = 'model_terms' AND state = 'translated' AND name = %s"
+        cleanup_queries.append(cr.mogrify(query, [translation_name]).decode())
+
+    return migrate_queries, cleanup_queries

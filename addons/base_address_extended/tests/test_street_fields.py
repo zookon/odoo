@@ -1,55 +1,101 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo.tests.common import TransactionCase
+from odoo import models
+from odoo.tests import Form
+from odoo.tests.common import tagged, TransactionCase
 
 
+@tagged('at_install', '-post_install')  # LEGACY at_install
 class TestStreetFields(TransactionCase):
 
-    def setUp(self):
-        super(TestStreetFields, self).setUp()
-        self.Partner = self.env['res.partner']
-        self.env.ref('base.be').write({'street_format': '%(street_name)s, %(street_number)s/%(street_number2)s'})
-        self.env.ref('base.us').write({'street_format': '%(street_number)s/%(street_number2)s %(street_name)s'})
-        self.env.ref('base.ch').write({'street_format': 'header %(street_name)s, %(street_number)s - %(street_number2)s trailer'})
+    def test_partner_create(self):
+        """ Will test the compute and inverse methods of street fields when creating partner records. """
+        mx_id = self.env.ref('base.mx').id
+        partner = self.env['res.partner'].create({'name': 'Test Address', 'country_id': mx_id})
 
-    def create_and_assert(self, partner_name, country_id, street, street_name, street_number, street_number2):
-        partner = self.Partner.create({'name': partner_name + '-1', 'street': street, 'country_id': country_id})
-        self.assertEqual(partner.street_name or '', street_name, 'wrong street name for %s: %s' % (partner_name, partner.street_name))
-        self.assertEqual(partner.street_number or '', street_number, 'wrong house number for %s: %s' % (partner_name, partner.street_number))
-        self.assertEqual(partner.street_number2 or '', street_number2, 'wrong door number for %s: %s' % (partner_name, partner.street_number2))
-        partner = self.Partner.create({
-            'name': partner_name + '-2',
-            'street_name': street_name,
-            'street_number': street_number,
-            'street_number2': street_number2,
-            'country_id': country_id,
+        values = [
+            ['', '', '', '', ''],
+            ['Place Royale', 'Place Royale', '', '', 'Place Royale'],
+            ['Chaussee de Namur 40a - 2b', 'Chaussee de Namur', '40a', '2b', 'Chaussee de Namur 40a - 2b'],
+            ['Chaussee de Namur 1', 'Chaussee de Namur', '1', '', 'Chaussee de Namur 1'],
+            ['40 Chaussee de Namur', 'Chaussee de Namur', '40', '', 'Chaussee de Namur 40'],
+            ['Chaussee de Namur, 40 - Apt 2b', 'Chaussee de Namur', '40', 'Apt 2b', 'Chaussee de Namur 40 - Apt 2b'],
+            ['header Chaussee de Namur, 40 trailer ', 'header Chaussee de Namur', '40', '', 'header Chaussee de Namur 40'],
+            ['\nCl 53\n # 43 - 81', 'Cl 53\n #', '43', '81', 'Cl 53\n # 43 - 81'],
+            ['Street Line 1\nNumber Line 2 44 76', 'Street Line 1\nNumber Line 2 44', '76', '', 'Street Line 1\nNumber Line 2 44 76'],
+            ['1600 Pennsylvania Ave NW, Apt 4B', 'Pennsylvania Ave NW', '1600', 'Apt 4B', 'Pennsylvania Ave NW 1600 - Apt 4B'],
+            ['10, Rue de la Paix', 'Rue de la Paix', '10', '', 'Rue de la Paix 10'],
+            ['Calle Gran Vía, 42, 3º Dcha', 'Calle Gran Vía', '42', '3º Dcha', 'Calle Gran Vía 42 - 3º Dcha'],
+            ['Jean-Baptiste-Lebas 12 - A-3', 'Jean-Baptiste-Lebas', '12', 'A-3', 'Jean-Baptiste-Lebas 12 - A-3'],
+            ['Jean-Baptiste-Lebas, 12 / A-3', 'Jean-Baptiste-Lebas', '12', 'A-3', 'Jean-Baptiste-Lebas 12 - A-3'],
+            ['1-7-1 Nagatacho, Chiyoda-ku, Apt 3', 'Nagatacho, Chiyoda-ku', '1-7-1', 'Apt 3', 'Nagatacho, Chiyoda-ku 1-7-1 - Apt 3'],
+        ]
+
+        for street, name, number, number2, _computed_street in values:
+            # test street -> street values (compute)
+            partner.street = street
+            self.assertEqual(partner.street_name, name, 'Wrongly formatted street name: expected %s, received %s' % (name, partner.street_name))
+            self.assertEqual(partner.street_number, number, 'Wrongly formatted street number: expected %s, received %s' % (number, partner.street_number))
+            self.assertEqual(partner.street_number2, number2, 'Wrongly formatted street number2: expected %s, received %s' % (number2, partner.street_number2))
+
+        for _street, name, number, number2, computed_street in values:
+            partner.street_number2 = number2
+            partner.street_number = number
+            partner.street_name = name
+            self.assertEqual(partner.street, computed_street, 'Wrongly formatted street: expected %s, received %s' % (street, partner.street))
+
+    def test_child_sync(self):
+        """ Test that city_id is propagated to (contact-type) children contacts. """
+        usa = self.env.ref('base.us')
+        new_york_city = self.env['res.city'].create({
+            'name': 'New York',
+            'country_id': usa.id,
         })
-        self.assertEqual(partner.street or '', street, 'wrong street for %s: %s' % (partner_name, partner.street))
-        return partner
+        parent = self.env['res.partner'].create({
+            'name': 'Parent Company',
+            'country_id': usa.id,
+            'city_id': new_york_city.id,
+        })
+        child = self.env['res.partner'].create({
+            'name': 'Child Contact',
+            'type': 'contact',
+            'parent_id': parent.id,
+        })
+        self.assertRecordValues(child, [{
+            'name': 'Child Contact',
+            'country_id': usa.id,
+            'city_id': new_york_city.id,
+        }])
 
-    def write_and_assert(self, partner, vals, street, street_name, street_number, street_number2):
-        partner.write(vals)
-        self.assertEqual(partner.street_name or '', street_name, 'wrong street name: %s' % partner.street_name)
-        self.assertEqual(partner.street_number or '', street_number, 'wrong house number: %s' % partner.street_number)
-        self.assertEqual(partner.street_number2 or '', street_number2, 'wrong door number: %s' % partner.street_number2)
-        self.assertEqual(partner.street or '', street, 'wrong street: %s' % partner.street)
+    def test_parent_zip(self):
+        """
+        Test using the Form simulator that the onchange function
+        _onchange_city_id does not overwrite the parent's zip.
+        """
+        usa = self.env.ref('base.us')
+        hampton_bays = self.env['res.city'].create({
+            'name': 'Hampton Bays',
+            'country_id': usa.id,
+            'zipcode': '11946'
+        })
+        parent = self.env['res.partner'].create({
+            'name': 'Parent Company',
+            'country_id': usa.id,
+            'city_id': hampton_bays.id,
+        })
+        parent.write({
+            'zip': '11946000'
+        })
 
-    def test_00_res_partner_name_create(self):
-        self.create_and_assert('Test00', self.env.ref('base.us').id, '40/2b Chaussee de Namur', 'Chaussee de Namur', '40', '2b')
-        self.create_and_assert('Test01', self.env.ref('base.us').id, '40 Chaussee de Namur', 'Chaussee de Namur', '40', '')
-        self.create_and_assert('Test02', self.env.ref('base.us').id, 'Chaussee de Namur', 'de Namur', 'Chaussee', '')
+        with Form(self.env['res.partner']) as child_form:
+            child_form.name = 'Child Contact'
+            child_form.parent_id = parent
+        child = child_form.save()
 
-    def test_01_header_trailer(self):
-        self.create_and_assert('Test10', self.env.ref('base.ch').id, 'header Chaussee de Namur, 40 - 2b trailer', 'Chaussee de Namur', '40', '2b')
-        self.create_and_assert('Test11', self.env.ref('base.ch').id, 'header Chaussee de Namur, 40 trailer', 'Chaussee de Namur', '40', '')
-        self.create_and_assert('Test12', self.env.ref('base.ch').id, 'header Chaussee de Namur trailer', 'Chaussee de Namur', '', '')
-
-    def test_02_res_partner_write(self):
-        p1 = self.create_and_assert('Test20', self.env.ref('base.be').id, 'Chaussee de Namur, 40/2b', 'Chaussee de Namur', '40', '2b')
-        self.write_and_assert(p1, {'street': 'Chaussee de Namur, 43'}, 'Chaussee de Namur, 43', 'Chaussee de Namur', '43', '')
-        self.write_and_assert(p1, {'street': 'Chaussee de Namur'}, 'Chaussee de Namur', 'Chaussee de Namur', '', '')
-        self.write_and_assert(p1, {'street_name': 'Chee de Namur', 'street_number': '40'}, 'Chee de Namur, 40', 'Chee de Namur', '40', '')
-        self.write_and_assert(p1, {'street_number2': '4'}, 'Chee de Namur, 40/4', 'Chee de Namur', '40', '4')
-        #we do recompute the street fields when we change the country
-        self.write_and_assert(p1, {'country_id': self.env.ref('base.us').id}, '40/4 Chee de Namur', 'Chee de Namur', '40', '4')
+        self.assertRecordValues(child, [{
+            'name': 'Child Contact',
+            'country_id': usa.id,
+            'city_id': hampton_bays.id,
+            'zip': '11946000',
+        }])

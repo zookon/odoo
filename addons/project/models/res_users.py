@@ -1,21 +1,44 @@
-# -*- coding: utf-8 -*-
-# Part of Odoo. See LICENSE file for full copyright and licensing details.
-
-from odoo import fields, models
+from odoo import api, fields, models
 
 
 class ResUsers(models.Model):
     _inherit = 'res.users'
 
-    has_group_subtask_project = fields.Boolean(
-        'Use Subtasks', compute='_compute_groups_id', inverse='_inverse_groups_id',
-        group_xml_id='project.group_subtask_project')
+    favorite_project_ids = fields.Many2many('project.project', 'project_favorite_user_rel', 'user_id', 'project_id',
+                                            string='Favorite Projects', export_string_translation=False, copy=False)
+    project_role_ids = fields.Many2many(
+        'project.role',
+        'project_role_res_users_rel',
+        'res_users_id',
+        'project_role_id',
+        string='Project Roles',
+        export_string_translation=False,
+        copy=False,
+    )
+    followed_project_ids = fields.Many2many('project.project', store=False, search='_search_followed_project_ids', export_string_translation=False)
 
-    has_group_project_rating = fields.Boolean(
-        'Use Rating on Project', compute='_compute_groups_id', inverse='_inverse_groups_id',
-        group_xml_id='project.group_project_rating')
+    @api.model_create_multi
+    def create(self, vals_list):
+        res = super().create(vals_list)
+        self._onboard_users_into_project(res)
+        return res
 
-    group_project_user = fields.Selection(
-        selection=lambda self: self._get_group_selection('base.module_category_project_management'),
-        string='Project', compute='_compute_groups_id', inverse='_inverse_groups_id',
-        category_xml_id='base.module_category_project_management')
+    def _onboard_users_into_project(self, users):
+        if (internal_users := users.filtered(lambda u: not u.share)):
+            ProjectTaskTypeSudo = self.env["project.task.type"].sudo()
+            create_vals = []
+            for user in internal_users:
+                vals = self.env["project.task"].with_context(lang=user.lang)._get_default_personal_stage_create_vals(user.id)
+                create_vals.extend(vals)
+
+            if create_vals:
+                ProjectTaskTypeSudo.with_context(default_project_id=False).create(create_vals)
+
+            return internal_users
+
+    def _search_followed_project_ids(self, operator, value):
+        followers = self.env['mail.followers'].search([
+            ('res_model', '=', 'project.project'),
+            ('res_id', operator, value)
+        ])
+        return [('partner_id', 'in', followers.partner_id.ids)]

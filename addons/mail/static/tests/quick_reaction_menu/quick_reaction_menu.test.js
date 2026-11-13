@@ -1,0 +1,243 @@
+import {
+    click,
+    contains as mailContains,
+    defineMailModels,
+    hover,
+    openDiscuss,
+    start,
+    startServer,
+} from "@mail/../tests/mail_test_helpers";
+import {
+    containsTextInComposer,
+    insertTextInComposer,
+} from "@mail/../tests/mail_test_helpers_composer";
+import { QuickReactionMenu } from "@mail/core/common/quick_reaction_menu";
+import { describe, expect, test } from "@odoo/hoot";
+import { animationFrame, leave, press, waitFor, waitForNone } from "@odoo/hoot-dom";
+
+describe.current.tags("desktop");
+defineMailModels();
+
+test("can toggle reaction from quick reaction menu", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    await click(".o-mail-QuickReactionMenu button:text('👍')");
+    await waitFor(".o-mail-MessageReaction:text('👍 1'):count(1)");
+    await waitForNone(".o-mail-QuickReactionMenu");
+    await hover(".o-mail-Message");
+    await click(".o-mail-Message-actions [title='Add a Reaction']");
+    await click(".o-mail-QuickReactionMenu button:text('👍')");
+    await waitForNone(".o-mail-MessageReaction:text('👍 1')");
+    await waitForNone(".o-mail-QuickReactionMenu");
+});
+
+test("toggle emoji picker from quick reaction menu", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    await click(".o-mail-QuickReactionMenu [title='Toggle Emoji Picker']");
+    await waitFor(".o-EmojiPicker:count(1)");
+    await click(".o-mail-QuickReactionMenu [title='Toggle Emoji Picker']");
+    await waitForNone(".o-EmojiPicker");
+});
+
+test("show default emojis when no frequent emojis are available", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    await mailContains(".o-mail-QuickReactionMenu-emoji", {
+        count: QuickReactionMenu.DEFAULT_EMOJIS.length,
+    });
+    for (const emoji of QuickReactionMenu.DEFAULT_EMOJIS) {
+        await mailContains(".o-mail-QuickReactionMenu-emoji:text('" + emoji + "')");
+    }
+    await click(".o-mail-QuickReactionMenu [title='Toggle Emoji Picker']");
+    await click(".o-Emoji:text('🤢')");
+    await hover(".o-mail-Message");
+    await click(".o-mail-Message-actions [title='Add a Reaction']");
+    await mailContains(
+        ".o-mail-QuickReactionMenu-emoji:text('" + QuickReactionMenu.DEFAULT_EMOJIS.at(-1) + "')",
+        {
+            count: 0,
+        }
+    );
+    await waitFor(".o-mail-QuickReactionMenu-emoji:text('🤢'):count(1)");
+});
+
+test("navigate quick reaction menu using tab key", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    for (const emoji of QuickReactionMenu.DEFAULT_EMOJIS) {
+        await mailContains(".o-mail-QuickReactionMenu-emoji:focus:text('" + emoji + "')");
+        await press("Tab");
+    }
+    await waitFor(".o-mail-QuickReactionMenu-emojiPicker:focus:count(1)");
+});
+
+test("navigate quick reaction menu using arrow keys", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    for (const emoji of QuickReactionMenu.DEFAULT_EMOJIS) {
+        await mailContains(".o-mail-QuickReactionMenu-emoji:focus:text('" + emoji + "')");
+        await press("ArrowRight");
+    }
+    await waitFor(".o-mail-QuickReactionMenu-emojiPicker:focus:count(1)");
+    await press("ArrowLeft");
+    for (const emoji of [...QuickReactionMenu.DEFAULT_EMOJIS].reverse()) {
+        await mailContains(".o-mail-QuickReactionMenu-emoji:focus:text('" + emoji + "')");
+        await press("ArrowLeft");
+    }
+    await waitFor(".o-mail-QuickReactionMenu-emojiPicker:focus:count(1)");
+});
+
+test("hovered emoji stays highlighted and is used on enter", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    pyEnv["mail.message"].create({
+        body: "Hello world!",
+        message_type: "comment",
+        model: "discuss.channel",
+        res_id: channelId,
+    });
+    await start();
+    await openDiscuss(channelId);
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    const [firstEmoji, , thirdEmoji] = QuickReactionMenu.DEFAULT_EMOJIS;
+    await mailContains(`.o-mail-QuickReactionMenu-emoji:focus:text(${firstEmoji})`);
+    await hover(`.o-mail-QuickReactionMenu-emoji:text(${thirdEmoji})`);
+    await leave();
+    await mailContains(`.o-mail-QuickReactionMenu-emoji:focus:text(${firstEmoji})`);
+    expect(
+        await waitFor(`.o-mail-QuickReactionMenu-emoji:text(${thirdEmoji}):count(1)`)
+    ).toHaveStyle({
+        outlineStyle: "solid",
+    });
+    expect(
+        await waitFor(`.o-mail-QuickReactionMenu-emoji:text(${firstEmoji}):count(1)`)
+    ).toHaveStyle({
+        boxShadow: "none",
+        outlineStyle: "none",
+    });
+    await press("Enter");
+    await mailContains(`.o-mail-MessageReaction:text(${thirdEmoji} 1)`);
+});
+
+test("can quick search emoji from quick reaction", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    await waitFor(".o-mail-QuickReactionMenu:count(1)");
+    await press("b");
+    await waitFor(".o-EmojiPicker:count(1)");
+    await waitFor(".o-EmojiPicker-search input:value('b'):count(1)");
+    for (const ch of [..."roccoli"]) {
+        await press(ch);
+    }
+    await waitFor(".o-EmojiPicker-search input:value('broccoli'):count(1)");
+    await animationFrame();
+    await press("Enter");
+    await waitFor(".o-mail-MessageReaction:text('🥦 1'):count(1)");
+});
+
+test("shift-clicking on an emoji keeps the emoji picker open", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    const defaultEmoji = QuickReactionMenu.DEFAULT_EMOJIS[0];
+    await click(`.o-mail-QuickReactionMenu-emoji:text(${defaultEmoji})`, { shiftKey: true });
+    await waitFor(`.o-mail-MessageReaction:text(${defaultEmoji} 1):count(1)`);
+    await waitFor(".o-mail-QuickReactionMenu:count(1)");
+    await click(`.o-mail-QuickReactionMenu-emoji:text(${defaultEmoji})`);
+    await waitForNone(`.o-mail-MessageReaction:text(${defaultEmoji} 1)`);
+    await waitForNone(".o-mail-QuickReactionMenu");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    await click(".o-mail-QuickReactionMenu-emojiPicker");
+    await click(".o-EmojiPicker-content .o-Emoji:text(👺)", { shiftKey: true });
+    await waitFor(".o-mail-MessageReaction:text(👺 1):count(1)");
+    await waitFor(".o-EmojiPicker:count(1)");
+    await click(".o-EmojiPicker-content .o-Emoji:text(👺)");
+    await waitForNone(".o-mail-MessageReaction:text(👺 1)");
+    await waitForNone(".o-EmojiPicker");
+    await waitForNone(".o-mail-QuickReactionMenu");
+});
+
+test.tags("focus required");
+test("return focus to thread composer on close", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await waitFor(".o-mail-Composer-html:focus:count(1)");
+    await hover(".o-mail-Message");
+    await click("[title='Add a Reaction']");
+    await waitFor(".o-mail-QuickReactionMenu-emoji:focus:text('👍'):count(1)");
+    await press("Enter");
+    await waitFor(".o-mail-MessageReaction:text('👍 1'):count(1)");
+    await waitFor(".o-mail-Composer-html:focus:count(1)");
+});
+
+test.tags("focus required");
+test("return focus to message edition composer on close", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "Hello world!");
+    await press("Enter");
+    await containsTextInComposer(".o-mail-Composer", "");
+    await insertTextInComposer(".o-mail-Composer", "Goodbye world!!");
+    await press("Enter");
+    await waitFor(".o-mail-Message:count(2)");
+    await hover(".o-mail-Message:last");
+    await click(".o-mail-Message:last [title='Expand']");
+    await click(".o-dropdown-item:text('Edit')");
+    await waitFor(".o-mail-Message .o-mail-Composer-html:focus:count(1)");
+    await hover(".o-mail-Message:first");
+    await click("[title='Add a Reaction']");
+    await waitFor(".o-mail-QuickReactionMenu-emoji:focus:text('👍'):count(1)");
+    await press("Enter");
+    await waitFor(".o-mail-MessageReaction:text('👍 1'):count(1)");
+    await waitFor(".o-mail-Message .o-mail-Composer-html:focus:count(1)");
+});

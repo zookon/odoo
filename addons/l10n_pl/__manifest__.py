@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-
-# Copyright (C) 2009 - now Grzegorz Grzelak grzegorz.grzelak@openglobe.pl
-
 {
-    'name' : 'Poland - Accounting',
-    'version' : '2.0',
-    'author' : 'Grzegorz Grzelak (OpenGLOBE)',
-    'website': 'http://www.openglobe.pl',
-    'category': 'Localization',
+    'name': 'Poland - Accounting',
+    'icon': '/account/static/description/l10n.png',
+    'countries': ['pl'],
+    'version': '2.1',
+    'author': 'Odoo S.A., Grzegorz Grzelak (OpenGLOBE) (http://www.openglobe.pl)',
+    'website': 'https://www.odoo.com/documentation/latest/applications/finance/fiscal_localizations.html',
+    'category': 'Accounting/Localizations/Account Charts',
     'description': """
 This is the module to manage the accounting chart and taxes for Poland in Odoo.
 ==================================================================================
@@ -17,21 +15,29 @@ To jest moduł do tworzenia wzorcowego planu kont, podatków, obszarów podatkow
 rejestrów podatkowych. Moduł ustawia też konta do kupna i sprzedaży towarów
 zakładając, że wszystkie towary są w obrocie hurtowym.
 
-Niniejszy moduł jest przeznaczony dla odoo 8.0.
+Niniejszy moduł jest przeznaczony dla Odoo 8.0.
 Wewnętrzny numer wersji OpenGLOBE 1.02
     """,
-    'depends' : [
+    'depends': [
         'account',
-        'base_iban',
-        'base_vat',
+        'account_edi_ubl_cii',
     ],
+    'auto_install': ['account'],
     'data': [
-              'data/l10n_pl_chart_data.xml',
-              'data/account_data.xml',
-              'data/account_tax_data.xml',
-              'data/account_fiscal_position_data.xml',
-              'data/res_country_state_data.xml',
-              'data/account_chart_template_data.xml'
+        'data/l10n_pl.l10n_pl_tax_office.csv',
+        'data/account.account.tag.csv',
+        'data/account_tax_report_data.xml',
+        'views/account_move_views.xml',
+        'views/account_payment_view.xml',
+        'views/product_views.xml',
+        'views/res_config_settings_views.xml',
+        'views/res_partner_views.xml',
+        'wizard/account_payment_register_views.xml',
+        'security/ir.access.csv',
+    ],
+    'demo': [
+        'demo/demo_company.xml',
     ],
     'post_init_hook': '_preserve_tag_on_taxes',
+    'license': 'LGPL-3',
 }

@@ -1,113 +1,134 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import api, fields, models, _
+from odoo import api, fields, models
+from odoo.exceptions import ValidationError
+from odoo.fields import Domain
+
+from odoo.addons.base.models.res_company import company_default_for
+
+SALE_INVOICE_POLICY = [("order", "Ordered quantities"), ("delivery", "Delivered quantities")]
 
 
 class ResCompany(models.Model):
     _inherit = "res.company"
+    _check_company_auto = True
 
-    sale_note = fields.Text(string='Default Terms and Conditions', translate=True)
-    portal_confirmation_sign = fields.Boolean(string='Online Signature')
-    portal_confirmation_pay = fields.Boolean(string='Electronic Payment')
-    quotation_validity_days = fields.Integer(default=30, string="Default Quotation Validity (Days)")
+    account_invoices_to_issue_id = fields.Many2one(
+        'account.account',
+        string='Invoices to be Issued Account',
+        **company_default_for('account_invoices_to_issue_id', 'product.category', 'property_account_invoices_to_issue_id'),
+        check_company=True,
+    )
 
-    # sale quotation onboarding
-    sale_quotation_onboarding_state = fields.Selection([('not_done', "Not done"), ('just_done', "Just done"), ('done', "Done"), ('closed', "Closed")], string="State of the sale onboarding panel", default='not_done')
-    sale_onboarding_order_confirmation_state = fields.Selection([('not_done', "Not done"), ('just_done', "Just done"), ('done', "Done")], string="State of the onboarding confirmation order step", default='not_done')
-    sale_onboarding_sample_quotation_state = fields.Selection([('not_done', "Not done"), ('just_done', "Just done"), ('done', "Done")], string="State of the onboarding sample quotation step", default='not_done')
+    account_invoiced_not_delivered_id = fields.Many2one(
+        'account.account',
+        string='Invoiced Not Delivered Account',
+        **company_default_for('account_invoiced_not_delivered_id', 'product.category', 'property_account_invoiced_not_delivered_id'),
+        check_company=True,
+    )
 
-    sale_onboarding_payment_method = fields.Selection([
-        ('digital_signature', 'Sign online'),
-        ('paypal', 'PayPal'),
-        ('stripe', 'Stripe'),
-        ('other', 'Pay with another payment acquirer'),
-        ('manual', 'Wire Transfer'),
-    ], string="Sale onboarding selected payment method")
+    _check_quotation_validity_days = models.Constraint(
+        "CHECK(quotation_validity_days >= 0)",
+        "You cannot set a negative number for the default quotation validity. Leave empty (or 0) to"
+        " disable the automatic expiration of quotations.",
+    )
 
-    @api.model
-    def action_close_sale_quotation_onboarding(self):
-        """ Mark the onboarding panel as closed. """
-        self.env.user.company_id.sale_quotation_onboarding_state = 'closed'
+    portal_confirmation_sign = fields.Boolean(string="Online Signature", default=True)
+    portal_confirmation_pay = fields.Boolean(string="Online Payment")
+    prepayment_percent = fields.Float(
+        string="Prepayment",
+        default=1.0,
+        help="The percentage of the amount needed to be paid to confirm quotations.",
+    )
+    display_product_images_on_so = fields.Boolean(string="Display Product Images")
+    quotation_validity_days = fields.Integer(
+        string="Default Quotation Validity",
+        default=30,
+        help="Days between quotation proposal and expiration."
+        " 0 days means automatic expiration is disabled",
+    )
+    sale_discount_product_id = fields.Many2one(
+        comodel_name="product.product",
+        string="Discount Product",
+        domain=[("type", "=", "service"), ("invoice_policy", "=", "order")],
+        help="Default product used for discounts",
+        check_company=True,
+    )
 
-    @api.model
-    def action_open_sale_onboarding_payment_acquirer(self):
-        """ Called by onboarding panel above the quotation list."""
-        self.env.user.company_id.get_chart_of_accounts_or_fail()
-        action = self.env.ref('sale.action_open_sale_onboarding_payment_acquirer_wizard').read()[0]
-        return action
+    # sale onboarding
+    sale_onboarding_payment_method = fields.Selection(
+        selection=[
+            ("digital_signature", "Sign online"),
+            ("paypal", "PayPal"),
+            ("stripe", "Stripe"),
+            ("other", "Pay with another payment provider"),
+            ("manual", "Manual Payment"),
+        ],
+        string="Sale onboarding selected payment method",
+    )
 
-    def _get_sample_sales_order(self):
-        """ Get a sample quotation or create one if it does not exist. """
-        # use current user as partner
-        partner = self.env.user.partner_id
-        company_id = self.env.user.company_id.id
-        # is there already one?
-        sample_sales_order = self.env['sale.order'].search(
-            [('company_id', '=', company_id), ('partner_id', '=', partner.id),
-             ('state', '=', 'draft')], limit=1)
-        if len(sample_sales_order) == 0:
-            sample_sales_order = self.env['sale.order'].create({
-                'partner_id': partner.id
-            })
-            # take any existing product or create one
-            product = self.env['product.product'].search([], limit=1)
-            if len(product) == 0:
-                product = self.env['product.product'].create({
-                    'name': _('Sample Product')
-                })
-            self.env['sale.order.line'].create({
-                'name': _('Sample Order Line'),
-                'product_id': product.id,
-                'product_uom_qty': 10,
-                'price_unit': 123,
-                'order_id': sample_sales_order.id,
-            })
-        return sample_sales_order
+    downpayment_account_id = fields.Many2one(
+        comodel_name="account.account",
+        string="Downpayment Account",
+        domain=[("account_type", "in", ("income", "income_other", "liability_current"))],
+        help="This account will be used on Downpayment invoices.",
+        tracking=True,
+    )
+    show_sol_numbers = fields.Boolean(
+        string="Line Numbers", help="Display line numbers on Sales Orders."
+    )
 
-    @api.model
-    def action_open_sale_onboarding_sample_quotation(self):
-        """ Onboarding step for sending a sample quotation. Open a window to compose an email,
-            with the edi_invoice_template message loaded by default. """
-        sample_sales_order = self._get_sample_sales_order()
-        template = self.env.ref('sale.email_template_edi_sale', False)
-        action = self.env.ref('sale.action_open_sale_onboarding_sample_quotation').read()[0]
-        action['context'] = {
-            'default_res_id': sample_sales_order.id,
-            'default_use_template': bool(template),
-            'default_template_id': template and template.id or False,
-            'default_model': 'sale.order',
-            'default_composition_mode': 'comment',
-            'mark_so_as_sent': True,
-            'custom_layout': 'mail.mail_notification_paynow',
-            'proforma': self.env.context.get('proforma', False),
-            'force_email': True,
-            'mail_notify_author': True,
-        }
-        return action
+    sale_invoice_policy = fields.Selection(
+        selection=SALE_INVOICE_POLICY, string="Invoicing Policy", default="order", required=True
+    )
 
-    @api.multi
-    def action_save_onboarding_quotation_layout(self):
-        """ Set the onboarding step as done """
-        if bool(self.logo) and self.logo != self._get_logo():
-            self.set_onboarding_step_done('account_onboarding_invoice_layout_state')
+    sale_automatic_invoice = fields.Boolean(
+        string="Automatic Invoicing",
+        help="The invoice is generated automatically and available in the customer portal when the "
+        "transaction is confirmed by the payment provider.\nThe invoice is marked as paid and "
+        "the payment is registered in the payment journal defined in the configuration of the "
+        "payment provider.\nThis mode is advised if you issue the final invoice at the order "
+        "and not after the delivery.",
+    )
 
-    def get_and_update_sale_quotation_onboarding_state(self):
-        """ This method is called on the controller rendering method and ensures that the animations
-            are displayed only one time. """
-        steps = [
-            'base_onboarding_company_state',
-            'account_onboarding_invoice_layout_state',
-            'sale_onboarding_order_confirmation_state',
-            'sale_onboarding_sample_quotation_state',
-        ]
-        return self.get_and_update_onbarding_state('sale_quotation_onboarding_state', steps)
+    # === CONSTRAINT METHODS === #
 
-    @api.model
-    def action_open_sale_onboarding_quotation_layout(self):
-        """ Onboarding step for the quotation layout. """
-        action = self.env.ref('sale.action_open_sale_onboarding_quotation_layout').read()[0]
-        action['res_id'] = self.env.user.company_id.id
-        return action
+    @api.constrains("prepayment_percent")
+    def _check_prepayment_percent(self):
+        for company in self:
+            if company.portal_confirmation_pay and not (0 <= company.prepayment_percent <= 1.0):
+                raise ValidationError(
+                    company.env._("Prepayment percentage must be a valid percentage.")
+                )
 
-    _sql_constraints = [('check_quotation_validity_days', 'CHECK(quotation_validity_days > 0)', 'Quotation Validity is required and must be greater than 0.')]
+    # === CRUD METHODS ===#
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        result = super().create(vals_list)
+        self._sync_automatic_invoice_cron()
+        return result
+
+    def write(self, vals):
+        result = super().write(vals)
+        if "sale_automatic_invoice" in vals:
+            self._sync_automatic_invoice_cron()
+        return result
+
+    def _sync_automatic_invoice_cron(self):
+        automatic_invoice_cron = self.env.ref("sale.send_invoice_cron", raise_if_not_found=False)
+        if not automatic_invoice_cron:
+            return
+        active_companies = self.search_count([("sale_automatic_invoice", "=", True)], limit=1)
+        automatic_invoice_cron.sudo().active = bool(active_companies)
+
+    def _get_accrual_candidate_lines(self, date=False):
+        candidates = super()._get_accrual_candidate_lines(date=date)
+        extra_domain = Domain([
+            ('company_id', '=', self.id),
+            ('product_id.is_storable', '=', True),
+        ])
+        order_lines = self.env['sale.order.line']._get_accrual_line_ids(date=date, extra_domain=extra_domain)
+        candidates['invoice_to_be_issued'] = order_lines.filtered(lambda l: l.amount_to_invoice_at_date > 0)
+        candidates['invoiced_not_delivered'] = order_lines.filtered(lambda l: l.amount_to_invoice_at_date < 0)
+        return candidates

@@ -1,18 +1,24 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 {
     'name': 'Mass mailing on sale orders',
-    'category': 'Hidden',
-    'version': '1.0',
+    'category': 'Marketing/Email Marketing',
     'summary': 'Add sale order UTM info on mass mailing',
     'description': """UTM and mass mailing on sale orders""",
-    'depends': ['sale', 'mass_mailing', 'website_sale_link_tracker'],
+    'depends': ['sale', 'mass_mailing'],
+    'assets': {
+        'mass_mailing.assets_builder': [
+            'mass_mailing_sale/static/src/builder/**/*',
+            'mass_mailing_sale/static/src/snippets/**/*',
+        ],
+    },
     'data': [
-        'views/mass_mailing_views.xml',
+        'views/mailing_mailing_views.xml',
     ],
     'demo': [
-        'data/mass_mailing_demo.xml',
+        'demo/mailing_mailing.xml',
     ],
     'auto_install': True,
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }

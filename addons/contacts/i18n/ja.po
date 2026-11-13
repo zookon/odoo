@@ -1,40 +1,77 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # * contacts
-# 
+#
 # Translators:
-# Norimichi Sugimoto <norimichi.sugimoto@tls-ltd.co.jp>, 2017
-# Martin Trigaux <mat@odoo.com>, 2017
-# Yoshi Tashiro <tashiro@roomsfor.hk>, 2017
+# Martin Trigaux, 2022
+# Andy Yiu, 2023
+#
+# "Dylan Kiss (dyki)" <dyki@odoo.com>, 2025.
+# "Junko Augias (juau)" <juau@odoo.com>, 2025, 2026.
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server 10.saas~18\n"
+"Project-Id-Version: Odoo Server 15.5alpha1\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2017-09-20 09:53+0000\n"
-"PO-Revision-Date: 2017-09-20 09:53+0000\n"
-"Last-Translator: Yoshi Tashiro <tashiro@roomsfor.hk>, 2017\n"
-"Language-Team: Japanese (https://www.transifex.com/odoo/teams/41243/ja/)\n"
+"POT-Creation-Date: 2026-09-11 17:42+0000\n"
+"PO-Revision-Date: 2026-08-31 19:39+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Japanese <https://translate.odoo.com/projects/odoo-s19-4/"
+"contacts/ja/>\n"
+"Language: ja\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: ja\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Weblate 2026.8.1\n"
+
+#. module: contacts
+#: model:ir.module.module,description:base.module_contacts
+msgid ""
+"\n"
+"This module gives you a quick view of your contacts directory, accessible "
+"from your home page.\n"
+"You can track your vendors, customers and other contacts.\n"
+msgstr ""
+
+#. module: contacts
+#: model_terms:ir.ui.view,arch_db:contacts.res_partner_view_hierarchy
+msgid ""
+"<i class=\"oi oi-fw me-1\" data-icon=\"location_on\" title=\"Location\"/>"
+msgstr ""
+"<i class=\"oi oi-fw me-1\" data-icon=\"location_on\" title=\"ロケーション\"/>"
+
+#. module: contacts
+#: model_terms:ir.ui.view,arch_db:contacts.res_partner_view_hierarchy
+msgid ""
+"<i class=\"oi oi-fw oi-filled me-1 text-muted\" data-icon=\"mail\" "
+"title=\"Email\"/>"
+msgstr ""
+"<i class=\"oi oi-fw oi-filled me-1 text-muted\" data-icon=\"mail\" "
+"title=\"メール\"/>"
+
+#. module: contacts
+#: model_terms:ir.ui.view,arch_db:contacts.res_partner_view_hierarchy
+msgid ""
+"<i class=\"oi oi-fw oi-filled me-1 text-muted\" data-icon=\"phone\" "
+"title=\"Phone\"/>"
+msgstr ""
+"<i class=\"oi oi-fw oi-filled me-1 text-muted\" data-icon=\"phone\" "
+"title=\"電話\"/>"
 
 #. module: contacts
 #: model:ir.ui.menu,name:contacts.menu_action_res_partner_bank_form
-#: model:ir.ui.menu,name:contacts.menu_config_bank_accounts
 msgid "Bank Accounts"
 msgstr "銀行口座"
 
 #. module: contacts
-#: model:ir.ui.menu,name:contacts.menu_action_res_bank_form
-msgid "Banks"
-msgstr "銀行"
+#: model:ir.module.module,summary:base.module_contacts
+msgid "Centralize your address book"
+msgstr ""
 
 #. module: contacts
-#: model:ir.actions.act_window,help:contacts.action_contacts
-msgid "Click to add a contact in your contacts directory."
-msgstr "クリックして連絡先ディレクトリに連絡先を追加してください。"
+#: model:ir.ui.menu,name:contacts.menu_res_city
+msgid "Cities"
+msgstr ""
 
 #. module: contacts
 #: model:ir.ui.menu,name:contacts.res_partner_menu_config
@@ -42,19 +79,21 @@ msgid "Configuration"
 msgstr "設定"
 
 #. module: contacts
+#: model:ir.model,name:contacts.model_res_partner
+msgid "Contact"
+msgstr "連絡先"
+
+#. module: contacts
 #: model:ir.ui.menu,name:contacts.menu_partner_category_form
 msgid "Contact Tags"
 msgstr "連絡先タグ"
 
 #. module: contacts
-#: model:ir.ui.menu,name:contacts.menu_partner_title_contact
-msgid "Contact Titles"
-msgstr "連絡先敬称"
-
-#. module: contacts
 #: model:ir.actions.act_window,name:contacts.action_contacts
+#: model:ir.module.module,shortdesc:base.module_contacts
 #: model:ir.ui.menu,name:contacts.menu_contacts
 #: model:ir.ui.menu,name:contacts.res_partner_menu_contacts
+#: model_terms:ir.ui.view,arch_db:contacts.res_partner_view_hierarchy
 msgid "Contacts"
 msgstr "連絡先"
 
@@ -69,27 +108,48 @@ msgid "Country Group"
 msgstr "国グループ"
 
 #. module: contacts
+#: model_terms:ir.actions.act_window,help:contacts.action_contacts
+msgid "Create a Contact in your address book"
+msgstr "アドレス帳に連絡先を作成"
+
+#. module: contacts
+#: model:ir.model,website_form_label:contacts.model_res_partner
+msgid "Create a Customer"
+msgstr "顧客を作成"
+
+#. module: contacts
+#: model:ir.model.fields,field_description:contacts.field_res_partner__display_name
+#: model:ir.model.fields,field_description:contacts.field_res_users__display_name
+msgid "Display Name"
+msgstr "表示名"
+
+#. module: contacts
 #: model:ir.ui.menu,name:contacts.menu_country_state_partner
 msgid "Fed. States"
-msgstr "都道府県/州"
+msgstr "都道府県・州"
+
+#. module: contacts
+#: model:ir.model.fields,field_description:contacts.field_res_partner__id
+#: model:ir.model.fields,field_description:contacts.field_res_users__id
+msgid "ID"
+msgstr "ID"
+
+#. module: contacts
+#: model:ir.ui.menu,name:contacts.res_partner_industry_menu
+msgid "Industries"
+msgstr "業界"
 
 #. module: contacts
 #: model:ir.ui.menu,name:contacts.menu_localisation
 msgid "Localization"
-msgstr "ローカライズ"
+msgstr "ローカリゼーション"
 
 #. module: contacts
-#: model:ir.actions.act_window,help:contacts.action_contacts
-msgid ""
-"Odoo helps you easily track all activities related to\n"
-"            a customer: discussions, history of business opportunities,\n"
-"            documents, etc."
-msgstr ""
-"Odooのこの機能で顧客関連の活動を追跡できます:\n"
-"ディスカッションや、案件の履歴や関連ドキュメント\n"
-"その他諸々。"
+#: model_terms:ir.actions.act_window,help:contacts.action_contacts
+msgid "Odoo helps you track all activities related to your contacts."
+msgstr "Odooで連絡先に関係するあらゆる活動を追跡することができます。"
 
 #. module: contacts
-#: model:ir.ui.menu,name:contacts.res_partner_industry_menu
-msgid "Sectors of Activity"
-msgstr "活動セクタ"
+#: model:ir.model,name:contacts.model_res_users
+msgid "User"
+msgstr "ユーザ"

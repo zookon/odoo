@@ -1,131 +1,385 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import api, fields, models
-from odoo.addons import decimal_precision as dp
-from odoo.exceptions import UserError
+from odoo.exceptions import ValidationError
+from odoo.fields import Command, Domain
 
 
 class SaleOrderTemplate(models.Model):
     _name = "sale.order.template"
-    _description = "Quotation Template"
+    _description = "Order Templates"
+    _inherit = ["product.catalog.mixin"]
+    _order = "sequence, id"
 
-    def _get_default_require_signature(self):
-        # A confirmation mode (sign or pay) is mandatory on a quotation template
-        # If none has been activated in the settings, we force 'sign' as confirmation mode
-        if not self.env.user.company_id.portal_confirmation_pay:
-            return True
-        return self.env.user.company_id.portal_confirmation_sign
+    active = fields.Boolean(
+        default=True,
+        help="If unchecked, it will allow you to hide the Order template without removing it.",
+    )
+    company_id = fields.Many2one(comodel_name="res.company", default=lambda self: self.env.company)
+    currency_id = fields.Many2one(string="Currency", comodel_name="res.currency")
 
-    def _get_default_require_payment(self):
-        return self.env.user.company_id.portal_confirmation_pay
+    name = fields.Char(string="Template", required=True, translate=True)
+    note = fields.Html(string="Terms and conditions", translate=True)
+    sequence = fields.Integer(default=10)
+    template_type = fields.Selection(
+        string="Type",
+        selection=[("quotation", "Quotation"), ("section", "Section")],
+        default="quotation",
+        required=True,
+    )
 
-    name = fields.Char('Quotation Template', required=True)
-    sale_order_template_line_ids = fields.One2many('sale.order.template.line', 'sale_order_template_id', 'Lines', copy=True)
-    note = fields.Text('Terms and conditions')
-    sale_order_template_option_ids = fields.One2many('sale.order.template.option', 'sale_order_template_id', 'Optional Products', copy=True)
-    number_of_days = fields.Integer('Quotation Duration',
-        help='Number of days for the validity date computation of the quotation')
-    require_signature = fields.Boolean('Online Signature', default=_get_default_require_signature, help='Request a online signature to the customer in order to confirm orders automatically.')
-    require_payment = fields.Boolean('Electronic Payment', default=_get_default_require_payment, help='Request an electronic payment to the customer in order to confirm orders automatically.')
     mail_template_id = fields.Many2one(
-        'mail.template', 'Confirmation Mail',
-        domain=[('model', '=', 'sale.order')],
-        help="This e-mail template will be sent on confirmation. Leave empty to send nothing.")
-    active = fields.Boolean(default=True, help="If unchecked, it will allow you to hide the quotation template without removing it.")
+        comodel_name="mail.template",
+        string="Confirmation Email",
+        domain=[("model", "=", "sale.order")],
+        help="This e-mail template will be sent on confirmation. Leave empty to send nothing.",
+    )
+    number_of_days = fields.Integer(
+        string="Quotation Duration",
+        help="Number of days for the validity date computation of the quotation",
+    )
 
+    require_signature = fields.Boolean(
+        string="Online Signature",
+        compute="_compute_require_signature",
+        store=True,
+        readonly=False,
+        help="Request a online signature to the customer in order to confirm orders automatically.",
+    )
+    prepayment_percent = fields.Float(
+        string="Prepayment",
+        compute="_compute_prepayment_percent",
+        store=True,
+        readonly=False,
+        help="The percentage of the amount needed to be paid to confirm quotations.",
+    )
 
-class SaleOrderTemplateLine(models.Model):
-    _name = "sale.order.template.line"
-    _description = "Quotation Template Line"
-    _order = 'sale_order_template_id, sequence, id'
+    sale_order_template_line_ids = fields.One2many(
+        comodel_name="sale.order.template.line",
+        inverse_name="sale_order_template_id",
+        string="Lines",
+        copy=True,
+    )
+    journal_id = fields.Many2one(
+        string="Journal",
+        comodel_name="account.journal",
+        domain=[("type", "=", "sale")],
+        company_dependent=True,
+        check_company=True,
+        help="If set, SO with this template will invoice in this journal; "
+        "otherwise the sales journal with the lowest sequence is used.",
+    )
 
-    sequence = fields.Integer('Sequence', help="Gives the sequence order when displaying a list of sale quote lines.",
-        default=10)
-    sale_order_template_id = fields.Many2one('sale.order.template', 'Quotation Template Reference', required=True,
-        ondelete='cascade', index=True)
-    name = fields.Text('Description', required=True, translate=True)
-    product_id = fields.Many2one('product.product', 'Product', domain=[('sale_ok', '=', True)])
-    price_unit = fields.Float('Unit Price', required=True, digits=dp.get_precision('Product Price'))
-    discount = fields.Float('Discount (%)', digits=dp.get_precision('Discount'), default=0.0)
-    product_uom_qty = fields.Float('Quantity', required=True, digits=dp.get_precision('Product UoS'), default=1)
-    product_uom_id = fields.Many2one('uom.uom', 'Unit of Measure')
+    # Access control and visibility fields
+    share_template = fields.Boolean(string="Share", default=True)
+    team_ids = fields.Many2many(string="Sales Team", comodel_name="crm.team")
+    user_has_access = fields.Boolean(
+        string="Can User Access",
+        compute="_compute_user_has_access",
+        search="_search_user_has_access",
+        compute_sudo=True,
+    )
+    has_productless_lines = fields.Boolean(compute="_compute_has_productless_lines")
 
-    display_type = fields.Selection([
-        ('line_section', "Section"),
-        ('line_note', "Note")], default=False, help="Technical field for UX purpose.")
+    # === COMPUTE METHODS ===#
 
-    @api.onchange('product_id')
-    def _onchange_product_id(self):
-        self.ensure_one()
-        if self.product_id:
-            name = self.product_id.name_get()[0][1]
-            if self.product_id.description_sale:
-                name += '\n' + self.product_id.description_sale
-            self.name = name
-            self.price_unit = self.product_id.lst_price
-            self.product_uom_id = self.product_id.uom_id.id
-            domain = {'product_uom_id': [('category_id', '=', self.product_id.uom_id.category_id.id)]}
-            return {'domain': domain}
+    @api.depends("company_id")
+    def _compute_require_signature(self):
+        for order in self:
+            order.require_signature = (
+                order.company_id or order.env.company
+            ).portal_confirmation_sign
 
-    @api.onchange('product_uom_id')
-    def _onchange_product_uom(self):
-        if self.product_id and self.product_uom_id:
-            self.price_unit = self.product_id.uom_id._compute_price(self.product_id.lst_price, self.product_uom_id)
+    @api.depends("company_id")
+    def _compute_prepayment_percent(self):
+        for template in self:
+            if (template.company_id or template.env.company).portal_confirmation_pay:
+                template.prepayment_percent = (
+                    template.company_id or template.env.company
+                ).prepayment_percent
+            else:
+                template.prepayment_percent = 0.0
+
+    @api.depends_context("uid")
+    @api.depends("team_ids", "share_template", "team_ids.member_ids", "team_ids.user_id")
+    def _compute_user_has_access(self):
+        accessible = self.filtered_domain(self._search_user_has_access('in', {True}))
+        accessible.user_has_access = True
+        (self - accessible).user_has_access = False
+
+    def _search_user_has_access(self, operator, value):
+        if operator != 'in':
+            return NotImplemented
+
+        return (
+            Domain("share_template", '!=', False)
+            & (
+                Domain("team_ids", '=', False)
+                | Domain("team_ids.member_ids", 'in', self.env.user.ids)
+                | Domain("team_ids.user_id", 'in', self.env.user.ids)
+            )
+        ) | Domain("create_uid", 'in', self.env.user.ids)
+
+    @api.depends("sale_order_template_line_ids")
+    def _compute_has_productless_lines(self):
+        for template in self:
+            template.has_productless_lines = any(
+                not (line.product_id or line.display_type)
+                for line in template.sale_order_template_line_ids
+            )
+
+    # === CONSTRAINT METHODS ===#
+
+    @api.constrains("company_id", "sale_order_template_line_ids")
+    def _check_company_id(self):
+        for template in self:
+            restricted_products = template.sale_order_template_line_ids.product_id.filtered(
+                "company_id"
+            )
+            if not restricted_products:
+                continue
+
+            if not template.company_id:
+                raise ValidationError(
+                    self.env._(
+                        "Your template cannot contain products from specific companies if it's"
+                        " shared between companies. Please restrict the template access, or remove"
+                        " those products."
+                    )
+                )
+
+            authorized_products = restricted_products.filtered_domain(
+                self.env["product.product"]._check_company_domain(template.company_id)
+            )
+            if unauthorized_products := restricted_products - authorized_products:
+                unaccessible_companies = unauthorized_products.company_id
+                if len(unaccessible_companies) > 1:
+                    raise ValidationError(
+                        self.env._(
+                            "Your template belongs to company %(template_company)s but contains"
+                            " products from other companies (%(product_company)s) that are not"
+                            " accessible to %(template_company)s.\nPlease change the company of"
+                            " your template or remove the products from other companies.",
+                            product_company=", ".join(
+                                unaccessible_companies.mapped("display_name")
+                            ),
+                            template_company=template.company_id.display_name,
+                        )
+                    )
+
+                raise ValidationError(
+                    self.env._(
+                        "Your template belongs to company %(template_company)s but contains"
+                        " products from company (%(product_company)s) that are not"
+                        " accessible to %(template_company)s.\nPlease change the company of your"
+                        " template or remove the products from other companies.",
+                        product_company=unaccessible_companies.display_name,
+                        template_company=template.company_id.display_name,
+                    )
+                )
+
+    @api.constrains("prepayment_percent")
+    def _check_prepayment_percent(self):
+        for template in self:
+            if not (0 <= template.prepayment_percent <= 1.0):
+                raise ValidationError(
+                    self.env._("Prepayment percentage must be a valid percentage.")
+                )
 
     @api.model
-    def create(self, values):
-        if values.get('display_type', self.default_get(['display_type'])['display_type']):
-            values.update(product_id=False, price_unit=0, product_uom_qty=0, product_uom_id=False)
-        return super(SaleOrderTemplateLine, self).create(values)
-
-    @api.multi
-    def write(self, values):
-        if 'display_type' in values and self.filtered(lambda line: line.display_type != values.get('display_type')):
-            raise UserError("You cannot change the type of a sale quote line. Instead you should delete the current line and create a new line of the proper type.")
-        return super(SaleOrderTemplateLine, self).write(values)
-
-    _sql_constraints = [
-        ('accountable_product_id_required',
-            "CHECK(display_type IS NOT NULL OR (product_id IS NOT NULL AND product_uom_id IS NOT NULL))",
-            "Missing required product and UoM on accountable sale quote line."),
-
-        ('non_accountable_fields_null',
-            "CHECK(display_type IS NULL OR (product_id IS NULL AND price_unit = 0 AND product_uom_qty = 0 AND product_uom_id IS NULL))",
-            "Forbidden product, unit price, quantity, and UoM on non-accountable sale quote line"),
-    ]
-
-
-class SaleOrderTemplateOption(models.Model):
-    _name = "sale.order.template.option"
-    _description = "Quotation Template Option"
-
-    sale_order_template_id = fields.Many2one('sale.order.template', 'Quotation Template Reference', ondelete='cascade',
-        index=True, required=True)
-    name = fields.Text('Description', required=True, translate=True)
-    product_id = fields.Many2one('product.product', 'Product', domain=[('sale_ok', '=', True)], required=True)
-    price_unit = fields.Float('Unit Price', required=True, digits=dp.get_precision('Product Price'))
-    discount = fields.Float('Discount (%)', digits=dp.get_precision('Discount'))
-    uom_id = fields.Many2one('uom.uom', 'Unit of Measure ', required=True)
-    quantity = fields.Float('Quantity', required=True, digits=dp.get_precision('Product UoS'), default=1)
-
-    @api.onchange('product_id')
-    def _onchange_product_id(self):
-        if not self.product_id:
+    def _demo_configure_template(self):
+        demo_template = self.env.ref(
+            "sale_management.sale_order_template_1", raise_if_not_found=False
+        )
+        if not demo_template or demo_template.sale_order_template_line_ids:
+            # Skip if template not found, or already configured
             return
-        product = self.product_id
-        self.price_unit = product.list_price
-        self.name = product.name
-        self.uom_id = product.uom_id
-        domain = {'uom_id': [('category_id', '=', self.product_id.uom_id.category_id.id)]}
-        return {'domain': domain}
 
-    @api.onchange('uom_id')
-    def _onchange_product_uom(self):
-        if not self.product_id:
-            return
-        if not self.uom_id:
-            self.price_unit = 0.0
-            return
-        if self.uom_id.id != self.product_id.uom_id.id:
-            self.price_unit = self.product_id.uom_id._compute_price(self.price_unit, self.uom_id)
+        acoustic_bloc_screen_product = self.env.ref(
+            "product.product_template_acoustic_bloc_screens"
+        ).product_variant_id
+        chair_protection_product = self.env.ref(
+            "sale.product_product_1_product_template"
+        ).product_variant_id
+        demo_template.sale_order_template_line_ids = [
+            Command.create({
+                "name": self.env._("Open Space Renovation"),
+                "display_type": "line_section",
+                "product_uom_qty": 0,
+                "section_qty": 250,
+                "section_uom_id": self.env.ref("uom.product_uom_square_meter").id,
+            }),
+            Command.create({
+                "name": self.env._("Acoustic wall insulation"),
+                "product_uom_qty": 187.5,
+                "product_uom_id": self.env.ref("uom.product_uom_square_meter").id,
+                "price_unit": 45.0,
+            }),
+            Command.create({
+                "name": self.env._("Acoustic ceiling"),
+                "product_uom_qty": 250,
+                "product_uom_id": self.env.ref("uom.product_uom_square_meter").id,
+                "price_unit": 60.0,
+                "discount": 20,
+            }),
+            Command.create({
+                "name": self.env._("Flooring parquet"),
+                "display_type": "line_subsection",
+                "collapse_composition": True,
+                "product_uom_qty": 0,
+            }),
+            Command.create({
+                "name": self.env._("Subfloor preparation"),
+                "product_uom_qty": 250,
+                "price_unit": 12.0,
+            }),
+            Command.create({
+                "name": self.env._("Acoustic underlay"),
+                "product_uom_qty": 250,
+                "price_unit": 8.0,
+                "discount": 20,
+            }),
+            Command.create({
+                "name": self.env._("Parquet installation"),
+                "product_uom_qty": 250,
+                "price_unit": 55.0,
+            }),
+            Command.create({
+                "name": self.env._("Conference Room"),
+                "display_type": "line_section",
+                "product_uom_qty": 0,
+            }),
+            Command.create({"product_id": self.env.ref("product.consu_delivery_02").id}),
+            Command.create({
+                "product_id": self.env.ref(
+                    "product.product_product_11_product_template"
+                ).product_variant_id.id,
+                "product_uom_qty": 10,
+            }),
+            Command.create({
+                "name": self.env._("Connectivity"),
+                "display_type": "line_subsection",
+                "product_uom_qty": 0,
+            }),
+            Command.create({
+                "name": self.env._('Display / TV\n65" 4K screen + wall mount + HDMI/USB-C inputs'),
+                "price_unit": 1800.0,
+            }),
+            Command.create({
+                "name": self.env._(
+                    "Microphone system\nCeiling/table array mic with echo cancellation"
+                ),
+                "price_unit": 2500.0,
+            }),
+            Command.create({
+                "name": self.env._("Camera\nPTZ conference camera, auto-framing"),
+                "price_unit": 1500.0,
+            }),
+            Command.create({
+                "name": self.env._("Individual Work Station"),
+                "display_type": "line_section",
+                "collapse_prices": True,
+                "product_uom_qty": 0,
+            }),
+            Command.create({
+                "product_id": self.env.ref("product.product_product_4c").id,
+                "product_uom_qty": 24,
+            }),
+            Command.create({"product_id": acoustic_bloc_screen_product.id, "product_uom_qty": 24}),
+            Command.create({
+                "product_id": self.env.ref("product.product_delivery_01").id,
+                "product_uom_qty": 4,
+                "product_uom_id": self.env.ref("uom.product_uom_pack_6").id,
+            }),
+            Command.create({
+                "name": self.env._("Options"),
+                "display_type": "line_section",
+                "is_optional": True,
+                "product_uom_qty": 0,
+            }),
+            Command.create({
+                "product_id": self.env.ref("product.product_product_16").id,
+                "product_uom_qty": 0,
+            }),
+            Command.create({
+                "product_id": self.env.ref("product.monitor_stand").id,
+                "product_uom_qty": 0,
+            }),
+            Command.create({"product_id": chair_protection_product.id, "product_uom_qty": 0}),
+            Command.create({
+                "name": self.env._("Brainstorm Whiteboard"),
+                "display_type": "line_subsection",
+                "product_uom_qty": 0,
+            }),
+            Command.create({
+                "name": self.env._("Whiteboard"),
+                "product_uom_qty": 2,
+                "price_unit": 180.0,
+            }),
+            Command.create({
+                "name": self.env._("Whiteboard Pen"),
+                "product_uom_qty": 20,
+                "price_unit": 1.20,
+            }),
+        ]
+
+    # === PUBLIC ===#
+
+    def prepare_section_template_order_lines(
+        self, order_changes, fiscal_position_id, company_id, currency_id, fields_spec
+    ):
+        """Prepare `sale.order.line` value dicts from a section template.
+
+        Builds order line values from the given section template, applies
+        `sale.order.line` onchange with provided order-level changes, and
+        returns the resulting values ready for insertion.
+
+        :param dict order_changes: Order values to consider for onchange
+        :param int fiscal_position_id: fiscal position of the order
+        :param int company_id: company of the order
+        :param int currency_id: currency of the order
+        :param dict fields_spec: Fields specification for onchange
+        :return: Prepared sale order line values
+        :rtype: list[dict]
+        """
+        self.ensure_one()
+        self = self.with_company(self.company_id)  # noqa: PLW0642
+
+        result = []
+        fiscal_position = self.env["account.fiscal.position"].browse(fiscal_position_id)
+        currency = self.env["res.currency"].browse(currency_id)
+
+        for line in self.sale_order_template_line_ids:
+            onchange_values = {
+                **line._prepare_order_line_values(fiscal_position, currency),
+                **order_changes,
+            }
+            onchange_result = self.env["sale.order.line"].onchange(onchange_values, [], fields_spec)
+            result.append(onchange_result.get("value", {}))
+
+        return result
+
+    def unlink_section_template(self):
+        """Unlink the template with sudo if it is a section template.
+
+        :return: Whether the template was unlinked
+        :rtype: bool
+        """
+        self.ensure_one()
+        if self.template_type == "section":
+            # .sudo because we allow salesman to delete their own templates
+            return self.sudo().unlink()
+
+        return False
+
+    # === CATALOG ===#
+
+    def _get_catalog_currency(self):
+        self.ensure_one()
+        return self.currency_id or self.company_id.currency_id or self.env.company.currency_id
+
+    def _show_prices(self) -> bool:
+        return False
+
+    def _has_sections(self) -> bool:
+        return True

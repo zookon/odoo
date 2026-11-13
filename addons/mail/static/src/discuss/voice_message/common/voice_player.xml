@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="mail.VoicePlayer">
+        <div class="o-mail-VoicePlayer d-flex align-items-center ps-2 pe-4 py-1 bg-200 rounded-bottom-3">
+            <div class="o-mail-VoicePlayer-wave position-absolute z-2 d-flex flex-column">
+                <div class="w-100 flex-grow-1 position-relative cursor-pointer" t-ref="this.wrapperRef" t-on-click.stop="this.onClickWave">
+                    <div class="position-absolute top-0 bottom-0 overflow-hidden z-1" t-ref="this.drawerRef">
+                        <canvas class="position-absolute" t-ref="this.progressRef"/>
+                    </div>
+                    <canvas class="position-absolute" t-ref="this.waveRef"/>
+                </div>
+                <span class="o-mail-VoicePlayer-time align-self-end text-muted small">
+                    <t t-if="this.state.totalTime"><t t-out="this.state.currentTime"/> / <t t-out="this.state.totalTime"/></t>
+                    <t t-else="">-- : --</t>
+                </span>
+            </div>
+            <div class="o-mail-AttachmentCard-image position-relative me-2 flex-shrink-0">
+                <button class="btn p-0 border-0 shadow-none position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center oi fs-3 text-primary"
+                    t-att-data-icon="this.playButton().icon" t-att-title="this.playButton().title"
+                    t-on-click.stop="this.onClickPlayPause"/>
+            </div>
+            <div t-if="this.props.attachment.name" class="text-truncate fw-bold" t-out="this.props.attachment.name"/>
+            <audio t-ref="this.audioRef" preload="auto" t-on-play="this.onAudioPlay" t-on-pause="() => this.state.playing = false" t-on-ended="this.onAudioEnded"/>
+        </div>
+    </t>
+
+</templates>

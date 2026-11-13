@@ -1,0 +1,1415 @@
+import {
+    actionPanel,
+    click,
+    contains as mailContains,
+    defineMailModels,
+    focus,
+    listenStoreFetch,
+    onRpcBefore,
+    openDiscuss,
+    openFormView,
+    start,
+    startServer,
+    triggerHotkey,
+    waitStoreFetch,
+} from "@mail/../tests/mail_test_helpers";
+import { deleteBackward } from "@html_editor/../tests/_helpers/user_actions";
+import {
+    containsTextInComposer,
+    getEditorFromComposerEl,
+    insertTextInComposer,
+} from "@mail/../tests/mail_test_helpers_composer";
+import { after, expect, describe, test } from "@odoo/hoot";
+import { animationFrame } from "@odoo/hoot-mock";
+import { onWillUpdateProps } from "@odoo/owl";
+import {
+    Command,
+    contains,
+    getService,
+    onRpc,
+    serverState,
+    withUser,
+} from "@web/../tests/web_test_helpers";
+import { patch } from "@web/core/utils/patch";
+
+import { MENTION_AMOUNT_WARNING } from "@mail/core/common/composer";
+import { DiscussAvatar } from "@mail/core/common/discuss_avatar";
+import { NavigableList } from "@mail/core/common/navigable_list";
+import { useAncestors } from "@mail/core/common/ancestor_plugin";
+import { press, waitFor, waitForNone } from "@odoo/hoot-dom";
+import { ConnectionAbortedError, rpc, rpcBus } from "@web/core/network/rpc";
+import { range } from "@web/core/utils/numbers";
+
+describe.current.tags("desktop");
+defineMailModels();
+
+test('[text composer] display partner mention suggestions on typing "@"', async () => {
+    const pyEnv = await startServer();
+    const partnerId_1 = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const partnerId_2 = pyEnv["res.partner"].create({
+        email: "testpartner2@odoo.com",
+        name: "TestPartner2",
+    });
+    pyEnv["res.users"].create({ partner_id: partnerId_1 });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId_1 }),
+            Command.create({ partner_id: partnerId_2 }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:count(3)");
+});
+
+test.tags("focus required");
+test("suggestion list closed by Escape stays closed when a member starts typing", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const userId = pyEnv["res.users"].create({ partner_id: partnerId });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await waitFor(".o-mail-Composer-html:focus:count(1)");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestionList .o-open:count(1)");
+    triggerHotkey("Escape");
+    await waitForNone(".o-mail-Composer-suggestionList .o-open");
+    // The typing status re-renders the composer without changing the
+    // suggestions: the list closed by the user has to stay closed.
+    withUser(userId, () =>
+        rpc("/discuss/channel/notify_typing", { channel_id: channelId, is_typing: true })
+    );
+    await mailContains(".o-discuss-Typing", { text: "TestPartner is typing..." });
+    await animationFrame(); // a re-open would show up on the next render
+    await waitForNone(".o-mail-Composer-suggestionList .o-open");
+    // Typing more characters re-opens the suggestions for the refined search.
+    await insertTextInComposer(".o-mail-Composer", "Test");
+    await waitFor(".o-mail-Composer-suggestionList .o-open:count(1)");
+});
+
+test("suggestion list closed by Escape stays closed when the mention search answers", async () => {
+    const pyEnv = await startServer();
+    pyEnv["res.partner"].create({ email: "testpartner@odoo.com", name: "TestPartner" });
+    const { promise: fetchHeld, resolve: releaseFetch } = Promise.withResolvers();
+    onRpc("res.partner", "get_mention_suggestions", async () => {
+        expect.step("get_mention_suggestions");
+        await fetchHeld;
+    });
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await mailContains(
+        ".o-mail-Composer-suggestionList .o-open .o-mail-Composer-suggestion:has(:text('Mitchell Admin'))"
+    );
+    triggerHotkey("Escape");
+    await mailContains(".o-mail-Composer-suggestionList .o-open", { count: 0 });
+    releaseFetch();
+    await animationFrame(); // a re-open would show up on the next render
+    await mailContains(".o-mail-Composer-suggestionList .o-open", { count: 0 });
+    await insertTextInComposer(".o-mail-Composer", "T");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await mailContains(".o-mail-Composer-suggestion:has(:text('TestPartner'))");
+});
+
+test("typing on aborts the ongoing mention search of the previous term", async () => {
+    await startServer();
+    const { promise: fetchHeld } = Promise.withResolvers();
+    onRpc("res.partner", "get_mention_suggestions", async ({ kwargs }) => {
+        expect.step(`search "${kwargs.search}"`);
+        await fetchHeld;
+    });
+    const onResponse = ({ detail: { data, error } }) => {
+        if (
+            error instanceof ConnectionAbortedError &&
+            data.params.method === "get_mention_suggestions"
+        ) {
+            expect.step(`abort "${data.params.kwargs.search}"`);
+        }
+    };
+    rpcBus.addEventListener("RPC:RESPONSE", onResponse);
+    after(() => rpcBus.removeEventListener("RPC:RESPONSE", onResponse));
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await expect.waitForSteps(['search ""']);
+    await insertTextInComposer(".o-mail-Composer", "a");
+    await expect.waitForSteps(['abort ""', 'search "a"']);
+});
+
+test("click away from the empty suggestion list keeps the fetched suggestions", async () => {
+    const pyEnv = await startServer();
+    pyEnv["res.partner"].create({ name: "Bob" });
+    const { promise: fetchHeld, resolve: releaseFetch } = Promise.withResolvers();
+    onRpc("res.partner", "get_mention_suggestions", async () => {
+        expect.step("get_mention_suggestions");
+        await fetchHeld;
+    });
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await insertTextInComposer(".o-mail-Composer", "@Bob");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await mailContains(".o-mail-Composer-suggestionList .o-open");
+    await click(".o_form_view");
+    await mailContains(".o-mail-Composer-suggestionList .o-open", { count: 0 });
+    releaseFetch();
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Bob'))");
+});
+
+test.tags("html composer");
+test("display partner mention suggestions on typing '@'", async () => {
+    const pyEnv = await startServer();
+    const partnerId_1 = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const partnerId_2 = pyEnv["res.partner"].create({
+        email: "testpartner2@odoo.com",
+        name: "TestPartner2",
+    });
+    pyEnv["res.users"].create({ partner_id: partnerId_1 });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId_1 }),
+            Command.create({ partner_id: partnerId_2 }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:count(3)");
+});
+
+test("[text composer] can @user in restricted (group_public_id) channels", async () => {
+    const pyEnv = await startServer();
+    const groupId = pyEnv["res.groups"].create({
+        name: "Custom Channel Group",
+    });
+    const [partnerId_1, partnerId_2] = pyEnv["res.partner"].create([
+        { email: "testpartner1@odoo.com", name: "TestPartner1" },
+        { email: "testpartner2@odoo.com", name: "TestPartner2" },
+    ]);
+    pyEnv["res.users"].create([
+        { partner_id: partnerId_1, group_ids: [Command.link(groupId)] },
+        { partner_id: partnerId_2 },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "Restricted Channel",
+        group_public_id: groupId,
+        channel_type: "channel",
+    });
+    await start();
+    await openDiscuss(channelId);
+    await waitFor(`${actionPanel("Members")}:count(1)`); // wait for auto-open of this panel
+    await contains("button[title='Add People']:count(1)").click();
+    await waitFor(
+        ".o-discuss-ChannelInvitation-invitationBox:text('Access restricted to group \"Custom Channel Group\"'):count(1)"
+    );
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:count(2)");
+});
+
+test.tags("html composer");
+test("can @user in restricted (group_public_id) channels", async () => {
+    const pyEnv = await startServer();
+    const groupId = pyEnv["res.groups"].create({
+        name: "Custom Channel Group",
+    });
+    const [partnerId_1, partnerId_2] = pyEnv["res.partner"].create([
+        { email: "testpartner1@odoo.com", name: "TestPartner1" },
+        { email: "testpartner2@odoo.com", name: "TestPartner2" },
+    ]);
+    pyEnv["res.users"].create([
+        { partner_id: partnerId_1, group_ids: [Command.link(groupId)] },
+        { partner_id: partnerId_2 },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "Restricted Channel",
+        group_public_id: groupId,
+        channel_type: "channel",
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await waitFor(`${actionPanel("Members")}:count(1)`); // wait for auto-open of this panel
+    await contains("button[title='Add People']:count(1)").click();
+    await waitFor(
+        ".o-discuss-ChannelInvitation-invitationBox:text('Access restricted to group \"Custom Channel Group\"'):count(1)"
+    );
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:count(2)");
+});
+
+test("[text composer] post a first message then display partner mention suggestions on typing '@'", async () => {
+    const pyEnv = await startServer();
+    const partnerId_1 = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const partnerId_2 = pyEnv["res.partner"].create({
+        email: "testpartner2@odoo.com",
+        name: "TestPartner2",
+    });
+    pyEnv["res.users"].create({ partner_id: partnerId_1 });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId_1 }),
+            Command.create({ partner_id: partnerId_2 }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "first message");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message:count(1)");
+    // let the post-send autofocus restore the cleared selection before typing
+    await animationFrame();
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:count(3)");
+});
+
+test.tags("html composer");
+test("post a first message then display partner mention suggestions on typing '@'", async () => {
+    const pyEnv = await startServer();
+    const partnerId_1 = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const partnerId_2 = pyEnv["res.partner"].create({
+        email: "testpartner2@odoo.com",
+        name: "TestPartner2",
+    });
+    pyEnv["res.users"].create({ partner_id: partnerId_1 });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId_1 }),
+            Command.create({ partner_id: partnerId_2 }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "first message");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message:count(1)");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:count(3)");
+});
+
+test('[text composer] display partner mention suggestions on typing "@" in chatter', async () => {
+    await startServer();
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:text('Mitchell Admin'):count(1)");
+});
+
+test.tags("html composer");
+test('display partner mention suggestions on typing "@" in chatter', async () => {
+    await startServer();
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:text('Mitchell Admin'):count(1)");
+});
+
+test("[text composer] Do not fetch if search more specific and fetch had no result", async () => {
+    await startServer();
+    onRpc("res.partner", "get_mention_suggestions", () => {
+        expect.step("get_mention_suggestions");
+    });
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(2)"); // Mitchell Admin, Hermit
+    await waitFor(".o-mail-Composer-suggestion:has(:text('Mitchell Admin')):count(1)");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await insertTextInComposer(".o-mail-Composer", "x");
+    await waitForNone(".o-mail-Composer-suggestion");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await insertTextInComposer(".o-mail-Composer", "x");
+    await expect.waitForSteps([]);
+});
+
+test.tags("html composer");
+test("Do not fetch if search more specific and fetch had no result", async () => {
+    await startServer();
+    onRpc("res.partner", "get_mention_suggestions", () => {
+        expect.step("get_mention_suggestions");
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(2)"); // Mitchell Admin, Hermit
+    await waitFor(".o-mail-Composer-suggestion:has(:text('Mitchell Admin')):count(1)");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await insertTextInComposer(".o-mail-Composer", "x");
+    await waitForNone(".o-mail-Composer-suggestion");
+    await expect.waitForSteps(["get_mention_suggestions"]);
+    await insertTextInComposer(".o-mail-Composer", "x");
+    await expect.waitForSteps([]);
+});
+
+test("mention typed after a canned response search without result is searched on the server", async () => {
+    await startServer();
+    listenStoreFetch("mail.canned.response");
+    onRpc("res.partner", "get_mention_suggestions", ({ kwargs }) => {
+        expect.step(`search "${kwargs.search}"`);
+    });
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await insertTextInComposer(".o-mail-Composer", "::");
+    await waitStoreFetch("mail.canned.response");
+    await insertTextInComposer(".o-mail-Composer", " @");
+    await expect.waitForSteps(['search ""']);
+});
+
+test("[text composer] show other channel member in @ mention", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)");
+});
+
+test("show other channel member in @ mention before the member list is loaded", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    listenStoreFetch("/discuss/channel/members", { onRpc: () => new Promise(() => {}) });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@Test");
+    await waitFor(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)");
+});
+
+test.tags("html composer");
+test("show other channel member in @ mention", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)");
+});
+
+test("[text composer] select @ mention insert mention text in composer", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await contains(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@TestPartner\uFEFF\u00a0");
+});
+
+test.tags("html composer");
+test("select @ mention insert mention text in composer", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await contains(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@TestPartner\uFEFF\u00a0");
+});
+
+test("partner without a name is mentioned by its email", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({ email: "invoice@odoo.com", name: false });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    onRpcBefore("/mail/message/post", (args) =>
+        expect.step(`post to ${args.post_data.partner_ids}`)
+    );
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "@invoice");
+    await click(".o-mail-Composer-suggestion:contains('(invoice@odoo.com)')");
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@invoice@odoo.com\uFEFF\u00a0");
+    await press("Enter");
+    await waitFor(".o-mail-Message a.o_mail_redirect:text('@invoice@odoo.com'):count(1)");
+    await expect.waitForSteps([`post to ${partnerId}`]);
+});
+
+test("select @ mention from the suggestion list being filtered", async () => {
+    const pyEnv = await startServer();
+    const [partnerId_1, partnerId_2] = pyEnv["res.partner"].create([
+        { email: "aaapartner@odoo.com", name: "AaaPartner" },
+        { email: "testpartner@odoo.com", name: "TestPartner" },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId_1 }),
+            Command.create({ partner_id: partnerId_2 }),
+        ],
+    });
+    const filtering = Promise.withResolvers();
+    const listRendered = Promise.withResolvers();
+    let suggestionList;
+    patch(NavigableList.prototype, {
+        setup() {
+            super.setup();
+            suggestionList = this;
+        },
+    });
+    patch(DiscussAvatar.prototype, {
+        setup() {
+            super.setup();
+            if (!useAncestors().inNavigableList) {
+                return;
+            }
+            // Simulate a slow render of the filtered list, keeping the previous search on screen.
+            onWillUpdateProps(() => {
+                if (suggestionList.props.options.length === 1) {
+                    filtering.resolve();
+                    return listRendered.promise;
+                }
+            });
+        },
+    });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(3)");
+    await insertTextInComposer(".o-mail-Composer", "Test");
+    await filtering.promise;
+    await waitFor(".o-mail-Composer-suggestion:count(3)");
+    await click(".o-mail-Composer-suggestion strong", { text: "TestPartner" });
+    listRendered.resolve();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@TestPartner\uFEFF\u00a0");
+});
+
+test("[text composer] select @ mention closes suggestions", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await contains(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)").click();
+    await waitForNone(".o-mail-Composer-suggestion strong");
+});
+
+test.tags("html composer");
+test("select @ mention closes suggestions", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({
+        email: "testpartner@odoo.com",
+        name: "TestPartner",
+    });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await contains(".o-mail-Composer-suggestion strong:text('TestPartner'):count(1)").click();
+    await waitForNone(".o-mail-Composer-suggestion strong");
+});
+
+test("[text composer] Suggestions are shown after delimiter was used in text (@)", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(1)");
+    await insertTextInComposer(".o-mail-Composer", "NonExistingUser");
+    await waitForNone(".o-mail-Composer-suggestion strong");
+    await insertTextInComposer(".o-mail-Composer", " @");
+    await waitFor(".o-mail-Composer-suggestion strong:text('Mitchell Admin'):count(1)");
+});
+
+test.tags("html composer");
+test("Suggestions are shown after delimiter was used in text (@)", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({ name: "General" });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(1)");
+    await insertTextInComposer(".o-mail-Composer", "NonExistingUser");
+    await waitForNone(".o-mail-Composer-suggestion strong");
+    await insertTextInComposer(".o-mail-Composer", " @");
+    await waitFor(".o-mail-Composer-suggestion strong:text('Mitchell Admin'):count(1)");
+});
+
+test("[text composer] display partner mention when typing more than 2 words if they match", async () => {
+    const pyEnv = await startServer();
+    pyEnv["res.partner"].create([
+        {
+            email: "test1@example.com",
+            name: "My Best Partner",
+        },
+        {
+            email: "test2@example.com",
+            name: "My Test User",
+        },
+        {
+            email: "test3@example.com",
+            name: "My Test Partner",
+        },
+    ]);
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@My ");
+    await waitFor(".o-mail-Composer-suggestion strong:count(3)");
+    await insertTextInComposer(".o-mail-Composer", "Test ");
+    await waitFor(".o-mail-Composer-suggestion strong:count(2)");
+    await insertTextInComposer(".o-mail-Composer", "Partner");
+    await waitFor(".o-mail-Composer-suggestion:count(1)");
+    await waitFor(".o-mail-Composer-suggestion strong:text('My Test Partner'):count(1)");
+});
+
+test.tags("html composer");
+test("display partner mention when typing more than 2 words if they match", async () => {
+    const pyEnv = await startServer();
+    pyEnv["res.partner"].create([
+        {
+            email: "test1@example.com",
+            name: "My Best Partner",
+        },
+        {
+            email: "test2@example.com",
+            name: "My Test User",
+        },
+        {
+            email: "test3@example.com",
+            name: "My Test Partner",
+        },
+    ]);
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@My ");
+    await waitFor(".o-mail-Composer-suggestion strong:count(3)");
+    await insertTextInComposer(".o-mail-Composer", "Test ");
+    await waitFor(".o-mail-Composer-suggestion strong:count(2)");
+    await insertTextInComposer(".o-mail-Composer", "Partner");
+    await waitFor(".o-mail-Composer-suggestion:count(1)");
+    await waitFor(".o-mail-Composer-suggestion strong:text('My Test Partner'):count(1)");
+});
+
+test("[text composer] Internal user should be displayed first", async () => {
+    const pyEnv = await startServer();
+    const [user1Id, user2Id] = pyEnv["res.users"].create([{}, {}]);
+    const partnerIds = pyEnv["res.partner"].create([
+        { name: "Person A" },
+        { name: "Person B" },
+        { name: "Person C", user_ids: [user1Id] },
+        { name: "Person D", user_ids: [user2Id] },
+    ]);
+    pyEnv["mail.followers"].create([
+        {
+            is_active: true,
+            partner_id: partnerIds[1],
+            res_id: serverState.partnerId,
+            res_model: "res.partner",
+        },
+        {
+            is_active: true,
+            partner_id: partnerIds[3],
+            res_id: serverState.partnerId,
+            res_model: "res.partner",
+        },
+    ]);
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@Person ");
+    await waitFor(".o-mail-Composer-suggestion:eq(0) strong:text('Person D'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(1) strong:text('Person B'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(2) strong:text('Person C'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(3) strong:text('Person A'):count(1)");
+});
+
+test.tags("html composer");
+test("Internal user should be displayed first", async () => {
+    const pyEnv = await startServer();
+    const [user1Id, user2Id] = pyEnv["res.users"].create([{}, {}]);
+    const partnerIds = pyEnv["res.partner"].create([
+        { name: "Person A" },
+        { name: "Person B" },
+        { name: "Person C", user_ids: [user1Id] },
+        { name: "Person D", user_ids: [user2Id] },
+    ]);
+    pyEnv["mail.followers"].create([
+        {
+            is_active: true,
+            partner_id: partnerIds[1],
+            res_id: serverState.partnerId,
+            res_model: "res.partner",
+        },
+        {
+            is_active: true,
+            partner_id: partnerIds[3],
+            res_id: serverState.partnerId,
+            res_model: "res.partner",
+        },
+    ]);
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@Person ");
+    await waitFor(".o-mail-Composer-suggestion:eq(0) strong:text('Person D'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(1) strong:text('Person B'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(2) strong:text('Person C'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(3) strong:text('Person A'):count(1)");
+});
+
+test("[text composer] Current user is last suggested partner", async () => {
+    const pyEnv = await startServer();
+    const userId = pyEnv["res.users"].create({});
+    pyEnv["res.partner"].create([
+        { email: "a@test.com", name: "Person A" },
+        { email: "b@test.com", name: "Person B", user_ids: [userId] },
+    ]);
+    pyEnv["mail.followers"].create([
+        {
+            is_active: true,
+            partner_id: serverState.partnerId,
+            res_id: serverState.partnerId,
+            res_model: "res.partner",
+        },
+    ]);
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(4)"); // Mitchell Admin, Hermit, Person A, Person B
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Person B (b@test.com)'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Mitchell Admin'))"],
+    });
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Person B (b@test.com)'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Person A (a@test.com)'))"],
+    });
+});
+
+test.tags("html composer");
+test("Current user is last suggested partner", async () => {
+    const pyEnv = await startServer();
+    const userId = pyEnv["res.users"].create({});
+    pyEnv["res.partner"].create([
+        { email: "a@test.com", name: "Person A" },
+        { email: "b@test.com", name: "Person B", user_ids: [userId] },
+    ]);
+    pyEnv["mail.followers"].create([
+        {
+            is_active: true,
+            partner_id: serverState.partnerId,
+            res_id: serverState.partnerId,
+            res_model: "res.partner",
+        },
+    ]);
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestion:count(4)"); // Mitchell Admin, Hermit, Person A, Person B
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Person B (b@test.com)'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Mitchell Admin'))"],
+    });
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Person B (b@test.com)'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Person A (a@test.com)'))"],
+    });
+});
+
+test("[text composer] Mention with @everyone", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@ever");
+    await contains(".o-mail-Composer-suggestion:count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@everyone\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message-bubble.o-orange:count(1)");
+    await waitFor(".o-mail-Message a:contains('@everyone'):count(1)");
+});
+
+test.tags("html composer");
+test("Mention with @everyone", async () => {
+    const pyEnv = await startServer();
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@ever");
+    await click(".o-mail-Composer-suggestion");
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@everyone\uFEFF\u00a0");
+    await click(".o-mail-Composer button[title='Send']:enabled");
+    await waitFor(".o-mail-Message-bubble.o-orange:count(1)");
+    await waitFor(".o-mail-Message a:contains('@everyone'):count(1)");
+});
+
+test("[text composer] Suggestions that begin with the search term should have priority", async () => {
+    const pyEnv = await startServer();
+    pyEnv["res.partner"].create([{ name: "Party Partner" }, { name: "Best Partner" }]);
+    await start();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Best Partner'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Party Partner'))"],
+    });
+    await insertTextInComposer(".o-mail-Composer", "part");
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Party Partner'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Best Partner'))"],
+    });
+});
+
+test.tags("html composer");
+test("Suggestions that begin with the search term should have priority", async () => {
+    const pyEnv = await startServer();
+    pyEnv["res.partner"].create([{ name: "Party Partner" }, { name: "Best Partner" }]);
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openFormView("res.partner", serverState.partnerId);
+    await click("button:text('Send message')");
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Best Partner'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Party Partner'))"],
+    });
+    await insertTextInComposer(".o-mail-Composer", "part");
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Party Partner'))", {
+        before: [".o-mail-Composer-suggestion:has(:text('Best Partner'))"],
+    });
+});
+
+test("[text composer] Mention with @-role", async () => {
+    const pyEnv = await startServer();
+    const [roleId1, roleId2] = pyEnv["res.role"].create([
+        { name: "rd-Discuss" },
+        { name: "rd-JS" },
+    ]);
+    const [userId1, userId2, userId3] = pyEnv["res.users"].create([
+        {
+            role_ids: [roleId1],
+        },
+        {
+            role_ids: [roleId2],
+        },
+        {
+            role_ids: [roleId1, roleId2],
+        },
+    ]);
+    const [partnerId1, partnerId2, partnerId3] = pyEnv["res.partner"].create([
+        { name: "Person A", user_ids: [userId1] },
+        { name: "Person B", user_ids: [userId2] },
+        { name: "Person C", user_ids: [userId3] },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId1 }),
+            Command.create({ partner_id: partnerId2 }),
+            Command.create({ partner_id: partnerId3 }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@discuss");
+    await contains(".o-mail-Composer-suggestion:count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@rd-Discuss\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message a.o-discuss-mention:text('@rd-Discuss'):count(1)");
+});
+
+test.tags("html composer");
+test("Mention with @-role", async () => {
+    const pyEnv = await startServer();
+    const [roleId1, roleId2] = pyEnv["res.role"].create([
+        { name: "rd-Discuss" },
+        { name: "rd-JS" },
+    ]);
+    const [userId1, userId2, userId3] = pyEnv["res.users"].create([
+        {
+            role_ids: [roleId1],
+        },
+        {
+            role_ids: [roleId2],
+        },
+        {
+            role_ids: [roleId1, roleId2],
+        },
+    ]);
+    const [partnerId1, partnerId2, partnerId3] = pyEnv["res.partner"].create([
+        { name: "Person A", user_ids: [userId1] },
+        { name: "Person B", user_ids: [userId2] },
+        { name: "Person C", user_ids: [userId3] },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId1 }),
+            Command.create({ partner_id: partnerId2 }),
+            Command.create({ partner_id: partnerId3 }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@discuss");
+    await contains(".o-mail-Composer-suggestion:count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@rd-Discuss\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message a.o-discuss-mention:text('@rd-Discuss'):count(1)");
+});
+
+test("[text composer] Mention with @-role send correct role id", async () => {
+    const pyEnv = await startServer();
+    const [roleId1, roleId2] = pyEnv["res.role"].create([
+        { name: "rd-Discuss" },
+        { name: "rd-JS" },
+    ]);
+    const [userId1, userId2, userId3] = pyEnv["res.users"].create([
+        { role_ids: [roleId1] },
+        { role_ids: [roleId2] },
+        { role_ids: [roleId1, roleId2] },
+    ]);
+    const [partnerId1, partnerId2, partnerId3] = pyEnv["res.partner"].create([
+        { name: "Person A", user_ids: [userId1] },
+        { name: "Person B", user_ids: [userId2] },
+        { name: "Person C", user_ids: [userId3] },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId1 }),
+            Command.create({ partner_id: partnerId2 }),
+            Command.create({ partner_id: partnerId3 }),
+        ],
+    });
+    onRpcBefore("/mail/message/post", (args) => {
+        expect.step("message_post");
+        expect(args.post_data.role_ids).toEqual([roleId1]);
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@discuss");
+    await contains(".o-mail-Composer-suggestion:count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@rd-Discuss\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message a.o-discuss-mention:text('@rd-Discuss'):count(1)");
+    await expect.waitForSteps(["message_post"]);
+});
+
+test.tags("html composer");
+test("Mention with @-role send correct role id", async () => {
+    const pyEnv = await startServer();
+    const [roleId1, roleId2] = pyEnv["res.role"].create([
+        { name: "rd-Discuss" },
+        { name: "rd-JS" },
+    ]);
+    const [userId1, userId2, userId3] = pyEnv["res.users"].create([
+        { role_ids: [roleId1] },
+        { role_ids: [roleId2] },
+        { role_ids: [roleId1, roleId2] },
+    ]);
+    const [partnerId1, partnerId2, partnerId3] = pyEnv["res.partner"].create([
+        { name: "Person A", user_ids: [userId1] },
+        { name: "Person B", user_ids: [userId2] },
+        { name: "Person C", user_ids: [userId3] },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId1 }),
+            Command.create({ partner_id: partnerId2 }),
+            Command.create({ partner_id: partnerId3 }),
+        ],
+    });
+    onRpcBefore("/mail/message/post", (args) => {
+        expect.step("message_post");
+        expect(args.post_data.role_ids).toEqual([roleId1]);
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@discuss");
+    await contains(".o-mail-Composer-suggestion:count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@rd-Discuss\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(".o-mail-Message a.o-discuss-mention:text('@rd-Discuss'):count(1)");
+    await expect.waitForSteps(["message_post"]);
+});
+
+test("[text composer] Mention with @-role trigger one RPC only", async () => {
+    const pyEnv = await startServer();
+    const [roleId1, roleId2] = pyEnv["res.role"].create([
+        { name: "rd-Discuss" },
+        { name: "rd-JS" },
+    ]);
+    const [userId1, userId2, userId3] = pyEnv["res.users"].create([
+        { role_ids: [roleId1] },
+        { role_ids: [roleId2] },
+        { role_ids: [roleId1, roleId2] },
+    ]);
+    const [partnerId1, partnerId2, partnerId3] = pyEnv["res.partner"].create([
+        { name: "Discuss guru", user_ids: [userId1] },
+        { name: "Person B", user_ids: [userId2] },
+        { name: "Person C", user_ids: [userId3] },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId1 }),
+            Command.create({ partner_id: partnerId2 }),
+            Command.create({ partner_id: partnerId3 }),
+        ],
+    });
+    pyEnv["mail.message"].create({
+        body: "message fetched",
+        model: "discuss.channel",
+        res_id: channelId,
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await waitFor(".o-mail-Message:has(:text('message fetched')):count(1)");
+    await waitFor(".o-discuss-ChannelMember:text('Discuss guru'):count(1)");
+    onRpc("/*", (request) => {
+        const route = new URL(request.url).pathname;
+        if (route !== "/discuss/channel/notify_typing") {
+            expect.step(route);
+        }
+    });
+    await insertTextInComposer(".o-mail-Composer", "@discuss");
+    await waitFor(".o-mail-Composer-suggestion strong:text('Discuss guru'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion strong:text('rd-Discuss'):count(1)");
+    await expect.waitForSteps([
+        "/web/dataset/call_kw/res.partner/get_mention_suggestions_from_channel",
+    ]);
+});
+
+test.tags("html composer");
+test("Mention with @-role trigger one RPC only", async () => {
+    const pyEnv = await startServer();
+    const [roleId1, roleId2] = pyEnv["res.role"].create([
+        { name: "rd-Discuss" },
+        { name: "rd-JS" },
+    ]);
+    const [userId1, userId2, userId3] = pyEnv["res.users"].create([
+        { role_ids: [roleId1] },
+        { role_ids: [roleId2] },
+        { role_ids: [roleId1, roleId2] },
+    ]);
+    const [partnerId1, partnerId2, partnerId3] = pyEnv["res.partner"].create([
+        { name: "Discuss guru", user_ids: [userId1] },
+        { name: "Person B", user_ids: [userId2] },
+        { name: "Person C", user_ids: [userId3] },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId1 }),
+            Command.create({ partner_id: partnerId2 }),
+            Command.create({ partner_id: partnerId3 }),
+        ],
+    });
+    pyEnv["mail.message"].create({
+        body: "message fetched",
+        model: "discuss.channel",
+        res_id: channelId,
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await waitFor(".o-mail-Message:has(:text('message fetched')):count(1)");
+    await waitFor(".o-discuss-ChannelMember:text('Discuss guru'):count(1)");
+    onRpc("/*", (request) => {
+        const route = new URL(request.url).pathname;
+        if (route !== "/discuss/channel/notify_typing") {
+            expect.step(route);
+        }
+    });
+    await insertTextInComposer(".o-mail-Composer", "@discuss");
+    await waitFor(".o-mail-Composer-suggestion strong:text('Discuss guru'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion strong:text('rd-Discuss'):count(1)");
+    await expect.waitForSteps([
+        "/web/dataset/call_kw/res.partner/get_mention_suggestions_from_channel",
+    ]);
+});
+
+test("Mentioning @everyone with more than 50 members shows warning dialog", async () => {
+    const pyEnv = await startServer();
+    const partnerIds = pyEnv["res.partner"].create(
+        range(MENTION_AMOUNT_WARNING + 1).map(() => ({ name: "" }))
+    );
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: partnerIds.map((id) => Command.create({ partner_id: id })),
+    });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "@everyone");
+    await contains(".o-mail-Composer-suggestion:contains(Everyone):count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@everyone\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(
+        '.modal-body:text("You\'re about to notify 51 people with @everyone. Do you want to continue?"):count(1)'
+    );
+    await contains(".modal-footer button:text('Discard'):count(1)").click();
+    await waitForNone(".modal");
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@everyone\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await contains(".modal-footer button:text('Send Message'):count(1)").click();
+    await waitFor(".o-mail-Message a.o-discuss-mention:text('@everyone'):count(1)");
+});
+
+test("Mentioning @-role with more than 50 users shows warning dialog", async () => {
+    const pyEnv = await startServer();
+    const roleId = pyEnv["res.role"].create({ name: "VIPs" });
+    pyEnv["res.users"].create(
+        range(MENTION_AMOUNT_WARNING + 1).map(() => ({ role_ids: [roleId] }))
+    );
+    const channelId = pyEnv["discuss.channel"].create({ name: "General", channel_type: "channel" });
+    pyEnv["res.role"]._applyComputesAndValidate();
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "@VIPs");
+    await contains(".o-mail-Composer-suggestion:contains(VIPs):count(1)").click();
+    await containsTextInComposer(".o-mail-Composer", "\uFEFF@VIPs\uFEFF\u00a0");
+    await contains(".o-mail-Composer button[title='Send']:enabled:count(1)").click();
+    await waitFor(
+        '.modal-body:text("You\'re about to notify 51 people with @VIPs. Do you want to continue?"):count(1)'
+    );
+    await contains(".modal-footer button:text('Send Message'):count(1)").click();
+    await waitFor(".o-mail-Message a.o-discuss-mention:text('@VIPs'):count(1)");
+});
+
+test("[text composer] should send notifications to users with names containing HTML entities", async () => {
+    const pyEnv = await startServer();
+    const partnerRaw = {
+        email: "tim.ascii@example.com",
+        name: "' !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+    };
+    const partnerId = pyEnv["res.partner"].create(partnerRaw);
+    pyEnv["res.users"].create({ partner_id: partnerId });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await contains(`.o-mail-Composer-suggestion:contains(${partnerRaw.email}):count(1)`).click();
+    await contains(".o-mail-Composer [title='Send']:count(1)").click();
+    await mailContains(".o-mail-Message .o_mail_redirect", { text: `@${partnerRaw.name}` });
+    await contains(".o-mail-Message-notification:count(1)").click();
+    await mailContains(".o-mail-MessageNotificationPopover", {
+        text: `To${partnerRaw.name}(${partnerRaw.email})`,
+    });
+});
+
+test.tags("html composer");
+test("should send notifications to users with names containing HTML entities", async () => {
+    const pyEnv = await startServer();
+    const partnerRaw = {
+        email: "tim.ascii@example.com",
+        name: "' !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+    };
+    const partnerId = pyEnv["res.partner"].create(partnerRaw);
+    pyEnv["res.users"].create({ partner_id: partnerId });
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerId }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await contains(`.o-mail-Composer-suggestion:contains(${partnerRaw.email}):count(1)`).click();
+    await contains(".o-mail-Composer [title='Send']:count(1)").click();
+    await mailContains(".o-mail-Message .o_mail_redirect", { text: `@${partnerRaw.name}` });
+    await contains(".o-mail-Message-notification:count(1)").click();
+    await mailContains(".o-mail-MessageNotificationPopover", {
+        text: `To${partnerRaw.name}(${partnerRaw.email})`,
+    });
+});
+
+test("Recent message authors should be displayed before other partners", async () => {
+    const pyEnv = await startServer();
+    const [partnerA, partnerB, partnerC, partnerD] = pyEnv["res.partner"].create([
+        { name: "Person A" },
+        { name: "Person B" },
+        { name: "Person C" },
+        { name: "Person D" },
+    ]);
+    const [, userB] = pyEnv["res.users"].create([
+        { partner_id: partnerA },
+        { partner_id: partnerB },
+        { partner_id: partnerC },
+        { partner_id: partnerD },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "general",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerA }),
+            Command.create({ partner_id: partnerB }),
+            Command.create({ partner_id: partnerC }),
+            Command.create({ partner_id: partnerD }),
+        ],
+    });
+    pyEnv["mail.message"].create({
+        author_id: partnerD,
+        body: "older",
+        model: "discuss.channel",
+        res_id: channelId,
+    });
+    await start();
+    await openDiscuss(channelId);
+    await waitFor(".o-mail-Message:count(1)");
+    await insertTextInComposer(".o-mail-Composer", "@Person ");
+    await waitFor(".o-mail-Composer-suggestion:eq(0) strong:text('Person D'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(1) strong:text('Person A'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(2) strong:text('Person B'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(3) strong:text('Person C'):count(1)");
+    await withUser(userB, () =>
+        rpc("/mail/message/post", {
+            post_data: { body: "newer", message_type: "comment", subtype_xmlid: "mail.mt_comment" },
+            thread_id: channelId,
+            thread_model: "discuss.channel",
+        })
+    );
+    await waitFor(".o-mail-Message:count(2)");
+    // Edit the search term to re-trigger the local sort with updated messages.
+    deleteBackward(getEditorFromComposerEl(".o-mail-Composer"));
+    await waitFor(".o-mail-Composer-suggestion:eq(0) strong:text('Person B'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(1) strong:text('Person D'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(2) strong:text('Person A'):count(1)");
+    await waitFor(".o-mail-Composer-suggestion:eq(3) strong:text('Person C'):count(1)");
+});
+
+test("[text composer] one separator between partner and role mention suggestions", async () => {
+    const pyEnv = await startServer();
+    const [roleId] = pyEnv["res.role"].create([{ name: "rd-Discuss" }]);
+    const [userId] = pyEnv["res.users"].create([{ role_ids: [roleId] }]);
+    const [partnerA, partnerB] = pyEnv["res.partner"].create([
+        { name: "Alpha Person A", user_ids: [userId] },
+        { name: "Alpha Person B" },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerA }),
+            Command.create({ partner_id: partnerB }),
+        ],
+    });
+    await start();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestionList .o-discuss-separator:count(1)");
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Mitchell Admin'))", {
+        before: [".o-mail-Composer-suggestionList .o-discuss-separator"],
+    });
+    await mailContains(".o-mail-Composer-suggestion:has(:text('rd-Discuss'))", {
+        after: [".o-mail-Composer-suggestionList .o-discuss-separator"],
+    });
+});
+
+test.tags("html composer");
+test("one separator between partner and role mention suggestions", async () => {
+    const pyEnv = await startServer();
+    const [roleId] = pyEnv["res.role"].create([{ name: "rd-Discuss" }]);
+    const [userId] = pyEnv["res.users"].create([{ role_ids: [roleId] }]);
+    const [partnerA, partnerB] = pyEnv["res.partner"].create([
+        { name: "Alpha Person A", user_ids: [userId] },
+        { name: "Alpha Person B" },
+    ]);
+    const channelId = pyEnv["discuss.channel"].create({
+        name: "General",
+        channel_type: "channel",
+        channel_member_ids: [
+            Command.create({ partner_id: serverState.partnerId }),
+            Command.create({ partner_id: partnerA }),
+            Command.create({ partner_id: partnerB }),
+        ],
+    });
+    await start();
+    getService("mail.composer").setHtmlComposer();
+    await openDiscuss(channelId);
+    await focus(".o-mail-Composer-html");
+    await insertTextInComposer(".o-mail-Composer", "@");
+    await waitFor(".o-mail-Composer-suggestionList .o-discuss-separator:count(1)");
+    await mailContains(".o-mail-Composer-suggestion:has(:text('Mitchell Admin'))", {
+        before: [".o-mail-Composer-suggestionList .o-discuss-separator"],
+    });
+    await mailContains(".o-mail-Composer-suggestion:has(:text('rd-Discuss'))", {
+        after: [".o-mail-Composer-suggestionList .o-discuss-separator"],
+    });
+});

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 
-from odoo.tests import common
+from odoo.tests import tagged, common
 
 
+@tagged('at_install', '-post_install')  # LEGACY at_install
 class TestSparseFields(common.TransactionCase):
 
     def test_sparse(self):
@@ -27,7 +28,7 @@ class TestSparseFields(common.TransactionCase):
             self.assertEqual(record[key], val)
         self.assertEqual(record.partner, partner)
 
-        for n, (key, val) in enumerate(values):
+        for n, (key, _val) in enumerate(values):
             record.write({key: False})
             self.assertEqual(record.data, dict(values[n+1:]))
 

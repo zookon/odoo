@@ -1,0 +1,35 @@
+.o-mail-TabHeader {
+    border-color: transparent !important;
+}
+
+.o-mail-Tabs-scroller:hover {
+    background-color: var(--o-gray-200) !important;
+}
+
+.o-mail-Tabs-scrollContainer {
+    scrollbar-width: none;
+}
+
+.o-mail-TabHeader,
+.o-mail-Tabs-scroller {
+
+    &:active,
+    &:focus {
+        outline: none;
+        box-shadow: none;
+    }
+
+    &.o-active {
+        background: var(--o-component-active-bg);
+        color: var(--o-enterprise-action-color);
+        border-color: color-mix(in srgb, var(--o-enterprise-action-color) 25%, transparent) !important;
+    }
+}
+
+.modal:has(.o-mail-Tabs) .modal-body {
+    padding: 0 !important;
+}
+
+.o-mail-Tabs-scroller:disabled {
+    opacity: 25%;
+}

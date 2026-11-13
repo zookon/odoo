@@ -1,20 +1,30 @@
-# -*- coding: utf-8 -*-
-# Part of Odoo. See LICENSE file for full copyright and licensing details.
-from odoo import api, fields, models, _
-from odoo.exceptions import UserError
+from odoo import models, api
 
 
 class ResUsers(models.Model):
-    _inherit = 'res.users'
+    _name = 'res.users'
+    _inherit = ['res.users', 'pos.load.mixin']
 
-    pos_security_pin = fields.Char(string='Security PIN', size=32, help='A Security PIN used to protect sensible functionality in the Point of Sale')
+    @api.model
+    def _load_pos_data_domain(self, data):
+        return [('id', '=', self.env.uid)]
 
-    group_point_of_sale_user = fields.Selection(
-        selection=lambda self: self._get_group_selection('base.module_category_point_of_sale'),
-        string='Point of Sale', compute='_compute_groups_id', inverse='_inverse_groups_id',
-        category_xml_id='base.module_category_point_of_sale')
+    @api.model
+    def _load_pos_data_fields(self, config):
+        return ['id', 'name', 'partner_id', 'all_group_ids', 'lang']
 
-    @api.constrains('pos_security_pin')
-    def _check_pin(self):
-        if self.pos_security_pin and not self.pos_security_pin.isdigit():
-            raise UserError(_("Security PIN can only contain digits"))
+    @api.model
+    def _load_pos_data_read(self, records, config):
+        read_records = super()._load_pos_data_read(records, config)
+        if read_records:
+            read_records[0]['_role'] = 'manager' if config.group_pos_manager_id.id in read_records[0]['all_group_ids'] else 'cashier'
+            del read_records[0]['all_group_ids']
+        return read_records
+
+    def _has_cash_move_permission(self):
+        self.ensure_one()
+        return self.has_group('point_of_sale.group_pos_manager') or self.has_group('account.group_account_invoice')
+
+    def _has_cash_delete_permission(self):
+        self.ensure_one()
+        return self.has_group('point_of_sale.group_pos_manager') or self.has_group('account.group_account_basic')

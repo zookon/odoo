@@ -1,682 +1,3112 @@
-# -*- coding: utf-8 -*-
-# Part of Odoo. See LICENSE file for full copyright and licensing details.
+import operator as py_operator
 
-# Copyright (c) 2005-2006 Axelor SARL. (http://www.axelor.com)
+from collections import defaultdict
 
-import logging
-import math
+from datetime import date, datetime, timedelta, time, UTC
+from zoneinfo import ZoneInfo
 
-from datetime import timedelta, datetime, time
-from pytz import timezone, UTC
+from dateutil import rrule
+from dateutil.relativedelta import relativedelta
+from math import ceil, floor
+from markupsafe import Markup
 
 from odoo import api, fields, models
-from odoo.exceptions import UserError, ValidationError
-from odoo.tools import float_compare
+from odoo.addons.base.models.res_partner import _tz_get
+from odoo.addons.resource.models.utils import HOURS_PER_DAY
+from odoo.exceptions import AccessError, UserError, ValidationError
+from odoo.fields import Command, Date, Domain
+from odoo.tools.date_utils import convert_timezone, float_to_time, sum_intervals, time_to_float
+from odoo.tools.float_utils import float_round, float_compare, float_is_zero
+from odoo.tools.intervals import Intervals
+from odoo.tools.misc import clean_context, format_date, format_duration
 from odoo.tools.translate import _
 
-from odoo.addons.resource.models.resource import float_to_time
 
-_logger = logging.getLogger(__name__)
+def get_employee_from_context(values, context, user_employee_id):
+    employee_ids_list = [value[2] for value in values.get('employee_ids', []) if len(value) == 3 and value[0] == Command.SET]
+    employee_ids = employee_ids_list[-1] if employee_ids_list else []
+    employee_id_value = employee_ids[0] if employee_ids else False
+    return employee_id_value or context.get('default_employee_id', context.get('employee_id', user_employee_id))
 
-class HolidaysRequest(models.Model):
+
+POSITION_DEPENDS = ('date_from', 'date_to', 'tz', 'request_date_from', 'request_date_to',
+                    'request_date_from_period', 'request_date_to_period', 'work_entry_type_request_unit')
+
+
+class HrLeave(models.Model):
+    """Time off request of an employee.
+
+    The request goes through the states ``confirm``, ``validate1`` (first approval of the types
+    validated twice), ``validate``, ``refuse`` and ``cancel``; the transitions the current user
+    may perform are given by :meth:`_get_next_states_by_state` and checked by
+    :meth:`_check_approval_update`. The description (``name``, stored in ``private_name``) is only
+    readable by time off officers, the employee and their time off approver. Users who are not
+    officers only access their own requests and the requests of the employees they approve, and
+    a multi-company rule applies to everyone.
     """
-        Here are the rights associated with the flow of leave requests
-
-        State       Groups              Restriction
-        ============================================================================================================
-        Draft       Anybody             Own Request only and state in [confirm, refuse]
-                    Holiday Manager     State in [confirm, refuse]
-        Confirm     All                 State = draft
-        Validate1   Holiday Officer     Not his own Request and state = confirm
-                    Holiday Manager     Not his own Request or has no manager and State = confirm
-        Validate    Holiday Officer     Not his own Request and state = confirm
-                    Holiday Manager     Not his own Request or has no manager and State in [validate1, confirm]
-        Refuse      Holiday Officer     State in [confirm, validate, validate1]
-                    Holiday Manager     State in [confirm, validate, validate1]
-        ============================================================================================================
-    """
-    _name = "hr.leave"
-    _description = "Leave"
+    _name = 'hr.leave'
+    _description = "Time Off"
     _order = "date_from desc"
-    _inherit = ['mail.thread', 'mail.activity.mixin']
+    _inherit = ['mail.thread.main.attachment', 'mail.activity.mixin', 'hr.leave.display.name.mixin', 'hr.time.rule.source.mixin']
+    _mail_post_access = 'read'
 
-    def _default_domain_holiday_status(self):
-        if self.user_has_groups('hr_holidays.group_hr_holidays_manager'):
-            return [('valid', '=', True)]
-        return [('valid', '=', True), ('employee_applicability', 'in', ['leave', 'both'])]
+    _time_rule_source_field = 'source_leave_id'
+    _time_rule_output_field = 'output_leave_ids'
+    _time_rule_span_start_field = 'date_from'
+    _time_rule_span_end_field = 'date_to'
+    _time_rule_write_ctx = {
+        'skip_time_rules': True,
+        'leave_fast_create': True,
+        'leave_skip_date_check': True,
+        'leave_skip_state_check': True,
+        'skip_check_validity': True,
+        'tracking_disable': True,
+        'mail_activity_automation_skip': True,
+        'skip_leave_version_check': True,
+        'skip_create_resource_leave': True,
+        'leave_time_rule_trim': True,
+    }
 
     @api.model
-    def default_get(self, fields_list):
-        defaults = super(HolidaysRequest, self).default_get(fields_list)
+    def default_get(self, fields):
+        defaults = super().default_get(fields)
+        defaults = self._default_get_request_dates(defaults)
+        if self.env.context.get('work_entry_type_display_name', True) and 'work_entry_type_id' in fields and not defaults.get('work_entry_type_id'):
+            employee = defaults.get('employee_id')
+            country = self.env['hr.employee'].browse(employee).company_id.country_id or self.env.company.country_id
+            domain = [
+                ('country_id', '=', country.id),
+                ('time_off_selectable', '=', True),
+                '|',
+                    ('requires_allocation', '=', False),
+                    ('has_valid_allocation', '=', True)
+            ]
+            defaults['work_entry_type_id'] = False
+            work_entry_types = self.env['hr.work.entry.type'].search(domain, order='sequence')
+            selected_work_entry_type = next(
+                (
+                    work_entry_type for work_entry_type in work_entry_types
+                    if (defaults.get('work_entry_type_request_unit') == 'hour' and work_entry_type['request_unit'] == 'hour') or (defaults.get('work_entry_type_request_unit') != 'hour')
+                ),
+                work_entry_types[0] if work_entry_types else None,
+            )
+            if selected_work_entry_type:
+                defaults['work_entry_type_id'] = selected_work_entry_type.id
 
-        LeaveType = self.env['hr.leave.type'].with_context(employee_id=defaults.get('employee_id'), default_date_from=defaults.get('date_from', fields.Datetime.now()))
-        lt = LeaveType.search(self._default_domain_holiday_status())
+        today = Date.context_today(self)
+        if 'request_date_from' in fields and 'request_date_from' not in defaults:
+            defaults['request_date_from'] = today
+        if 'request_date_to' in fields and 'request_date_to' not in defaults:
+            defaults['request_date_to'] = today
 
-        defaults['holiday_status_id'] = lt[0].id if len(lt) > 0 else defaults.get('holiday_status_id')
         return defaults
 
-    def _default_employee(self):
-        return self.env.context.get('default_employee_id') or self.env['hr.employee'].search([('user_id', '=', self.env.uid)], limit=1)
+    def _default_get_request_dates(self, values):
+        # The UI views initialize date_{from,to} due to how calendar views work.
+        # However it is request_date_{from,to} that should be used instead.
+        # Instead of overwriting all the javascript methods to use
+        # request_date_{from,to} instead of date_{from,to}, we just convert
+        # date_{from,to} to request_date_{from,to} here.
 
+        # Request dates are determined during an onchange scenario.
+        # To ensure that the values are correct in the client context (UI),
+        # the timezone must be applied (because no processing is carried out
+        # when these dates are received on the frontend).
+        # Note:
+        # Without the application of the timezone, days based on UTC datetimes
+        # will be returned (and will therefore not be correct for the client).
+        # a default on the computed pair is overwritten by its own compute: read it here too
+        client_tz = self.env.tz
+        for datetime_field, date_field in (('date_from', 'request_date_from'),
+                                           ('date_to', 'request_date_to'),
+                                           ('request_date_hour_from', 'request_date_from'),
+                                           ('request_date_hour_to', 'request_date_to')):
+            if values.get(datetime_field):
+                if not values.get(date_field):
+                    moment = fields.Datetime.to_datetime(values[datetime_field])
+                    values[date_field] = moment.replace(tzinfo=UTC).astimezone(client_tz)
+                del values[datetime_field]
+        return values
 
-    name = fields.Char('Description')
+    # description
+    name = fields.Char('Description', compute='_compute_description', inverse='_inverse_description', search='_search_description', compute_sudo=False, copy=False)
+    private_name = fields.Char('Time Off Description', groups='hr_holidays.group_hr_holidays_responsible')
     state = fields.Selection([
-        ('draft', 'To Submit'),
-        ('cancel', 'Cancelled'),
         ('confirm', 'To Approve'),
         ('refuse', 'Refused'),
         ('validate1', 'Second Approval'),
-        ('validate', 'Approved')
-        ], string='Status', readonly=True, track_visibility='onchange', copy=False, default='confirm',
-            help="The status is set to 'To Submit', when a leave request is created." +
-            "\nThe status is 'To Approve', when leave request is confirmed by user." +
-            "\nThe status is 'Refused', when leave request is refused by manager." +
-            "\nThe status is 'Approved', when leave request is approved by manager.")
-    payslip_status = fields.Boolean('Reported in last payslips',
-        help='Green this button when the leave has been taken into account in the payslip.')
-    report_note = fields.Text('HR Comments')
-    user_id = fields.Many2one('res.users', string='User', related='employee_id.user_id', related_sudo=True, store=True, default=lambda self: self.env.uid, readonly=True)
-    date_from = fields.Datetime('Start Date', readonly=True, index=True, copy=False, required=True,
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]}, track_visibility='onchange')
-    date_to = fields.Datetime('End Date', readonly=True, copy=False, required=True,
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]}, track_visibility='onchange')
-    holiday_status_id = fields.Many2one("hr.leave.type", string="Leave Type", required=True, readonly=True,
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]},
-        domain=lambda self: self._default_domain_holiday_status())
-    employee_id = fields.Many2one('hr.employee', string='Employee', index=True, readonly=True,
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]}, default=_default_employee, track_visibility='onchange')
-    manager_id = fields.Many2one('hr.employee', string='Manager', readonly=True)
-    notes = fields.Text('Reasons', readonly=True, states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]})
-    number_of_days_temp = fields.Float(
-        'Duration (Days)', copy=False, readonly=True,
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]},
-        help='Number of days of the leave request according to your working schedule.')
-    number_of_days = fields.Float('Number of Days', compute='_compute_number_of_days', store=True, track_visibility='onchange')
+        ('validate', 'Approved'),
+        ('cancel', 'Cancelled'),
+        ], string='Status', store=True, tracking=True, copy=False, readonly=False, default='confirm')
+    user_id = fields.Many2one('res.users', string='User', related='employee_id.user_id', related_sudo=True, compute_sudo=True, store=True, readonly=True, index=True)
+    # leave type configuration
+    work_entry_type_id = fields.Many2one(
+        "hr.work.entry.type", string="Time Type",
+        required=True, index=True,
+        ui_domain="""[
+            [('id', 'in', allowed_work_entry_type_ids)],
+            ('time_off_selectable', '=', True),
+            '|',
+                ('requires_allocation', '=', False),
+                ('has_valid_allocation', '=', True),
+        ]""",
+        tracking=True)
+    allowed_work_entry_type_ids = fields.Many2many(
+        'hr.work.entry.type', compute='_compute_allowed_work_entry_type_ids')
+    work_entry_type_requires_allocation = fields.Boolean(related="work_entry_type_id.requires_allocation")
+    count_as = fields.Selection(related='work_entry_type_id.count_as')
+    color = fields.Integer("Color", related='work_entry_type_id.color')
+    validation_type = fields.Selection(string='Validation Type', related='work_entry_type_id.leave_validation_type', readonly=False)
+    # HR data
+
+    employee_id = fields.Many2one(
+        'hr.employee', string='Employee', index=True, ondelete="restrict", required=True,
+        tracking=True, domain=lambda self: self._get_employee_domain(), default=lambda self: self.env.user.employee_id)
+    employee_company_id = fields.Many2one(related='employee_id.company_id', string="Employee Company", store=True)
+    company_id = fields.Many2one('res.company', compute='_compute_company_id', store=True, index=True)
+    active_employee = fields.Boolean(related='employee_id.active', string='Employee Active')
+    tz_mismatch = fields.Boolean(compute='_compute_tz_mismatch')
+    tz = fields.Selection(_tz_get, compute='_compute_tz')
+    department_id = fields.Many2one(
+        'hr.department', compute='_compute_department_id', store=True, string='Department',
+        readonly=False)
+    notes = fields.Text('Reasons', readonly=False)
+    # duration
+    resource_calendar_id = fields.Many2one('resource.calendar', compute='_compute_resource_calendar_id', store=True, readonly=False, copy=False)
+    # allocated leave balance
+    max_leaves = fields.Float(compute='_compute_leaves')
+    virtual_remaining_leaves = fields.Float(compute='_compute_leaves', string='Available Time Off')
+    # These dates are computed based on request_date_{to,from} and should
+    # therefore never be set directly.
+    date_from = fields.Datetime(
+        'Start Date', compute='_compute_date_from_to', store=True, index=True, tracking=True)
+    date_to = fields.Datetime(
+        'End Date', compute='_compute_date_from_to', store=True, tracking=True)
+    number_of_days = fields.Float(
+        'Duration (Days)', compute='_compute_duration', store=True, tracking=True,
+        help='Number of days of the time off request. Used in the calculation.')
     number_of_hours = fields.Float(
-        'Duration (Hours)', copy=False, readonly=True, compute='_compute_number_of_hours',
-        help='Number of hours of the leave request according to your working schedule.')
-    meeting_id = fields.Many2one('calendar.event', string='Meeting')
+        'Duration (Hours)', compute='_compute_duration', store=True, tracking=True,
+        inverse="_inverse_number_of_hours",
+        help='Number of hours of the time off request. Used in the calculation.')
+    last_several_days = fields.Boolean("All day", compute="_compute_last_several_days")
+    duration_display = fields.Char('Requested', compute='_compute_duration_display')
+    # details
+    meeting_id = fields.Many2one('calendar.event', string='Meeting', copy=False)
+    first_approver_id = fields.Many2one(
+        'hr.employee', string='First Approval', readonly=True, copy=False,
+        help='This area is automatically filled by the user who validate the time off')
+    second_approver_id = fields.Many2one(
+        'hr.employee', string='Second Approval', readonly=True, copy=False,
+        help='This area is automatically filled by the user who validate the time off with second level (If time type need second validation)')
 
-    parent_id = fields.Many2one('hr.leave', string='Parent', copy=False)
-    linked_request_ids = fields.One2many('hr.leave', 'parent_id', string='Linked Requests')
-    department_id = fields.Many2one('hr.department', string='Department', readonly=True, states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]})
-    category_id = fields.Many2one('hr.employee.category', string='Employee Tag', readonly=True,
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]}, help='Category of Employee')
-    holiday_type = fields.Selection([
-        ('employee', 'By Employee'),
-        ('department', 'By Department'),
-        ('category', 'By Employee Tag')
-    ], string='Allocation Mode', readonly=True, required=True, default='employee',
-        states={'draft': [('readonly', False)], 'confirm': [('readonly', False)]},
-        help='By Employee: Allocation/Request for individual Employee, By Employee Tag: Allocation/Request for group of employees in category')
-    first_approver_id = fields.Many2one('hr.employee', string='First Approval', readonly=True, copy=False,
-        help='This area is automatically filled by the user who validate the leave', oldname='manager_id')
-    second_approver_id = fields.Many2one('hr.employee', string='Second Approval', readonly=True, copy=False, oldname='manager_id2',
-        help='This area is automaticly filled by the user who validate the leave with second level (If Leave type need second validation)')
-    validation_type = fields.Selection('Validation Type', related='holiday_status_id.validation_type')
-    can_reset = fields.Boolean('Can reset', compute='_compute_can_reset')
-    can_approve = fields.Boolean('Can Approve', compute='_compute_can_approve')
+    can_approve = fields.Boolean(compute='_compute_can_approve', export_string_translation=False)
+    can_validate = fields.Boolean(compute='_compute_can_validate', export_string_translation=False)
+    can_refuse = fields.Boolean(compute='_compute_can_refuse', export_string_translation=False)
+    can_cancel = fields.Boolean(compute='_compute_can_cancel', export_string_translation=False)
+    can_back_to_approve = fields.Boolean(compute='_compute_can_back_to_approve', export_string_translation=False)
+    can_reschedule = fields.Boolean(compute='_compute_can_reschedule', export_string_translation=False)
 
-    # Those fields are mostly for the interface only
-
+    attachment_ids = fields.One2many('ir.attachment', 'res_id', string="Attachments")
+    # To display in form view
+    supported_attachment_ids = fields.Many2many(
+        'ir.attachment', string="Attach File", compute='_compute_supported_attachment_ids',
+        inverse='_inverse_supported_attachment_ids')
+    supported_attachment_ids_count = fields.Integer(compute='_compute_supported_attachment_ids')
+    attachment_is_visible = fields.Boolean(compute='_compute_attachment_is_visible', compute_sudo=True)
+    # UX fields
+    work_entry_type_request_unit = fields.Selection(related='work_entry_type_id.request_unit', readonly=True)
+    work_entry_type_support_document = fields.Boolean(related="work_entry_type_id.support_document")
     # Interface fields used when not using hour-based computation
+    # These are the fields that should be used to manipulate the start- and
+    # end-dates of the leave request. date_from and date_to are computed and
+    # should therefore not be set directly.
     request_date_from = fields.Date('Request Start Date')
     request_date_to = fields.Date('Request End Date')
+    # Interface fields used when using hour-based computation
+    request_hour_from = fields.Float(string='Hour from')
+    request_hour_to = fields.Float(string='Hour to')
+    # one compute each, on purpose: see _compute_request_date_hour_from
+    request_date_hour_from = fields.Datetime(compute='_compute_request_date_hour_from', readonly=False, search='_search_request_date_hour_from', inverse='_inverse_request_date_hour_from_to')
+    request_date_hour_to = fields.Datetime(compute='_compute_request_date_hour_to', readonly=False, search='_search_request_date_hour_to', inverse='_inverse_request_date_hour_from_to')
+    # used only when the leave is taken in half days
+    request_date_from_period = fields.Selection([
+        ('am', 'Morning'), ('pm', 'Afternoon')],
+        string="Date Period Start", default='am')
+    request_date_to_period = fields.Selection([
+        ('am', 'Morning'), ('pm', 'Afternoon')],
+        string="Date Period End", default='pm')
+    # view
+    is_hatched = fields.Boolean('Hatched', compute='_compute_is_hatched')
+    is_striked = fields.Boolean('Striked', compute='_compute_is_hatched')
+    has_mandatory_day = fields.Boolean(compute='_compute_has_mandatory_day')
+    work_entry_type_increases_duration = fields.Char(compute='_compute_work_entry_type_increases_duration')
+    request_duration = fields.Selection(
+        [
+            ("full", "Full Day"),
+            ("am", "Morning"),
+            ("pm", "Afternoon"),
+            ("specific", "Specific"),
+        ],
+        default="full",
+        string="Duration",
+    )
+    allowed_request_durations = fields.Json(compute="_compute_allowed_request_durations")
+    # warning message
+    dashboard_warning_message = fields.Char(compute='_compute_dashboard_warning_message')
+    allocation_display_warning = fields.Char(compute='_compute_allocation_warning')
 
-    leave_type_request_unit = fields.Selection(related='holiday_status_id.request_unit', readonly=True)
+    time_rule_id = fields.Many2one('hr.time.rule', string="Time Rule", copy=False, index=True)
+    source_leave_id = fields.Many2one('hr.leave', string="Source Leave", copy=False, index=True)
+    output_leave_ids = fields.One2many('hr.leave', 'source_leave_id')
+    is_time_rule_trimmed = fields.Boolean(
+        string='Trimmed by Time Rule', default=False, copy=False,
+        help="Set when a time rule trims this leave's end to sub-day precision. "
+             "Prevents _compute_date_from_to from snapping the end back to the schedule boundary.",
+    )
+    time_rule_time_range = fields.Char(
+        compute='_compute_time_rule_time_range',
+        help="HH:MM → HH:MM label shown on rule-split and trimmed leaves.",
+    )
 
-    # These fields are only used only when the leave is taken in half days
-    request_date_from_period = fields.Selection([('am', 'Morning'),
-                                                 ('pm', 'Afternoon')], string="Date Period Start", default='am')
-    request_date_to_period = fields.Selection([('am', 'Morning'),
-                                               ('pm', 'Afternoon')], string="Date Period End", default='pm')
-
-    request_unit_all = fields.Selection([('half', 'Half-day'),
-                             ('day', '1 Day'),
-                             ('period', 'Period')])
-    # Duplicate field because we cannot hide some entries of a selection field
-    request_unit_day = fields.Selection([('day', '1 Day'),
-                                         ('period', 'Period')], default='day')
-
-    _sql_constraints = [
-        ('type_value', "CHECK( (holiday_type='employee' AND employee_id IS NOT NULL) or (holiday_type='category' AND category_id IS NOT NULL) or (holiday_type='department' AND department_id IS NOT NULL) )",
-         "The employee, department or employee category of this request is missing. Please make sure that your user login is linked to an employee."),
-        ('date_check2', "CHECK ((date_from <= date_to))", "The start date must be anterior to the end date."),
-        ('date_check', "CHECK ( number_of_days_temp >= 0 )", "If you want to change the number of days you should use the 'period' mode"),
-    ]
-
-    @api.onchange('request_unit_all', 'request_date_from_period', 'request_date_to_period',
-                  'holiday_status_id', 'request_date_from', 'request_date_to', 'employee_id')
-    def _onchange_request_parameters(self):
-        date_from = False
-        date_to = False
-
-        if not self.employee_id:
-            return
-
-        if self.request_date_from:
-            if self.date_from:
-                date_from = fields.Datetime.to_string(datetime.combine(fields.Date.from_string(self.request_date_from), fields.Datetime.from_string(self.date_from).time()))
+    @api.depends('request_hour_from', 'request_hour_to', 'is_time_rule_trimmed', 'source_leave_id')
+    def _compute_time_rule_time_range(self):
+        for leave in self:
+            if leave.is_time_rule_trimmed or leave.source_leave_id:
+                def fmt(h):
+                    return float_to_time(h).strftime('%H:%M')
+                leave.time_rule_time_range = '%s → %s' % (
+                    fmt(leave.request_hour_from), fmt(leave.request_hour_to))
             else:
-                date_from = datetime.combine(self.request_date_from, time.min)
+                leave.time_rule_time_range = False
 
-        if self.request_date_to:
-            if self.date_to:
-                date_to = fields.Datetime.to_string(datetime.combine(fields.Date.from_string(self.request_date_to), fields.Datetime.from_string(self.date_to).time()))
+    _date_check2 = models.Constraint(
+        'CHECK ((date_from <= date_to))',
+        'The start date must be before or equal to the end date.',
+    )
+    _date_check3 = models.Constraint(
+        'CHECK ((request_date_from <= request_date_to))',
+        'The request start date must be before or equal to the request end date.',
+    )
+    _duration_check = models.Constraint(
+        'CHECK ( number_of_days >= 0 )',
+        "If you want to change the number of days you should use the 'period' mode",
+    )
+    _date_to_date_from_index = models.Index("(date_to, date_from)")
+
+    @api.depends('company_id')
+    def _compute_allowed_work_entry_type_ids(self):
+        selectable_domain = (
+            Domain.TRUE
+            if self.env.user.has_group('hr_holidays.group_hr_holidays_manager')
+            else Domain('time_off_selectable', '=', True)
+        )
+        for leave in self:
+            country = leave.company_id.country_id
+            if not country or not self.env['hr.work.entry.type'].search_count([('country_id', '=', country.id)], limit=1):
+                domain = [('country_id', '=', False)]
             else:
-                date_to = datetime.combine(self.request_date_to, time.max)
+                domain = [('country_id', '=', country.id)]
+            leave.allowed_work_entry_type_ids = self.env['hr.work.entry.type'].search(Domain.AND([selectable_domain, domain]))
 
-        if not self.request_date_from or not self.request_date_to:
-            if date_from:
-                self.date_from = date_from
-            if date_to:
-                self.date_to = date_to
-            self.number_of_days_temp = 0
+    @api.onchange('request_hour_from', 'request_hour_to')
+    def _onchange_hours(self):
+        # avoid negative or after midnight
+        self.request_hour_from = min(max(self.request_hour_from, 0.0), 23.99)
+        self.request_hour_to = min(max(self.request_hour_to, 0.0), 24)
+
+    def action_open_employee_calendar(self):
+        self.ensure_one()
+        return {
+            'name': self.env._('Time Off Calendar'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'hr.leave',
+            'views': [[self.env.ref('hr_holidays.hr_leave_employee_view_dashboard').id, 'calendar']],
+            'domain': [('employee_id', '=', self.employee_id.id)],
+            'context': {
+                'default_employee_id': self.employee_id.id,
+            },
+        }
+
+    @api.depends(
+        'number_of_days', 'number_of_hours',
+        'work_entry_type_id', 'employee_id', 'request_date_from', 'request_date_to',
+        'work_entry_type_id.unit_of_measure'
+    )
+    @api.depends_context('default_is_multi_employee')
+    def _compute_allocation_warning(self):
+        self.allocation_display_warning = False
+        today = fields.Date.context_today(self)
+        for leave in self:
+            is_multi_employee = self.env.context.get('default_is_multi_employee', False)
+
+            if not leave.employee_id or is_multi_employee or not leave.work_entry_type_requires_allocation or not leave.work_entry_type_id.time_off_selectable:
+                continue
+
+            # A saved request is already deducted from the balance, don't count it twice
+            remaining, _allocated = leave.with_context(ignored_leave_ids=leave._origin.ids)._get_allocation_balance(
+                leave.request_date_from or today)[leave]
+            is_hour = leave.work_entry_type_id.unit_of_measure == 'hour'
+            request_amount = leave.number_of_hours if is_hour else leave.number_of_days
+            max_excess = leave.work_entry_type_id.max_allowed_negative if leave.work_entry_type_id.allows_negative else 0
+
+            if request_amount > (remaining + max_excess):
+                if is_hour:
+                    leave.allocation_display_warning = self.env._(
+                        "Only %(remaining)s hour(s) available", remaining=float_round(remaining, precision_digits=2))
+                else:
+                    leave.allocation_display_warning = self.env._(
+                        "Only %(remaining)s day(s) available", remaining=float_round(remaining, precision_digits=2))
+
+    @api.depends("work_entry_type_request_unit", "last_several_days")
+    def _compute_allowed_request_durations(self):
+        for leave in self:
+            leave.allowed_request_durations = leave._get_allowed_request_durations()
+
+    def _get_allowed_request_durations(self):
+        """Return the values of ``request_duration`` the request can use.
+
+        ``['full']`` for requests over several days and types requested by day,
+        ``['full', 'am', 'pm']`` for half days, plus ``'specific'`` for types requested in hours.
+
+        :rtype: list[str]
+        """
+        self.ensure_one()
+        if self.last_several_days or self.work_entry_type_request_unit == "day":
+            return ["full"]
+        if self.work_entry_type_request_unit == "half_day":
+            return ["full", "am", "pm"]
+        if self.work_entry_type_request_unit == "hour":
+            return ["full", "am", "pm", "specific"]
+        return ["full"]
+
+    @api.onchange("work_entry_type_id", "work_entry_type_request_unit", "last_several_days")
+    def _onchange_request_duration_unit(self):
+        for leave in self:
+            leave._ensure_request_duration()
+
+    @api.onchange("request_duration", "work_entry_type_id")
+    def _onchange_request_duration(self):
+        for leave in self:
+            leave._apply_request_duration()
+
+    def _ensure_request_duration(self):
+        allowed = self._get_allowed_request_durations()
+        if not allowed:
+            self.request_duration = False
             return
+        previous_duration = self.request_duration
+        if self.last_several_days or self.work_entry_type_request_unit == "day":
+            self.request_duration = "full"
+        elif self.work_entry_type_request_unit == "hour":
+            if not self.request_duration or self.request_duration not in allowed:
+                self.request_duration = "specific"
+        elif not self.request_duration or self.request_duration not in allowed:
+            self.request_duration = "full"
+        if previous_duration != self.request_duration:
+            self._apply_request_duration()
 
-        domain = [('calendar_id', '=', self.employee_id.resource_calendar_id.id)]
-        attendances = self.env['resource.calendar.attendance'].search(domain, order='dayofweek, day_period DESC')
+    def _apply_request_duration(self):
+        for leave in self:
+            if not leave.request_duration:
+                continue
+            if leave.work_entry_type_request_unit == "half_day":
+                if leave.request_duration == "full":
+                    leave.request_date_from_period = "am"
+                    leave.request_date_to_period = "pm"
+                elif leave.request_duration in ("am", "pm"):
+                    leave.request_date_from_period = leave.request_duration
+                    leave.request_date_to_period = leave.request_duration
+            elif leave.work_entry_type_request_unit == "hour":
+                if leave.request_duration == "full":
+                    leave._set_request_hours()
+                elif leave.request_duration == "am":
+                    leave._set_request_hours(day_period="morning")
+                elif leave.request_duration == "pm":
+                    leave._set_request_hours(day_period="afternoon")
 
-        first_day = fields.Date.from_string(date_from)
-        last_day = fields.Date.from_string(date_to)
-
-        if self.request_unit_all in ['day', 'half']:
-            last_day = first_day
-
-        # find first attendance coming after first_day
-        attendance_from = next((att for att in attendances if int(att.dayofweek) >= first_day.weekday()), attendances[0])
-        # find last attendance coming before last_day
-        attendance_to = next((att for att in reversed(attendances) if int(att.dayofweek) <= last_day.weekday()), attendances[-1])
-
-        if self.request_unit_all == 'day' or (self.request_unit_all == 'period' and self.leave_type_request_unit == 'day'):
-            hour_from = float_to_time(attendance_from.hour_from)
-            hour_to = float_to_time(attendance_to.hour_to)
-
-        elif self.request_unit_all == 'half':
-            hour_from = float_to_time(attendance_from.hour_from if self.request_date_from_period == 'am' else attendance_to.hour_from)
-            hour_to = float_to_time(attendance_from.hour_to if self.request_date_from_period == 'am' else attendance_to.hour_to)
-
-        elif self.request_unit_all == 'period' and self.leave_type_request_unit == 'half':
-            hour_from = float_to_time(attendance_from.hour_from if self.request_date_from_period == 'am' else attendance_from.hour_to)
-            hour_to = float_to_time(attendance_to.hour_from if self.request_date_to_period == 'am' else attendance_to.hour_to)
-
-        if self.leave_type_request_unit == 'hour' and self.request_unit_all == 'period':
-            date_from = fields.Datetime.from_string(date_from)
-            date_to = fields.Datetime.from_string(date_to)
+    def _set_request_hours(self, day_period=None):
+        if not (self.employee_id and self.request_date_from and self.request_date_to):
+            return
+        if day_period:
+            hour_from, _ = self._get_hour_from_to(self.request_date_from, self.request_date_from, day_period)
+            _, hour_to = self._get_hour_from_to(self.request_date_to, self.request_date_to, day_period)
         else:
-            tz = self.env.user.tz or 'UTC'
-            date_from = timezone(tz).localize(datetime.combine(first_day, hour_from)).astimezone(UTC)
-            date_to = timezone(tz).localize(datetime.combine(last_day, hour_to)).astimezone(UTC)
+            hour_from, hour_to = self._get_hour_from_to(self.request_date_from, self.request_date_to)
+        self.request_hour_from = hour_from
+        self.request_hour_to = hour_to
 
-        self.date_from = date_from
-        self.date_to = date_to
+    @api.depends(*POSITION_DEPENDS)
+    @api.depends_context('uid', 'tz')
+    def _compute_request_date_hour_from(self):
+        """ Wall clock of the request, restamped in the reader's timezone: 8:00 in Tokyo
+        looks like 8:00 in Brussels. """
+        reader_tz = self._reader_tz()
+        for leave in self:
+            leave.request_date_hour_from = leave._get_request_date_hours(reader_tz)[0]
 
-        if not (self.leave_type_request_unit == 'hour' and self.request_unit_all == 'period'):
-            date_from = date_from
-            date_to = date_to
+    @api.depends(*POSITION_DEPENDS)
+    @api.depends_context('uid', 'tz')
+    def _compute_request_date_hour_to(self):
+        """ The end of the request, see _compute_request_date_hour_from. """
+        reader_tz = self._reader_tz()
+        for leave in self:
+            leave.request_date_hour_to = leave._get_request_date_hours(reader_tz)[1]
 
-        self.number_of_days_temp = self._get_number_of_days(date_from, date_to, self.employee_id.id)
+    def _reader_tz(self):
+        """Return the timezone the request is read in, the one the web client draws it on.
 
-    @api.onchange('request_unit_day')
-    def _onchange_request_unit_day(self):
-        self.request_unit_all = self.request_unit_day
-
-    @api.onchange('holiday_type')
-    def _onchange_type(self):
-        if self.holiday_type == 'employee' and not self.employee_id:
-            if self.env.user.employee_ids:
-                self.employee_id = self.env.user.employee_ids[0]
-        elif self.holiday_type == 'department':
-            if self.env.user.employee_ids:
-                self.department_id = self.department_id or self.env.user.employee_ids[0].department_id
-            self.employee_id = None
-        elif self.holiday_type == 'category':
-            self.employee_id = None
-            self.department_id = None
-
-    @api.onchange('date_from')
-    def _onchange_date_from(self):
-        """ If there are no date set for date_to, automatically set one 8 hours later than
-            the date_from. Also update the number_of_days.
+        :rtype: zoneinfo.ZoneInfo
         """
-        date_from = fields.Datetime.from_string(self.date_from)
-        date_to = fields.Datetime.from_string(self.date_to)
+        return self.env.tz
 
-        # No date_to set so far: automatically compute one 8 hours later
-        if date_from and not date_to:
-            date_to = date_from + timedelta(hours=self.employee_id.resource_calendar_id.hours_per_day)
-            self.date_to = date_to
+    def _get_request_date_hours(self, reader_tz):
+        """Return the bounds a calendar view draws the request on.
 
-        self.request_date_from = date_from.date() if date_from else False
-        self.request_date_to = date_to.date() if date_to else False
+        Requests in hours return their ``date_from``/``date_to`` with the wall clock of the
+        request's timezone restamped in ``reader_tz`` (8:00 in Tokyo is drawn at 8:00 in
+        Brussels). Days and half days return midnight or noon of their first and last days in
+        ``reader_tz``, so that moving them by half a day is moving them by one period.
 
-        if (date_from and date_to) and (date_from.day < date_to.day):
-            self.request_unit_all = 'period'
-            self.request_unit_day = 'period'
-
-        # Compute and update the number of days
-        if (date_to and date_from) and (date_from <= date_to):
-            self.number_of_days_temp = self._get_number_of_days(date_from, date_to, self.employee_id.id)
-        else:
-            self.number_of_days_temp = 0
-
-    @api.onchange('date_to')
-    def _onchange_date_to(self):
-        """ Update the number_of_days. """
-        date_from = fields.Datetime.from_string(self.date_from)
-        date_to = fields.Datetime.from_string(self.date_to)
-
-        self.request_date_from = date_from.date() if date_from else False
-        self.request_date_to = date_to.date() if date_to else False
-
-        if (date_from and date_to) and (date_from.day < date_to.day):
-            self.request_unit_all = 'period'
-            self.request_unit_day = 'period'
-
-        # Compute and update the number of days
-        if (date_to and date_from) and (date_from <= date_to):
-            self.number_of_days_temp = self._get_number_of_days(date_from, date_to, self.employee_id.id)
-        else:
-            self.number_of_days_temp = 0
-
-    @api.onchange('employee_id')
-    def _onchange_employee_id(self):
-        self.manager_id = self.employee_id and self.employee_id.parent_id
-        self.department_id = self.employee_id.department_id
-
-    @api.multi
-    @api.depends('number_of_days_temp')
-    def _compute_number_of_days(self):
-        for holiday in self:
-            holiday.number_of_days = -holiday.number_of_days_temp
-
-    @api.multi
-    @api.depends('number_of_days_temp')
-    def _compute_number_of_hours(self):
-        for holiday in self:
-            holiday.number_of_hours = holiday.number_of_days_temp * self.employee_id.resource_calendar_id.hours_per_day
-
-    @api.multi
-    def _compute_can_reset(self):
-        """ User can reset a leave request if it is its own leave request
-            or if he is an Hr Manager.
+        :param zoneinfo.ZoneInfo reader_tz: timezone of the reader, see :meth:`_reader_tz`
+        :return: ``(start, stop)`` naive UTC datetimes, ``(False, False)`` without request dates
+        :rtype: tuple
         """
-        user = self.env.user
-        group_hr_manager = self.env.ref('hr_holidays.group_hr_holidays_manager')
-        for holiday in self:
-            if group_hr_manager in user.groups_id or holiday.employee_id and holiday.employee_id.user_id == user:
-                holiday.can_reset = True
+        self.ensure_one()
+        if self.work_entry_type_request_unit == 'hour':
+            leave_tz = ZoneInfo(self.tz or 'UTC')
+            return tuple(
+                value and convert_timezone(value, leave_tz, reader_tz).replace(microsecond=0)
+                for value in (self.date_from, self.date_to)
+            )
+        if not (self.request_date_from and self.request_date_to):
+            return (False, False)
+        is_half_day = self.work_entry_type_request_unit == 'half_day'
+        start = datetime.combine(self.request_date_from, time.min) + timedelta(
+            hours=12 if is_half_day and self.request_date_from_period == 'pm' else 0)
+        stop = datetime.combine(self.request_date_to, time.min) + timedelta(
+            hours=12 if is_half_day and self.request_date_to_period == 'am' else 24)
+        # same as stamping and converting, 20x cheaper -- runs for every request read
+        return start - reader_tz.utcoffset(start), stop - reader_tz.utcoffset(stop)
 
-    @api.depends('employee_id', 'department_id')
-    def _compute_can_approve(self):
-        """ User can only approve a leave request if it is not his own
-            Exception : User is holiday manager and has no manager
+    def _get_generated_leave_domain(self):
+        """Return the domain of the leaves generated by time rules (outputs and remainders).
+
+        :rtype: odoo.fields.Domain
         """
-        for holiday in self:
-            # User is holiday manager and has no manager
-            manager = self.user_has_groups('hr_holidays.group_hr_holidays_manager')
-            holiday.can_approve = (holiday.employee_id.user_id.id != self.env.uid) or manager
+        return Domain('source_leave_id', '!=', False) | Domain('time_rule_id', '!=', False)
+
+    @api.depends('employee_id', 'state', 'request_date_from', 'request_date_to',
+            'request_hour_from', 'request_hour_to', 'request_date_from_period', 'request_date_to_period')
+    def _compute_dashboard_warning_message(self):
+        not_generated = ~self._get_generated_leave_domain()
+        check_warning_leaves = self.filtered_domain(
+            Domain('state', 'not in', ('refuse', 'cancel'))
+            & Domain('work_entry_type_id.allow_request_on_top', '=', False)
+            & not_generated
+        )
+        (self - check_warning_leaves).dashboard_warning_message = False
+        if not check_warning_leaves:
+            return
+        all_leaves = self.search(
+            Domain('date_from', '<', max(check_warning_leaves.mapped('date_to')))
+            & Domain('date_to', '>', min(check_warning_leaves.mapped('date_from')))
+            & Domain('employee_id', 'in', check_warning_leaves.employee_id.ids)
+            & Domain('work_entry_type_id.allow_request_on_top', '=', False)
+            & Domain('state', 'not in', ['cancel', 'refuse'])
+        )
+        for holiday in check_warning_leaves:
+            conflicting_holidays = all_leaves.filtered_domain([
+                ('employee_id', 'in', holiday.employee_id.ids),
+                ('count_as', '=', holiday.count_as),
+                ('date_from', '<', holiday.date_to),
+                ('date_to', '>', holiday.date_from),
+                ('id', 'not in', holiday.ids),
+            ])
+            if not conflicting_holidays:
+                holiday.dashboard_warning_message = False
+                continue
+
+            conflicting_holidays_list = []
+            # Do not display the name of the employee if the conflicting holidays have an employee_id.user_id equivalent to the user id
+            holidays_only_have_uid = bool(holiday.employee_id)
+            holiday_states = dict(conflicting_holidays.fields_get(allfields=['state'])['state']['selection'])
+            for conflicting_holiday in conflicting_holidays:
+                conflicting_holiday_data = {
+                    'employee_name': conflicting_holiday.employee_id.name,
+                    'date_from': format_date(self.env, min(conflicting_holiday.mapped('date_from'))),
+                    'date_to': format_date(self.env, min(conflicting_holiday.mapped('date_to'))),
+                    'state': holiday_states[conflicting_holiday.state]
+                }
+                if conflicting_holiday.employee_id.user_id.id != self.env.uid:
+                    holidays_only_have_uid = False
+                if conflicting_holiday_data not in conflicting_holidays_list:
+                    conflicting_holidays_list.append(conflicting_holiday_data)
+
+            msg = ""
+            if holidays_only_have_uid:
+                msg = self.env._('You\'ve already booked time off which overlaps with this period:')
+            else:
+                msg = self.env._('An employee already booked time off which overlaps with this period:')
+
+            holiday.dashboard_warning_message = msg + "".join(
+                ('\n' + (self.env._('%(employee_name)s from %(date_from)s to %(date_to)s - %(state)s') % {
+                    'employee_name': conflicting_holiday_data['employee_name'] if not holidays_only_have_uid else "",
+                    'date_from': conflicting_holiday_data['date_from'],
+                    'date_to': conflicting_holiday_data['date_to'],
+                    'state': conflicting_holiday_data['state']
+                }).lstrip()) for conflicting_holiday_data in conflicting_holidays_list
+            )
+
+    @api.depends_context('uid')
+    def _compute_description(self):
+        self.check_access('read')
+
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+
+        for leave in self:
+            if is_officer or leave.user_id == self.env.user or leave.employee_id.leave_manager_id == self.env.user:
+                leave.name = leave.sudo().private_name
+            else:
+                leave.name = '*****'
+
+    def _inverse_description(self):
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+
+        for leave in self:
+            if is_officer or leave.user_id == self.env.user or leave.employee_id.leave_manager_id == self.env.user:
+                leave.sudo().private_name = leave.name
+
+    def _search_description(self, operator, value):
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+        domain = Domain('private_name', operator, value)
+
+        if not is_officer:
+            domain &= Domain('user_id', '=', self.env.user.id)
+        query = self.sudo()._search(domain)
+        return Domain('id', 'in', query)
+
+    def _search_request_date_hour_from(self, operator, value):
+        return self._get_search_request_date_hour_from_to_domain('request_date_from', 'request_hour_from', operator, value)
+
+    def _search_request_date_hour_to(self, operator, value):
+        return self._get_search_request_date_hour_from_to_domain('request_date_to', 'request_hour_to', operator, value)
+
+    def _get_search_request_date_hour_from_to_domain(self, date_field, hour_field, operator, value):
+        """Search ``request_date_hour_from``/``request_date_hour_to`` on the stored request fields.
+
+        Mirrors :meth:`_get_request_date_hours`: the day is compared on ``date_field``, the hour
+        on ``hour_field`` for requests in hours, on the period for half days.
+
+        :param str date_field: ``'request_date_from'`` or ``'request_date_to'``
+        :param str hour_field: ``'request_hour_from'`` or ``'request_hour_to'``
+        :rtype: odoo.fields.Domain
+        """
+        if not isinstance(value, datetime):
+            # a bare False asks about the day, not the moment
+            return Domain(date_field, operator, value)
+        localized_value = value.replace(tzinfo=UTC).astimezone(self._reader_tz())
+        day, hour = localized_value.date(), time_to_float(localized_value.time())
+        # '=' and '!=' both ask about the moment itself; the negation comes after
+        hour_operator = '=' if operator in ('=', '!=') else operator
+        stands = {'=': py_operator.eq, '<': py_operator.lt, '<=': py_operator.le,
+                  '>': py_operator.gt, '>=': py_operator.ge}[hour_operator]
+        # mirrors _get_request_date_hours
+        starts = date_field == 'request_date_from'
+        half_day_hours = {'am': 0.0, 'pm': 12.0} if starts else {'am': 12.0, 'pm': 24.0}
+        # a whole day starts where its morning does and ends where its afternoon does
+        whole_day = half_day_hours['am' if starts else 'pm']
+        spans_the_day = Domain.TRUE if stands(whole_day, hour) else Domain.FALSE
+        # hours left unset: the request stands where its schedule does, the whole day
+        no_hours = Domain('request_hour_from', '=', 0) & Domain('request_hour_to', '=', 0)
+        on_hour = Domain.OR([
+            Domain('work_entry_type_request_unit', '=', 'hour') & Domain.OR([
+                ~no_hours & Domain(hour_field, hour_operator, hour),
+                no_hours & spans_the_day,
+            ]),
+            Domain('work_entry_type_request_unit', '=', 'half_day') & Domain.OR([
+                Domain(f'{date_field}_period', '=', period)
+                for period, stands_on in half_day_hours.items()
+                if stands(stands_on, hour)
+            ]),
+            Domain('work_entry_type_request_unit', 'not in', ('hour', 'half_day')) & spans_the_day,
+        ])
+        if operator in ('=', '!='):
+            same_moment = Domain(date_field, '=', day) & on_hour
+            return same_moment if operator == '=' else ~same_moment
+        # on the day it names the hour decides, so the day is compared strictly
+        beyond_the_day = {'>=': '>', '<=': '<'}.get(operator, operator)
+        return Domain(date_field, beyond_the_day, day) | (Domain(date_field, '=', day) & on_hour)
+
+    @api.depends('employee_id', 'request_date_from', 'request_date_to')
+    def _compute_resource_calendar_id(self):
+        leaves_without_emp_or_date, valid_leaves = self.partitioned(
+            lambda leave: not (leave.employee_id and leave.request_date_from and leave.request_date_to)
+        )
+        leaves_without_emp_or_date.resource_calendar_id = self.env.company.resource_calendar_id
+        if not valid_leaves:
+            return
+        employees_by_dates = defaultdict(lambda: self.env['hr.employee'])
+        contracts_by_employee = dict(
+            self.env['hr.version']._read_group(
+                domain=[('employee_id', 'in', self.employee_id.ids)],
+                groupby=['employee_id'],
+                aggregates=['id:recordset']
+            )
+        )
+        for leave in valid_leaves:
+            employees_by_dates[leave.request_date_from] += leave.employee_id
+        calendar_by_dates = {date_from: employees._get_calendars(date_from) for date_from, employees in employees_by_dates.items()}
+        for leave in valid_leaves:
+            calendar = calendar_by_dates.get(leave.request_date_from, {}).get(leave.employee_id.id) \
+                        or self.env.company.resource_calendar_id
+            # We use the request dates to find the contracts, because date_from
+            # and date_to are not set yet at this point. Since these dates are
+            # used to get the contracts for which these leaves apply and
+            # contract start- and end-dates are just dates (and not datetimes)
+            # these dates are comparable.
+            contracts = contracts_by_employee.get(leave.employee_id, self.env['hr.version']).filtered(
+                lambda c: c.date_start <= leave.request_date_to and
+                          (not c.date_end or c.date_end >= leave.request_date_from))
+            if contracts:
+                # If there are more than one contract they should all have the
+                # same calendar, otherwise a constraint is violated.
+                calendar = contracts[:1].resource_calendar_id
+            leave.resource_calendar_id = calendar
+
+    def _get_overlapping_contracts(self):
+        """Return the versions in contract of the employee overlapping the request dates.
+
+        :rtype: hr.version
+        """
+        self.ensure_one()
+        domain = Domain.AND([
+            Domain('employee_id', '=', self.employee_id.id),
+            Domain('active', '=', True),
+            Domain('contract_date_start', '<=', self.date_to),
+            Domain.OR([
+                Domain('contract_date_end', '>=', self.date_from),
+                Domain('contract_date_end', '=', False),
+            ])
+        ])
+        versions = self.env['hr.version'].sudo().search(domain)
+        return versions.filtered(lambda v: v._is_overlapping_period(self.request_date_from, self.request_date_to))
 
     @api.constrains('date_from', 'date_to')
-    def _check_date(self):
-        for holiday in self:
-            domain = [
-                ('date_from', '<=', holiday.date_to),
-                ('date_to', '>=', holiday.date_from),
-                ('employee_id', '=', holiday.employee_id.id),
-                ('id', '!=', holiday.id),
-                ('state', 'not in', ['cancel', 'refuse']),
-            ]
-            nholidays = self.search_count(domain)
-            if nholidays:
-                raise ValidationError(_('You can not have 2 leaves that overlaps on the same day.'))
+    def _check_contracts(self):
+        """Forbid a time off over several versions with different working schedules.
 
-    @api.constrains('state', 'number_of_days_temp', 'holiday_status_id')
-    def _check_holidays(self):
-        for holiday in self:
-            if holiday.holiday_type != 'employee' or not holiday.employee_id or holiday.holiday_status_id.limit or holiday.holiday_status_id.negative:
+        A time off can still end up across such versions when the versions are changed after
+        its creation (``hr.version`` then splits it, see ``hr_holidays``'s ``hr.version``).
+        Skipped with the context key ``skip_leave_version_check`` and for time rule outputs.
+        """
+        if self.env.context.get('skip_leave_version_check'):
+            return
+        for holiday in self.filtered(lambda h: h.employee_id and not h.time_rule_id):
+            versions = holiday._get_overlapping_contracts()
+            if len(versions.resource_calendar_id) > 1:
+                raise ValidationError(
+                    self.env._("""A leave cannot be set across multiple versions with different working schedules.
+
+    Please create one time off for each version period.
+
+    Time off:
+    %(time_off)s
+
+    Versions:
+    %(versions)s""",
+                      time_off=holiday.display_name,
+                      versions='\n'.join(_(
+                          "- '%(version)s' from %(start_date)s to %(end_date)s",
+                          version=version.name or version.employee_id.name,
+                          start_date=format_date(self.env, version.date_start),
+                          end_date=format_date(self.env, version.date_end) if version.date_end else self.env._("undefined"),
+                      ) for version in versions)))
+
+    @api.depends('request_date_from_period', 'request_date_to_period', 'request_hour_from',
+                 'request_hour_to', 'request_date_from', 'request_date_to', 'employee_id',
+                 'work_entry_type_id')
+    def _compute_date_from_to(self):
+        """Compute ``date_from`` and ``date_to`` (naive UTC) from the request fields.
+
+        The bounds are taken in the employee's timezone: requests in hours use
+        ``request_hour_from``/``request_hour_to`` (or the hours of the schedule when both are
+        ``0``), half days the hours of the morning or afternoon, days the first and last
+        working hours of the first and last days (see :meth:`_get_hour_from_to`). Time rule
+        outputs and trimmed sources keep the dates written by the time rules.
+        """
+        if self.env.context.get('leave_skip_date_from_to_computation'):
+            for leave in self:
+                leave.date_from = leave._origin.date_from or leave.date_from
+                leave.date_to = leave._origin.date_to or leave.date_to
+            return
+
+        # rule-managed leaves carry exact rule-assigned dates; don't recompute from request fields
+        for leave in self.filtered('source_leave_id'):
+            leave.date_from = leave._origin.date_from
+            leave.date_to = leave._origin.date_to
+
+        # rule-trimmed source leaves: engine wrote a sub-day end; preserve it
+        trimmed_sources = self.filtered(
+            lambda l: not l.source_leave_id and (
+                l.is_time_rule_trimmed or self.env.context.get('leave_time_rule_trim')
+            )
+        )
+        for leave in trimmed_sources:
+            if not self.env.context.get('leave_time_rule_trim'):
+                # outside an engine write: restore the committed engine dates from DB
+                leave.date_from = leave._origin.date_from or leave.date_from
+                leave.date_to = leave._origin.date_to or leave.date_to
+            # inside an engine write: dates are already in cache from the write; leave them
+
+        for holiday in self.filtered(lambda l: not l.source_leave_id and l not in trimmed_sources):
+            is_calendar_leave = holiday.work_entry_type_id.count_days_as == 'calendar'
+            if not holiday.request_date_from or not holiday.request_date_to:
+                holiday.date_from = False
+                holiday.date_to = False
                 continue
-            leave_days = holiday.holiday_status_id.get_days(holiday.employee_id.id)[holiday.holiday_status_id.id]
-            if float_compare(leave_days['remaining_leaves'], 0, precision_digits=2) == -1 or \
-              float_compare(leave_days['virtual_remaining_leaves'], 0, precision_digits=2) == -1:
-                raise ValidationError(_('The number of remaining leaves is not sufficient for this leave type.\n'
-                                        'Please also check the leaves waiting for validation.'))
 
-    def _get_number_of_days(self, date_from, date_to, employee_id):
-        """ Returns a float equals to the timedelta between two dates given as string."""
-        if employee_id:
-            employee = self.env['hr.employee'].browse(employee_id)
-            return employee.get_work_days_data(date_from, date_to)['days']
+            if not holiday.request_date_from:
+                holiday.date_from = False
+                continue
 
-        time_delta = date_to - date_from
-        return math.ceil(time_delta.days + float(time_delta.seconds) / 86400)
+            if not holiday.request_date_to:
+                holiday.date_to = False
+                continue
+
+            if holiday.work_entry_type_request_unit == 'hour':
+                hour_from = holiday.request_hour_from
+                hour_to = holiday.request_hour_to
+                # both falsy means the hours were never initialized yet, a real
+                # request never has the same from and to hour
+                if not hour_from and not hour_to:
+                    hour_from, hour_to = holiday._get_hour_from_to(holiday.request_date_from, holiday.request_date_to)
+
+            elif holiday.work_entry_type_request_unit == 'half_day':
+                period_map = {'am': 'morning', 'pm': 'afternoon'}
+                from_period = period_map.get(holiday.request_date_from_period)
+                to_period = period_map.get(holiday.request_date_to_period)
+                if holiday.request_date_from == holiday.request_date_to:
+                    day_period = from_period if from_period == to_period else None
+                    hour_from, hour_to = holiday._get_hour_from_to(holiday.request_date_from, holiday.request_date_to,
+                        day_period, count_non_working_days=is_calendar_leave)
+                else:
+                    hour_from, _ = holiday._get_hour_from_to(holiday.request_date_from, holiday.request_date_from, from_period, count_non_working_days=is_calendar_leave)
+                    _, hour_to = holiday._get_hour_from_to(holiday.request_date_to, holiday.request_date_to, to_period, count_non_working_days=is_calendar_leave)
+
+            else:
+                hour_from, hour_to = holiday._get_hour_from_to(holiday.request_date_from, holiday.request_date_to, count_non_working_days=is_calendar_leave)
+
+            holiday.date_from = self._to_utc(holiday.request_date_from, hour_from, holiday.employee_id or holiday)
+            holiday.date_to = self._to_utc(holiday.request_date_to, hour_to, holiday.employee_id or holiday)
+
+    def reschedule_from_calendar(self, date_from, date_to):
+        """Move a request to the bounds a calendar view displays.
+
+        Converts ``date_from``/``date_to`` with :meth:`_get_request_vals_from_date_hours` and
+        writes the request fields. An approved request needing validation goes back to
+        ``'confirm'``.
+
+        :param date_from: new start, as displayed (``request_date_hour_from``)
+        :param date_to: new end, as displayed (``request_date_hour_to``)
+        """
+        self.ensure_one()
+        vals = self._get_request_vals_from_date_hours(
+            fields.Datetime.to_datetime(date_from), fields.Datetime.to_datetime(date_to))
+        if not vals:
+            return
+        if self.state in ('validate', 'validate1') and self.validation_type != 'no_validation':
+            vals['state'] = 'confirm'
+        self.write(vals)
+
+    def _get_employee_domain(self):
+        domain = [
+            ('active', '=', True),
+            ('company_id', 'in', self.env.companies.ids),
+        ]
+        if not self.env.user.has_group('hr_holidays.group_hr_holidays_user'):
+            domain += [
+                '|',
+                ('user_id', '=', self.env.uid),
+                ('leave_manager_id', '=', self.env.uid),
+            ]
+        return domain
+
+    @api.depends('employee_id')
+    def _compute_department_id(self):
+        for holiday in self:
+            holiday.department_id = holiday.employee_id.department_id
+
+    @api.depends('request_date_from', 'request_date_to', 'work_entry_type_id')
+    def _compute_has_mandatory_day(self):
+        date_from, date_to = min(self.mapped('request_date_from')), max(self.mapped('request_date_to'))
+        if date_from and date_to:
+            # Sudo to get access to version fields on employee (job_id)
+            mandatory_days = self.employee_id.sudo()._get_mandatory_days(
+                date_from,
+                date_to,
+            )
+
+            for leave in self:
+                department_ids = leave.employee_id.department_id.ids
+                domain = [
+                    ('start_date', '<=', leave.request_date_to),
+                    ('end_date', '>=', leave.request_date_from),
+                    '|',
+                        ('resource_calendar_id', '=', False),
+                        ('resource_calendar_id', '=', leave.resource_calendar_id.id),
+                ]
+                if department_ids:
+                    domain += [
+                        '|',
+                        ('department_ids', '=', False),
+                        ('department_ids', 'parent_of', department_ids),
+                    ]
+                else:
+                    domain += [('department_ids', '=', False)]
+
+                leave.has_mandatory_day = leave.request_date_from and leave.request_date_to and mandatory_days.filtered_domain(domain)
+        else:
+            self.has_mandatory_day = False
+
+    @api.depends('number_of_days')
+    def _compute_work_entry_type_increases_duration(self):
+        durations = self._get_durations(check_work_entry_type=False)
+        for leave in self:
+            days = durations[leave.id][0]
+            if leave.work_entry_type_request_unit == 'day' and leave.work_entry_type_requires_allocation and days < leave.number_of_days:
+                leave.work_entry_type_increases_duration = self.env._("According to your working schedule you are expected to work"
+                " %(days)s days in this period, but %(nb_days)s days will be used because this leave"
+                " %(work_entry_type_name)s can only be taken by days.",
+                days=days, nb_days=leave.number_of_days, work_entry_type_name=leave.work_entry_type_id.name)
+            else:
+                leave.work_entry_type_increases_duration = ''
+
+    def _get_durations(self, check_work_entry_type=True, resource_calendar=None, additional_domain=None):
+        """Compute the duration of the requests without assigning the fields.
+
+        Factored out of ``_compute_duration`` so it can be called or overridden without
+        triggering the computes depending on ``number_of_days``/``number_of_hours``. The hours
+        are the working hours of the schedule within ``[date_from, date_to]``, minus the absence
+        leaves: public holidays (unless the type has ``include_public_holidays_in_duration``) and
+        the other validated absences of the employee, but not the leave itself nor its time rule
+        source. Then:
+
+        - types counted in calendar days (``count_days_as = 'calendar'``) count every day;
+        - a flexible schedule counts the real length of a single-day request;
+        - types requested by day are rounded up to whole days, half days to half days;
+        - working time types outside the schedule count the days, or the clock hours.
+
+        :param bool check_work_entry_type: ``False`` to skip the rounding to whole days of the
+            types requested by day (gives the real number of working days)
+        :param resource_calendar: ``resource.calendar`` to use instead of
+            ``resource_calendar_id``
+        :param additional_domain: domain added to the one of the deducted leaves
+        :return: ``{leave.id: (number_of_days, number_of_hours)}``, ``(0, 0)`` for requests
+            without dates
+        :rtype: dict
+        """
+        result = {}
+        employee_leaves = self.filtered('employee_id')
+        employees_by_dates_calendar = defaultdict(lambda: self.env['hr.employee'])
+        for leave in employee_leaves:
+            if not leave.date_from or not leave.date_to:
+                continue
+            employees_by_dates_calendar[
+                leave.date_from,
+                leave.date_to,
+                leave.work_entry_type_id.include_public_holidays_in_duration,
+                resource_calendar or leave.resource_calendar_id
+            ] += leave.employee_id
+        # We force the company in the domain as we are more than likely in a compute_sudo
+        domain = [('count_as', '=', 'absence'),
+                  ('company_id', 'in', self.env.companies.ids + self.env.context.get('allowed_company_ids', [])),
+                  # When searching for resource leave intervals, we exclude the one that
+                  # is related to the leave we're currently trying to compute for, and the one
+                  # of its time rule source, which can still span the output while it is created.
+                  '|', ('holiday_id', '=', False),
+                  ('holiday_id', 'not in', (employee_leaves | employee_leaves.source_leave_id).ids)]
+        if additional_domain:
+            domain = Domain.AND([domain, additional_domain])
+        # Precompute values in batch for performance purposes
+        work_time_per_day_mapped = {
+            (date_from, date_to, include_public_holidays_in_duration, calendar): employees.with_context(
+                    compute_leaves=not include_public_holidays_in_duration)._list_work_time_per_day(date_from, date_to, domain=domain, calendar=calendar)
+            for (date_from, date_to, include_public_holidays_in_duration, calendar), employees in employees_by_dates_calendar.items()
+        }
+        work_days_data_mapped = {
+            (date_from, date_to, include_public_holidays_in_duration, calendar): employees._get_work_days_data_batch(date_from, date_to, compute_leaves=not include_public_holidays_in_duration, domain=domain, calendar=calendar)
+            for (date_from, date_to, include_public_holidays_in_duration, calendar), employees in employees_by_dates_calendar.items()
+        }
+
+        min_start = max_end = False
+        for rec in self:
+            start = rec.request_date_from
+            end = rec.request_date_to
+            if start:
+                min_start = start if not min_start or start < min_start else min_start
+            if end:
+                max_end = end if not max_end or end > max_end else max_end
+
+        public_holidays = self.env['resource.calendar.leaves']
+        if min_start and max_end:
+            public_holidays = public_holidays.search([
+                ('resource_id', '=', False),
+                ('company_id', 'in', self.company_id.ids),
+                ('date_from', '<=', max_end),
+                ('date_to', '>=', min_start),
+            ])
+
+        public_holidays_per_company = public_holidays.grouped('company_id')
+        for leave in self:
+            calendar = resource_calendar or leave.resource_calendar_id
+            if not leave.date_from or not leave.date_to or (not calendar and not leave.employee_id):
+                result[leave.id] = (0, 0)
+                continue
+            is_calendar_days = False
+            if not leave.employee_id:
+                today_hours = calendar.get_work_hours_count(
+                    datetime.combine(leave.date_from.date(), time.min),
+                    datetime.combine(leave.date_from.date(), time.max),
+                    False)
+                hours = calendar.get_work_hours_count(leave.date_from, leave.date_to, compute_leaves=not leave.work_entry_type_id.include_public_holidays_in_duration)
+                days = hours / (today_hours or HOURS_PER_DAY)
+            elif leave.work_entry_type_id.count_days_as == 'calendar':
+                is_calendar_days = True
+                start_date = leave.request_date_from
+                end_date = leave.request_date_to
+                include_public = leave.work_entry_type_id.include_public_holidays_in_duration
+                day_start, day_end = leave.employee_id.sudo()._get_hours_for_date(start_date, count_non_working_days=True)
+
+                if leave.work_entry_type_request_unit == 'day':
+                    if include_public:
+                        days = (end_date - start_date).days + 1
+                    else:
+                        filtered_public_holiday = public_holidays.filtered(lambda h:
+                            (h.calendar_id == calendar or not h.calendar_id) and
+                            h.company_id == leave.company_id
+                        )
+                        days = ceil(leave._subtract_public_holidays(filtered_public_holiday) / 24)
+                    hours = days * (day_end - day_start)
+                else:
+                    # Partial Day Leave
+                    work_days_data = work_days_data_mapped[leave.date_from, leave.date_to, include_public, calendar][leave.employee_id.id]
+                    hours, days = work_days_data['hours'], work_days_data['days']
+
+                    # sudo as is_flexible is on version model and employee does not have access to it.
+                    if not calendar._is_flexible():
+                        # Identify workin days
+                        work_time_per_day_list = work_time_per_day_mapped[leave.date_from, leave.date_to, include_public, calendar][leave.employee_id.id]
+                        working_dates = {interval[0] for interval in work_time_per_day_list}
+
+                        total_dates = {
+                            day.date()
+                            for day in rrule.rrule(rrule.DAILY,
+                                                dtstart=leave.request_date_from,
+                                                until=leave.request_date_from + timedelta(days=(end_date - start_date).days)
+                                            )
+                        }
+                        # days of the public holidays, in the timezone of the employee
+                        tz = ZoneInfo(leave.employee_id.sudo()._get_tz())
+                        public_holiday_dates = set()
+                        for ph in public_holidays_per_company.get(leave.company_id, []):
+                            ph_start = ph.date_from.replace(tzinfo=UTC).astimezone(tz).date()
+                            ph_end = ph.date_to.replace(tzinfo=UTC).astimezone(tz).date()
+                            public_holiday_dates.update(
+                                ph_start + timedelta(days=day) for day in range((ph_end - ph_start).days + 1)
+                            )
+                        weekend_dates = total_dates - working_dates - public_holiday_dates
+
+                        if weekend_dates:
+                            if start_date == end_date:
+                                # Count only the hours within the calendar working range
+                                day_hours = min(day_end, leave.request_hour_to) - max(day_start, leave.request_hour_from)
+                                hours += max(0, day_hours)
+                                days += day_hours / calendar.hours_per_day
+                                weekend_dates.remove(start_date)
+                            else:
+                                if start_date in weekend_dates:
+                                    days += 0.5 if leave.request_date_from_period == 'pm' else 1
+                                    hours += max(0, day_end - max(day_start, leave.request_hour_from))
+                                    weekend_dates.remove(start_date)
+                                if end_date in weekend_dates:
+                                    days += 1 if leave.request_date_to_period == 'pm' else 0.5
+                                    hours += max(0, min(day_end, leave.request_hour_to) - day_start)
+                                    weekend_dates.remove(end_date)
+
+                            days += len(weekend_dates)
+                            hours += len(weekend_dates) * calendar.hours_per_day
+
+            # For flexible employees, if it's a single day leave, we force it to the real duration since the virtual intervals might not match reality on that day, especially for custom hours
+            # sudo as is_flexible is on version model and employee does not have access to it.
+            elif calendar._is_flexible() and leave.request_date_to == leave.request_date_from:
+                # Only subtract public holidays if the leave type does NOT include public holidays in duration.
+                # When include_public_holidays_in_duration is True ("Public Holiday Included" enabled),
+                # the leave should count the full day even if it falls on a public holiday.
+                filtered_public_holidays = public_holidays.filtered(lambda h:
+                    (h.calendar_id == calendar or not h.calendar_id) and
+                    h.company_id == leave.company_id
+                ) if not leave.work_entry_type_id.include_public_holidays_in_duration else self.env['resource.calendar.leaves']
+                hours = leave._subtract_public_holidays(filtered_public_holidays)
+                if leave.work_entry_type_request_unit != 'hour' and not public_holidays:
+                    days = 1 if leave.work_entry_type_request_unit != 'half_day' or leave.request_date_from_period != leave.request_date_to_period else 0.5
+                else:
+                    days = hours / 24
+            elif leave.work_entry_type_request_unit == 'day' and check_work_entry_type:
+                # list of tuples (day, hours)
+                work_time_per_day_list = work_time_per_day_mapped[leave.date_from, leave.date_to, leave.work_entry_type_id.include_public_holidays_in_duration, calendar][leave.employee_id.id]
+                days = len(work_time_per_day_list)
+                hours = sum(t[1] for t in work_time_per_day_list)
+                if (hours, days) == (0, 0) and leave.work_entry_type_id.count_as == "working_time":
+                    # outside the schedule working time is still valid, count the days.
+                    days = (leave.request_date_to - leave.request_date_from).days + 1
+                    hours_per_day = calendar.hours_per_day if calendar else leave.employee_id.sudo().resource_calendar_id.hours_per_day
+                    hours = days * (hours_per_day or HOURS_PER_DAY)
+            else:
+                work_days_data = work_days_data_mapped[leave.date_from, leave.date_to, leave.work_entry_type_id.include_public_holidays_in_duration, calendar][leave.employee_id.id]
+                hours, days = work_days_data['hours'], work_days_data['days']
+                if (hours, days) == (0, 0) and leave.work_entry_type_id.count_as == "working_time":
+                    # an end on the last microsecond of a day is that day's end
+                    hours = ceil((leave.date_to - leave.date_from).total_seconds()) / 3600
+            # The calendar days branch already returns a final duration, it must not be rounded again.
+            if not is_calendar_days:
+                if leave.work_entry_type_request_unit == 'day' and check_work_entry_type:
+                    if (leave.is_time_rule_trimmed or leave.source_leave_id) and hours > 0:
+                        # rule-split leaves report actual fraction
+                        hours_per_day = (calendar.hours_per_day if calendar else None) \
+                            or (leave.employee_id.sudo().resource_calendar_id.hours_per_day if leave.employee_id else HOURS_PER_DAY) \
+                            or HOURS_PER_DAY
+                        days = hours / hours_per_day
+                    else:
+                        days = ceil(days)
+                elif leave.work_entry_type_request_unit == 'half_day':
+                    days = float_round(days, precision_rounding=0.5)
+            if leave._plans_hours_on_the_clock(hours):
+                hours = ceil((leave.date_to - leave.date_from).total_seconds()) / 3600
+            result[leave.id] = (days, hours)
+        return result
+
+    @api.depends('date_from', 'date_to', 'resource_calendar_id')
+    def _compute_duration(self):
+        durations = self._get_durations()
+        for leave in self:
+            days, hours = durations.get(leave.id, (0, 0))
+            if float_compare(leave.number_of_days, days, precision_digits=2) != 0:
+                leave.number_of_days = days
+
+            if float_compare(leave.number_of_hours, hours, precision_digits=2) != 0:
+                leave.number_of_hours = hours
+
+    @api.depends('employee_company_id')
+    def _compute_company_id(self):
+        for holiday in self:
+            holiday.company_id = holiday.employee_company_id or holiday.department_id.company_id or self.env.company
+
+    @api.depends('request_date_from', 'request_date_to')
+    def _compute_last_several_days(self):
+        for holiday in self:
+            # an end before its start is a request half edited
+            holiday.last_several_days = holiday.request_date_from and holiday.request_date_to \
+                                        and holiday.request_date_to > holiday.request_date_from
+
+    @api.depends('tz')
+    @api.depends_context('uid')
+    def _compute_tz_mismatch(self):
+        for leave in self:
+            leave.tz_mismatch = leave.tz != self.env.user.tz
+
+    @api.depends('employee_id.tz')
+    def _compute_tz(self):
+        for leave in self:
+            tz = self.env.user.tz or 'UTC'
+            if leave.employee_id:
+                tz = leave.employee_id._get_tz(leave.date_from) or tz
+            leave.tz = tz
+
+    @api.depends('number_of_hours', 'number_of_days')
+    def _compute_duration_display(self):
+        for leave in self:
+            duration = float_round(leave.number_of_days, precision_digits=2)
+            unit = _('day') if duration == 1 else _('days')
+            display = "%g %s" % (duration, unit)
+            if leave.work_entry_type_request_unit == "hour" \
+                    or (leave.work_entry_type_request_unit in ('day', 'half_day')
+                        and (leave.is_time_rule_trimmed or leave.source_leave_id)
+                        and leave.number_of_hours > 0
+                        and leave.number_of_days < 1):
+                # hour-type leaves, and sub-day rule-split segments of day/half-day type,
+                # show H:MM hours for clarity instead of a fractional day count
+                hours, minutes = divmod(abs(leave.number_of_hours) * 60, 60)
+                minutes = round(minutes)
+                if minutes == 60:
+                    minutes = 0
+                    hours += 1
+                duration = '%d:%02d' % (hours, minutes)
+                unit = _("hours")
+                display = f"{duration} {unit}"
+            leave.duration_display = display
+
+    @api.model
+    def _get_request_duration(self, date_from, period_from, date_to, period_to):
+        """Return the ``request_duration`` of a request given its bounds.
+
+        :return: ``period_from`` (``'am'`` or ``'pm'``) for a lone half day, ``'full'`` otherwise
+        :rtype: str
+        """
+        return period_from if (date_from, period_from) == (date_to, period_to) else 'full'
+
+    def _get_request_vals_from_date_hours(self, date_hour_from, date_hour_to):
+        """Return the request values matching bounds drawn by a calendar view.
+
+        Reverse of :meth:`_get_request_date_hours`; the stop is exclusive, so 00:00 on D+1 ends
+        the afternoon of D. An empty bound keeps its current value.
+
+        :param datetime date_hour_from: new start, naive UTC
+        :param datetime date_hour_to: new end, naive UTC
+        :return: values to write (request dates, periods, hours, ``request_duration``), ``{}``
+            when the bounds are invalid or unchanged
+        :rtype: dict
+        """
+        self.ensure_one()
+        tz = self._reader_tz()
+        current_from, current_to = self._get_request_date_hours(tz)
+        # an empty bound means unmoved, not unset
+        date_hour_from = date_hour_from or current_from
+        date_hour_to = date_hour_to or current_to
+        if not (date_hour_from and date_hour_to):
+            return {}
+        date_hour_from = date_hour_from.replace(microsecond=0)
+        date_hour_to = date_hour_to.replace(microsecond=0)
+        if date_hour_to <= date_hour_from:
+            return {}
+        if (date_hour_from, date_hour_to) == (current_from, current_to):
+            # an echo of the compute, not a move: re-deriving would snap onto whole halves
+            return {}
+        local_from = date_hour_from.replace(tzinfo=UTC).astimezone(tz)
+        local_to = date_hour_to.replace(tzinfo=UTC).astimezone(tz)
+        local_to_incl = local_to - timedelta(seconds=1)
+
+        vals = {
+            'request_date_from': local_from.date(),
+            'request_date_to': local_to_incl.date(),
+            'request_duration': 'full',
+        }
+        unit = self.work_entry_type_request_unit
+        if unit == 'half_day':
+            from_period = 'am' if local_from.hour < 12 else 'pm'
+            to_period = 'am' if local_to_incl.hour < 12 else 'pm'
+            vals['request_date_from_period'] = from_period
+            vals['request_date_to_period'] = to_period
+            vals['request_duration'] = self._get_request_duration(
+                vals['request_date_from'], from_period, vals['request_date_to'], to_period)
+        elif unit == 'hour':
+            # a request_hour of 0 reads as unset everywhere: keep the hour it already has
+            vals['request_duration'] = 'specific'
+            vals['request_hour_from'] = (self.request_hour_from if local_from.time() == time.min
+                                         else time_to_float(local_from.time()))
+            vals['request_hour_to'] = 24.0 if local_to.time() == time.min else time_to_float(local_to.time())
+        elif self.request_date_from and self.request_date_to and (
+                local_from.time() != time.min or local_to.time() != time.min):
+            # days have no boundary to snap on: quantize the move on wall clocks, or the
+            # two bounds part ways at a change of offset
+            for fname, days_after, moved in (('request_date_from', 0, local_from),
+                                             ('request_date_to', 1, local_to)):
+                stood_on = datetime.combine(self[fname], time.min) + timedelta(days=days_after)
+                moved_by = (moved.replace(tzinfo=None) - stood_on).total_seconds() / 86400
+                vals[fname] = self[fname] + timedelta(days=int(float_round(moved_by, precision_digits=0)))
+        return vals
+
+    @api.onchange('request_date_hour_from', 'request_date_hour_to')
+    def _onchange_request_date_hour_from_to(self):
+        # an inverse never runs on a draft record, so the form maps the pair itself
+        if self.work_entry_type_request_unit != 'hour':
+            return
+        if vals := self._get_request_vals_from_date_hours(self.request_date_hour_from, self.request_date_hour_to):
+            self.update(vals)
+
+    def _inverse_request_date_hour_from_to(self):
+        moved_per_vals = defaultdict(self.browse)
+        for leave in self:
+            if vals := leave._get_request_vals_from_date_hours(leave.request_date_hour_from, leave.request_date_hour_to):
+                moved_per_vals[tuple(vals.items())] |= leave
+        for vals, moved in moved_per_vals.items():
+            moved.write(dict(vals))
+        # the datetimes are protected, so modified() propagates nothing
+        all_moved = self.browse().union(*moved_per_vals.values())
+        for fname in ('date_from', 'date_to', 'number_of_days', 'number_of_hours'):
+            field = self._fields[fname]
+            self.env.add_to_compute(field, all_moved - self.env.protected(field))
+
+    @api.onchange('number_of_hours')
+    def _onchange_number_of_hours(self):
+        # an inverse only runs at save, and the form needs the end to follow at once
+        if self.work_entry_type_request_unit != 'hour':
+            return
+        if self._origin and self.request_date_hour_to != self._origin.request_date_hour_to:
+            return  # the end moved, the duration only followed it
+        self._inverse_number_of_hours()
+
+    def _plans_hours_on_the_clock(self, worked_hours):
+        """Tell whether the duration in hours of the request is clock time.
+
+        True for working time types requested in hours when the request is on a single day or
+        covers no working time: the end is then ``date_from`` plus the duration, not planned on
+        the schedule.
+
+        :param float worked_hours: working hours of the schedule within the request days
+        :rtype: bool
+        """
+        self.ensure_one()
+        return (self.work_entry_type_id.count_as != 'absence' and self.work_entry_type_id.request_unit == 'hour'
+                and (self.request_date_from and self.request_date_from == self.request_date_to
+                     or float_is_zero(worked_hours, precision_digits=2)))
+
+    def _inverse_number_of_hours(self):
+        """Move the end of the requests to give them the ``number_of_hours`` set.
+
+        Only for requests to approve: the end is planned on the version's schedule from
+        ``date_from`` (or on the clock, see :meth:`_plans_hours_on_the_clock`) and written on
+        ``request_date_to``/``request_hour_to``.
+
+        :raise ValidationError: if the hours do not fit in the working time of the request days
+        """
+        # a duration is counted in worked hours, so the end is planned in them too
+        candidates = self.filtered(lambda leave: leave.employee_id and leave.request_date_from
+                                   and leave.date_from and leave.state == 'confirm')
+        implied = candidates._get_durations()
+        for leave in candidates:
+            _days, implied_hours = implied.get(leave.id, (0, 0))
+            if float_compare(leave.number_of_hours, implied_hours, precision_digits=2) == 0:
+                continue  # the dates already say this duration
+            calendar = leave.employee_id.sudo()._get_version(leave.request_date_from).resource_calendar_id
+            compute_leaves = not leave.work_entry_type_id.include_public_holidays_in_duration
+            # a request stands on the days it selects, so it is planned within them
+            days_start = leave._to_utc(leave.request_date_from, 0, leave.employee_id).replace(tzinfo=UTC)
+            days_end = leave._to_utc(leave.request_date_to + timedelta(days=1), 0, leave.employee_id).replace(tzinfo=UTC)
+            worked_hours = calendar.get_work_hours_count(days_start, days_end, compute_leaves=compute_leaves)
+            if leave._plans_hours_on_the_clock(worked_hours):
+                request_date_hour_to = leave.date_from + relativedelta(hours=leave.number_of_hours)
+            else:
+                request_date_hour_to = calendar.plan_hours(
+                    leave.number_of_hours,
+                    leave.date_from,
+                    compute_leaves=compute_leaves,
+                    resource=leave.employee_id.resource_id
+                )
+            if request_date_hour_to:
+                leave_tz = ZoneInfo(leave.tz or 'UTC')
+                if request_date_hour_to.tzinfo is None:
+                    request_date_hour_to = request_date_hour_to.replace(tzinfo=UTC)
+                if request_date_hour_to > days_end:
+                    raise ValidationError(self.env._(
+                        "A duration of %s per day does not fit in the working time of the selected dates.",
+                        format_duration(leave.number_of_hours)))
+                date_hour_to_user_tz = request_date_hour_to.astimezone(leave_tz).replace(tzinfo=None)
+                if date_hour_to_user_tz.time() == time.min and date_hour_to_user_tz.date() > leave.request_date_from:
+                    # an end at midnight ends the day before, not the next one
+                    date_hour_to_user_tz -= timedelta(microseconds=1)
+                new_request_date_to = date_hour_to_user_tz.date()
+                new_request_hour_to = time_to_float(date_hour_to_user_tz.time())
+                changes = {}
+                if leave.request_date_to != new_request_date_to:
+                    changes['request_date_to'] = new_request_date_to
+                if float_compare(leave.request_hour_to, new_request_hour_to, precision_digits=2) != 0:
+                    changes['request_hour_to'] = new_request_hour_to
+                if changes:
+                    # create() protects these fields while its inverses run, so an
+                    # assignment would reach the cache only and leave date_to stale
+                    leave.update(changes)
+
+                self.env.remove_to_compute(self._fields['work_entry_type_id'], leave)   # to stop onchange methods from resetting the wet chosen earlier
+
+    @api.depends_context('uid')
+    @api.depends('state', 'employee_id', 'department_id')
+    def _compute_can_approve(self):
+        for holiday in self:
+            holiday.can_approve = holiday._check_approval_update('validate1', raise_if_not_possible=False)
+
+    @api.depends_context('uid')
+    @api.depends('state', 'employee_id', 'department_id')
+    def _compute_can_back_to_approve(self):
+        for holiday in self:
+            holiday.can_back_to_approve = holiday._check_approval_update('confirm', raise_if_not_possible=False)
+
+    @api.depends_context('uid')
+    @api.depends('state', 'employee_id', 'department_id', 'validation_type', 'date_from')
+    def _compute_can_reschedule(self):
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+        today = fields.Date.context_today(self)
+        for holiday in self:
+            if holiday.state in ('validate', 'validate1') and holiday.validation_type != 'no_validation':
+                holiday.can_reschedule = holiday._check_approval_update('confirm', raise_if_not_possible=False)
+            elif holiday.state in ('confirm', 'validate', 'validate1'):
+                began_in_past = holiday.date_from and holiday.date_from.date() < today
+                holiday.can_reschedule = (
+                    (is_officer or not began_in_past or holiday.employee_id.leave_manager_id == self.env.user)
+                    and holiday.has_access('write')
+                )
+            else:
+                holiday.can_reschedule = False
+
+    @api.depends_context('uid')
+    @api.depends('state', 'employee_id', 'department_id')
+    def _compute_can_validate(self):
+        for holiday in self:
+            holiday.can_validate = holiday._check_approval_update('validate', raise_if_not_possible=False)
+
+    @api.depends_context('uid')
+    @api.depends('state', 'employee_id', 'department_id')
+    def _compute_can_refuse(self):
+        for holiday in self:
+            holiday.can_refuse = holiday._check_approval_update('refuse', raise_if_not_possible=False)
+
+    @api.depends_context('uid')
+    @api.depends('state', 'employee_id')
+    def _compute_can_cancel(self):
+        for holiday in self:
+            holiday.can_cancel = holiday._check_approval_update('cancel', raise_if_not_possible=False)
+
+    @api.depends('state')
+    def _compute_is_hatched(self):
+        for holiday in self:
+            holiday.is_striked = holiday.state == 'refuse'
+            holiday.is_hatched = holiday.state not in ['refuse', 'validate']
+
+    @api.depends('work_entry_type_support_document', 'attachment_ids')
+    def _compute_supported_attachment_ids(self):
+        for holiday in self:
+            holiday.supported_attachment_ids = holiday.attachment_ids
+            holiday.supported_attachment_ids_count = len(holiday.attachment_ids.ids)
+
+    @api.depends_context('uid')
+    def _compute_attachment_is_visible(self):
+        is_privileged_user = self.env.user.has_groups('hr_holidays.group_hr_holidays_user,hr_holidays.group_hr_holidays_manager')
+        for leave in self:
+            if (is_privileged_user or self.env.uid in (leave.user_id.id, leave.create_uid.id)):
+                leave.attachment_is_visible = True
+            else:
+                leave.attachment_is_visible = False
+
+    @api.depends('employee_id', 'work_entry_type_id')
+    def _compute_leaves(self):
+        date_from_fields = [field for field in ("default_request_date_hour_from", "default_request_date_from") if field in self.env.context]
+        date_from = fields.Date.from_string(self.env.context[date_from_fields[0]]) if date_from_fields else fields.Date.context_today(self)
+        balance_per_leave = self._get_allocation_balance(date_from)
+        for leave in self:
+            leave.virtual_remaining_leaves, leave.max_leaves = balance_per_leave[leave]
+
+    def _get_allocation_balance(self, target_date):
+        """Return the balance of the allocations each request can use on ``target_date``.
+
+        Counts the allocations not expired on ``target_date``, based on
+        :meth:`~odoo.addons.hr_holidays.models.hr_employee.HrEmployee._get_consumed_leaves`.
+
+        :param datetime.date target_date: date of the balance
+        :return: ``{leave: (virtual_remaining_leaves, max_leaves)}``, in the unit of the type
+            (``unit_of_measure``)
+        :rtype: dict
+        """
+        employee_days_per_allocation = self.employee_id._get_consumed_leaves(self.work_entry_type_id, target_date)[0]
+        balance_per_leave = {}
+        for leave in self:
+            virtual_remaining_leaves = 0
+            max_leaves = 0
+            primary_unit = 'hours' if leave.work_entry_type_id.unit_of_measure == 'hour' else 'days'
+            for allocation, allocation_dict in employee_days_per_allocation[leave.employee_id][leave.work_entry_type_id].items():
+                if allocation and (not allocation.date_to or allocation.date_to >= target_date) and (allocation.date_from <= target_date):
+                    max_leaves += allocation_dict[f'{primary_unit}_max_leaves']
+                    virtual_remaining_leaves += allocation_dict[f'{primary_unit}_virtual_remaining_leaves']
+            balance_per_leave[leave] = (virtual_remaining_leaves, max_leaves)
+        return balance_per_leave
+
+    def _inverse_supported_attachment_ids(self):
+        for holiday in self:
+            holiday.attachment_ids = holiday.supported_attachment_ids
+        self.invalidate_recordset(['attachment_ids'])
+
+    def _get_max_allowed_absence_hours(self, base_max_hours):
+        """Hook returning the maximum number of hours of an absence requested in hours.
+
+        ``_check_max_absence_per_day`` passes the planned hours of the request days (24 per
+        day for flexible schedules); localizations can raise or lower it.
+
+        :param float base_max_hours: the default maximum
+        :rtype: float
+        """
+        self.ensure_one()
+        return base_max_hours
+
+    @api.constrains('number_of_hours', 'request_date_from', 'request_date_to', 'work_entry_type_id')
+    def _check_max_absence_per_day(self):
+        for leave in self:
+            if leave.work_entry_type_request_unit != 'hour' or leave.work_entry_type_id.count_as != 'absence':
+                continue
+            calendar = leave.resource_calendar_id or leave.employee_id.resource_calendar_id
+            if not calendar or not leave.request_date_from or not leave.request_date_to:
+                continue
+
+            tz = ZoneInfo(leave.tz or 'UTC')
+            start_dt = datetime.combine(leave.request_date_from, time.min, tzinfo=tz)
+            end_dt = datetime.combine(leave.request_date_to, time.max, tzinfo=tz)
+            expected_attendance_hours = calendar.get_work_hours_count(start_dt, end_dt, compute_leaves=False)
+            days_spanned = (leave.request_date_to - leave.request_date_from).days + 1
+
+            if calendar._is_flexible():
+                base_max_allowed = (24.0 * days_spanned)
+            else:
+                base_max_allowed = min(expected_attendance_hours, (24.0 * days_spanned))
+
+            max_allowed_absence_hours = leave._get_max_allowed_absence_hours(base_max_allowed)
+
+            if float_compare(leave.number_of_hours, max_allowed_absence_hours, precision_digits=2) == 1:
+                raise ValidationError(
+                    self.env._(
+                        "You cannot encode more absence hours than allowed for this period.\n"
+                        "Expected attendance: %(attendance)g hours.\n"
+                        "Maximum allowed absence: %(max_absence)g hours.\n"
+                        "Requested absence: %(requested)g hours.",
+                        attendance=expected_attendance_hours,
+                        max_absence=max_allowed_absence_hours,
+                        requested=leave.number_of_hours
+                    )
+                )
+
+    @api.constrains('date_from', 'date_to', 'employee_id', 'state')
+    def _check_date(self):
+        if self.env.context.get('leave_skip_date_check', False):
+            return
+        for holiday in self:
+            if holiday.state in ('refuse', 'cancel'):
+                continue
+            if holiday.dashboard_warning_message:
+                raise ValidationError(holiday.dashboard_warning_message)
+
+    @api.constrains('date_from', 'date_to', 'employee_id')
+    def _check_date_state(self):
+        if self.env.context.get('leave_skip_state_check'):
+            return
+        for holiday in self:
+            if holiday.state in ['validate1', 'validate']:
+                message = _(
+                    "To modify an approved time off, make sure you unapprove it first (%(employee)s: %(date_from)s to %(date_to)s).",
+                    employee=holiday.employee_id.name,
+                    date_from=format_date(self.env, holiday.date_from),
+                    date_to=format_date(self.env, holiday.date_to),
+                )
+                if self.env.context.get('import_file'):
+                    message += _("To import it as a new time off request instead, leave the External ID column empty.")
+                raise ValidationError(message)
+
+    @api.constrains('employee_id')
+    def _check_executive_employee_type(self):
+        executive_type = self.env.ref('hr.contract_type_company_executive', raise_if_not_found=False)
+        for holiday in self:
+            if executive_type and holiday.employee_id.employee_type_id == executive_type:
+                raise ValidationError(_("You cannot create a time off request for an employee of type company executive."))
+
+    def _check_validity(self):
+        """Check that the requests are covered by allocations and avoid mandatory days.
+
+        For the types requiring an allocation (unless the context has
+        ``skip_allocation_check``), the balance of the employee on the first day of the request
+        must cover it, within ``max_allowed_negative`` when the type allows a negative balance
+        (see ``hr.work.entry.type.get_allocation_data()``). Users who are not time off officers
+        cannot request time off on a mandatory day.
+
+        With the context key ``multi_leave_request``, the employees without enough allocation
+        are returned instead of raising (used to create time off for several employees at once).
+
+        :return: ``(employees_without_allocation, zero_duration_employees)``, the second being
+            the employees with an absence of zero hours (only with ``multi_leave_request``)
+        :rtype: tuple
+        :raise ValidationError: when a request is not covered
+        """
+        sorted_leaves = defaultdict(lambda: self.env['hr.leave'])
+        employees_without_allocation = self.env['hr.employee']
+        zero_duration_employees = self.env['hr.employee']
+        for leave in self:
+            if float_is_zero(leave.number_of_hours, precision_digits=3) and self.env.context.get('multi_leave_request', False) \
+                    and leave.work_entry_type_id.count_as == 'absence':
+                zero_duration_employees |= leave.employee_id
+            sorted_leaves[leave.work_entry_type_id, leave.date_from.date()] |= leave
+        for (work_entry_type, date_from), leaves in sorted_leaves.items():
+            if not work_entry_type.requires_allocation or self.env.context.get('skip_allocation_check'):
+                continue
+            employees = leaves.employee_id
+            leave_data = work_entry_type.get_allocation_data(employees, date_from)
+            if work_entry_type.allows_negative:
+                max_excess = work_entry_type.max_allowed_negative
+                is_cancellation = all(leave.state in ('cancel', 'refuse') for leave in leaves)
+                for employee in employees:
+                    if is_cancellation:
+                        continue
+                    if not leave_data[employee][0][1]['max_leaves']:
+                        if self.env.context.get('multi_leave_request', False):
+                            employees_without_allocation |= employee
+                        else:
+                            raise ValidationError(self.env._("You do not have any allocation for this time type.\n"
+                                                             "Please request an allocation before submitting your time off request."))
+                    if leave_data[employee] and leave_data[employee][0][1]['virtual_remaining_leaves'] < -max_excess:
+                        if self.env.context.get('multi_leave_request', False):
+                            employees_without_allocation |= employee
+                        else:
+                            raise ValidationError(_(
+                                "%(name)s does not have a valid allocation for the leave type %(leave_type)s to cover that request.",
+                                name=employee.name, leave_type=work_entry_type.name))
+                continue
+
+            previous_leave_data = work_entry_type.with_context(
+                ignored_leave_ids=leaves.ids
+            ).get_allocation_data(employees, date_from)
+            for employee in employees:
+                previous_emp_data = previous_leave_data[employee] and previous_leave_data[employee][0][1]['virtual_excess_data']
+                emp_data = leave_data[employee] and leave_data[employee][0][1]['virtual_excess_data']
+                if not leave_data[employee][0][1]['max_leaves']:
+                    if self.env.context.get('multi_leave_request', False):
+                        employees_without_allocation |= employee
+                    else:
+                        raise ValidationError(self.env._("You do not have any allocation for this time type.\n"
+                                                         "Please request an allocation before submitting your time off request."))
+                if not previous_emp_data and not emp_data:
+                    continue
+                if previous_emp_data != emp_data and len(emp_data) >= len(previous_emp_data):
+                    if self.env.context.get('multi_leave_request', False):
+                        employees_without_allocation |= employee
+                    else:
+                        raise ValidationError(_(
+                            "%(name)s does not have a valid allocation for the leave type %(leave_type)s to cover that request.",
+                            name=employee.name, leave_type=work_entry_type.name))
+
+        is_leave_user = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+        if not is_leave_user and any(leave.has_mandatory_day for leave in self if leave.state not in ('cancel', 'refuse')):
+            raise ValidationError(self.env._('You are not allowed to request time off on a Mandatory Day.'))
+
+        return employees_without_allocation, zero_duration_employees
 
     ####################################################
     # ORM Overrides methods
     ####################################################
 
-    @api.multi
-    def name_get(self):
-        res = []
+    @api.depends(
+        'tz', 'date_from', 'date_to', 'employee_id',
+        'work_entry_type_id', 'number_of_hours',
+        'work_entry_type_request_unit', 'number_of_days', 'department_id',
+    )
+    @api.depends_context('short_name', 'hide_employee_name', 'groupby', 'scale')
+    def _compute_display_name(self):
         for leave in self:
-            if self.env.context.get('short_name'):
-                res.append((leave.id, _("%s : %.2f day(s)") % (leave.name or leave.holiday_status_id.name, leave.number_of_days_temp)))
-            else:
-                res.append((leave.id, _("%s on %s : %.2f day(s)") % (leave.employee_id.name or leave.category_id.name, leave.holiday_status_id.name, leave.number_of_days_temp)))
-        return res
+            leave.display_name = self._build_leave_display_name(
+                tz=leave.tz,
+                leave=leave,
+                employee_name=leave.employee_id.name or "",
+                work_entry_type_display=(
+                    leave.work_entry_type_id.display_code
+                    or leave.work_entry_type_id.name
+                ),
+                duration_display=leave.duration_display,
+            )
 
-    @api.multi
+    def onchange(self, values, field_names, fields_spec):
+        # Try to force the work_entry_type display_name when creating new records
+        # This is called right after pressing create and returns the display_name for
+        # most fields in the view.
+        if values and 'employee_id' in fields_spec and 'employee_id' not in self.env.context:
+            employee_id = get_employee_from_context(values, self.env.context, self.env.user.employee_id.id)
+            self = self.with_context(employee_id=employee_id)
+        return super().onchange(values, field_names, fields_spec)
+
     def add_follower(self, employee_id):
         employee = self.env['hr.employee'].browse(employee_id)
         if employee.user_id:
             self.message_subscribe(partner_ids=employee.user_id.partner_id.ids)
 
-    @api.multi
-    @api.constrains('holiday_status_id')
-    def _check_leave_type_validity(self):
-        for leave in self:
-            if leave.holiday_status_id.validity_start and leave.holiday_status_id.validity_stop:
-                vstart = leave.holiday_status_id.validity_start
-                vstop  = leave.holiday_status_id.validity_stop
-                dfrom  = leave.date_from
-                dto    = leave.date_to
+    def _check_double_validation_rules(self, employees, state):
+        """Check the rights to approve requests of a type validated twice (``'both'``).
 
-                if dfrom and dto and (dfrom.date() < vstart or dto.date() > vstop):
-                    raise UserError(_('You can take %s only between %s and %s') % (leave.holiday_status_id.display_name, \
-                                                                                  leave.holiday_status_id.validity_start, leave.holiday_status_id.validity_stop))
+        Time off administrators may do everything. Otherwise, a first approval (``'validate1'``)
+        requires being the time off approver of the employees or a time off officer, and the
+        second one (``'validate'``) being a time off officer.
 
-    @api.model
-    def create(self, values):
-        """ Override to avoid automatic logging of creation """
+        :param employees: ``hr.employee`` of the requests
+        :param str state: target state
+        :raise AccessError: when not allowed
+        """
+        if self.env.user.has_group('hr_holidays.group_hr_holidays_manager'):
+            return
+
+        is_leave_user = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+        if state == 'validate1':
+            employees = employees.filtered(lambda employee: employee.leave_manager_id != self.env.user)
+            if employees and not is_leave_user:
+                raise AccessError(_('You cannot first approve a time off for %s, because you are not his time off manager', employees[0].name))
+        elif state == 'validate' and not is_leave_user:
+            # Is probably handled via ir.rule
+            raise AccessError(_('You don\'t have the rights to apply second approval on a time off request'))
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Create time off requests, check them and start their approval.
+
+        Requests whose type is selectable are checked with :meth:`_check_validity` (unless the
+        context has ``skip_check_validity``). Each request is then auto-approved or gets approval
+        activities (:meth:`_process_auto_approve_activities`) and the time rules run on it. With the
+        context key ``leave_fast_create``, the double validation rights, the approval and the time
+        rules are skipped, and the validated requests directly get their resource leave.
+        """
+        # Override to avoid automatic logging of creation
+        if not self.env.context.get('leave_fast_create'):
+            work_entry_types = self.env['hr.work.entry.type'].browse([values.get('work_entry_type_id') for values in vals_list if values.get('work_entry_type_id')])
+            mapped_validation_type = {work_entry_type.id: work_entry_type.leave_validation_type for work_entry_type in work_entry_types}
+
+            for values in vals_list:
+                employee_id = values.get('employee_id', False)
+                work_entry_type_id = values.get('work_entry_type_id')
+
+                # Handle double validation
+                if work_entry_type_id and mapped_validation_type.get(work_entry_type_id) == 'both':
+                    self._check_double_validation_rules(self.env['hr.employee'].browse(employee_id), values.get('state', False))
+
+        if any(not vals.get('employee_id', self.env.context.get('default_employee_id')) for vals in vals_list):
+            raise UserError(_("There is no employee set on the time off. Please make sure you're logged in the correct company."))
+        holidays = super(HrLeave, self.with_context(mail_create_nosubscribe=True)).create(vals_list)
+        employees_without_allocation = self.env['hr.employee']
+        zero_duration_employees = self.env['hr.employee']
+        if not self.env.context.get('skip_check_validity'):
+            real_holidays = holidays.filtered(lambda leave: leave.work_entry_type_id.time_off_selectable)
+            employees_without_allocation, zero_duration_employees = real_holidays.with_context(multi_leave_request=self.env.context.get('multi_leave_request'))._check_validity()
+            invalid_holidays = real_holidays.filtered(lambda l: l.employee_id in (employees_without_allocation | zero_duration_employees))
+            holidays -= invalid_holidays
+            invalid_holidays.unlink()
+        self.env['hr.leave.allocation'].invalidate_model(['leaves_taken', 'max_leaves'])  # missing dependency on compute
+
+        for holiday in holidays:
+            if not self.env.context.get('leave_fast_create'):
+                holiday._process_auto_approve_activities()
+        if not self.env.context.get('leave_fast_create') and not self.env.context.get('skip_time_rules'):
+            # mixin create() fired _trigger_time_rules() before action_approve() (no-op: state != validate).
+            # now that auto-approved leaves are validated and resource.calendar.leaves exist, trigger properly.
+            # leave_fast_create leaves are created with state=validate, so mixin handles them correctly already.
+            holidays._trigger_time_rules()
+        if employees_without_allocation:
+            invalid_employee_names = ', '.join(self.env._('%s', employee.name) for employee in employees_without_allocation)
+            self.env.user._bus_send('simple_notification', {
+                'type': 'danger',
+                'message': self.env._('There is no valid allocation to cover this request for the following employees: %s', invalid_employee_names),
+            })
+        if self.env.context.get('leave_fast_create') and not self.env.context.get('skip_create_resource_leave'):
+            holidays.filtered(lambda l: l.state == 'validate')._create_resource_leave()
+        if zero_duration_employees:
+            self.env.user._bus_send('simple_notification', {
+                'type': 'danger',
+                'message': self.env._('The time off is outside the working schedule of the employee'),
+            })
+        return holidays
+
+    def _process_auto_approve_activities(self):
+        """Approve a new request automatically, or notify its approvers.
+
+        The request is approved (as superuser) when its type needs no validation, or when it is
+        created by a time off officer for another employee. Otherwise, approval activities are
+        scheduled for :meth:`_get_responsible_for_approval`.
+        """
+
+        # Everything that is done here must be done using sudo because we might
+        # have different create and write rights
+        # eg : holidays_user can create a leave request with validation_type = 'manager' for someone else
+        # but they can only write on it if they are leave_manager_id
+        self.ensure_one()
+        holiday_sudo = self.sudo()
+        holiday_sudo.add_follower(self.employee_id.id)
+        if self.validation_type == 'manager':
+            holiday_sudo.message_subscribe(partner_ids=self.employee_id.leave_manager_id.partner_id.ids)
+        if self.validation_type == 'no_validation' or (self.env.user.has_group('hr_holidays.group_hr_holidays_user') and self.employee_id != self.env.user.employee_id):
+            # Automatic validation should be done in sudo, because user might not have the rights to do it by himself
+            # skip_time_rules: bulk trigger below, once resource.calendar.leaves exist for all auto-approved leaves
+            holiday_sudo.with_context(skip_time_rules=True).action_approve()
+            holiday_sudo.message_subscribe(partner_ids=self._get_responsible_for_approval().partner_id.ids)
+            holiday_sudo.message_post(body=self.env._("The time off has been automatically approved"), subtype_xmlid="mail.mt_comment")  # Message from OdooBot (sudo)
+        elif not self.env.context.get('import_file'):
+            holiday_sudo.activity_update()
+
+    def write(self, vals):
+        """Write on time off requests, keeping their resource leave in sync.
+
+        Changing the state checks :meth:`_check_approval_update`. Leaving the ``'validate'``
+        state removes the resource leave and reverses the time rule allocation credits; changing
+        the dates or the type of a validated request amends its resource leave
+        (:meth:`_amend_resource_leave_dates`). Users who are not officers cannot modify started
+        or cancelled requests.
+        """
+        values = vals
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user') or self.env.su
+        if not is_officer and values.keys() - {'attachment_ids', 'supported_attachment_ids', 'message_main_attachment_id'}:
+            if any(hol.date_from.date() < fields.Date.today() and hol.employee_id.leave_manager_id != self.env.user
+                   and hol.state not in ('confirm', 'draft') for hol in self):
+                raise UserError(_('You must have manager rights to modify/validate a time off that already begun'))
+            if any(leave.state == 'cancel' for leave in self):
+                raise UserError(_('Only a manager can modify a canceled leave.'))
+
+        # If a leave changes state from validated unlink the corresponding resource calendar leave
+        validated_leaves = self.filtered(lambda l: l.state == 'validate')
+        state_invalidated = 'state' in values and values['state'] != 'validate'
+        if validated_leaves and state_invalidated:
+            validated_leaves._remove_resource_leave()
+            # Preserve allocation reversal logic from existing codebase
+            self.env['hr.time.rule']._reverse_allocation_credits('hr.leave', validated_leaves.ids)
+
         employee_id = values.get('employee_id', False)
-        if not values.get('department_id'):
-            values.update({'department_id': self.env['hr.employee'].browse(employee_id).department_id.id})
-        holiday = super(HolidaysRequest, self.with_context(mail_create_nolog=True, mail_create_nosubscribe=True)).create(values)
-        holiday.add_follower(employee_id)
-        if 'employee_id' in values:
-            holiday._onchange_employee_id()
-        holiday.activity_update()
-        return holiday
+        if not self.env.context.get('leave_fast_create'):
+            if values.get('state'):
+                self._check_approval_update(values['state'])
+                if any(holiday.validation_type == 'both' for holiday in self):
+                    if values.get('employee_id'):
+                        employees = self.env['hr.employee'].browse(values.get('employee_id'))
+                    else:
+                        employees = self.mapped('employee_id')
+                    self._check_double_validation_rules(employees, values['state'])
 
-    @api.multi
-    def write(self, values):
-        employee_id = values.get('employee_id', False)
-        result = super(HolidaysRequest, self).write(values)
-        self.add_follower(employee_id)
-        if 'employee_id' in values:
-            self._onchange_employee_id()
+        skip_leave_version_check = False
+        if {'date_from', 'date_to'} & values.keys():
+            new_df = fields.Datetime.to_datetime(values.get('date_from'))
+            new_dt = fields.Datetime.to_datetime(values.get('date_to'))
+            skip_leave_version_check = all(
+                r.date_from and r.date_to
+                and (not new_df or new_df.date() >= r.date_from.date())
+                and (not new_dt or new_dt.date() <= r.date_to.date())
+                for r in self
+            )
+
+        write_self = self.with_context(skip_leave_version_check=True) if skip_leave_version_check else self
+        result = super(HrLeave, write_self).write(values)
+
+        # If the dates or the type of a validated leave were changed, amend the resource calendar leave
+        amended_fields = {'date_from', 'date_to', 'request_date_from', 'request_date_to', 'request_hour_from', 'request_hour_to', 'work_entry_type_id'}
+        resource_leave_amended = bool(amended_fields.intersection(values))
+        if validated_leaves and resource_leave_amended and not state_invalidated:
+            if not self.env.context.get('skip_create_resource_leave'):
+                validated_leaves._amend_resource_leave_dates()
+
+        if any(field in values for field in ['request_date_from', 'date_from', 'request_date_to', 'date_to', 'work_entry_type_id', 'employee_id', 'state']):
+            if not values.get('state') or values.get('state') not in ('refuse', 'cancel'):
+                # Preserve context check for date validation skip
+                if not self.env.context.get('leave_skip_date_check'):
+                    self.filtered(lambda leave: leave.work_entry_type_id.time_off_selectable)._check_validity()
+            self.env['hr.leave.allocation'].invalidate_model(['leaves_taken', 'max_leaves'])
+
+        if not self.env.context.get('leave_fast_create'):
+            for holiday in self:
+                if employee_id:
+                    holiday.add_follower(employee_id)
+
         return result
 
-    @api.multi
-    def unlink(self):
-        for holiday in self.filtered(lambda holiday: holiday.state not in ['draft', 'cancel', 'confirm']):
-            raise UserError(_('You cannot delete a leave which is in %s state.') % (holiday.state,))
-        return super(HolidaysRequest, self).unlink()
+    @api.ondelete(at_uninstall=False)
+    def _unlink_if_correct_states(self):
+        error_message = self.env._('Oops! %(state)s Time-Off requests can only be deleted by Administrators.')
+        state_description_values = {elem[0]: elem[1] for elem in self._fields['state']._description_selection(self.env)}
+        now = fields.Datetime.now().date()
 
-    @api.multi
+        if not self.env.user.has_group('hr_holidays.group_hr_holidays_user'):
+            for hol in self:
+                if hol.state not in ['confirm', 'validate1', 'cancel']:
+                    raise UserError(error_message % {'state': state_description_values.get(hol.state)})
+                if hol.date_from.date() < now:
+                    raise UserError(_("You can't delete a time off request that is in the past."))
+        elif not self.env.user.has_group('hr_holidays.group_hr_holidays_manager'):
+            for holiday in self.filtered(lambda holiday: holiday.state not in ['cancel', 'confirm']):
+                error_message = self.env._('Oops! %(state)s Time-Off requests can only be deleted by Administrators.')
+                raise UserError(error_message % {'state': state_description_values.get(holiday.state)})
+
+    def unlink(self):
+        """Delete requests, after reversing their time rule credits and removing their leaves."""
+        self._prepare_leave_unlink()
+        return super(HrLeave, self.with_context(leave_skip_date_check=True)).unlink()
+
+    def _prepare_leave_unlink(self):
+        """Undo the effects of the requests before their deletion.
+
+        Reverses the time rule allocation credits, archives the meetings and removes the
+        resource leaves.
+        """
+        self.env['hr.time.rule']._reverse_allocation_credits('hr.leave', self.ids)
+        self.sudo()._post_leave_cancel()
+        self.env['hr.leave.allocation'].invalidate_model(['leaves_taken', 'max_leaves'])  # missing dependency on compute
+
+    def _apply_record_output(self, rules, excess, deficit, active_iv=None):
+        """Apply the result of the time rules on the requests.
+
+        See :meth:`~odoo.addons.hr_holidays.models.hr_time_rule.HrTimeRule._apply_leave_output`.
+        """
+        rules._apply_leave_output(excess, deficit, active_iv=active_iv)
+
+    def _get_pipeline_intervals_local(self, schedule):
+        """Return the parts of the request that the time rules consider.
+
+        Absences are clipped to the schedule: nights, breaks and days off within the request do
+        not count toward the thresholds. Other types keep their whole span.
+
+        :param Intervals schedule: schedule of the employee, naive local datetimes
+        :return: list of ``(start, stop)`` naive datetimes in the employee's timezone
+        :rtype: list
+        """
+        self.ensure_one()
+        tz = ZoneInfo(self.employee_id.sudo()._get_tz())
+        start = self.date_from.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+        stop = self.date_to.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+        if self.work_entry_type_id.count_as != 'absence':
+            return [(start, stop)]
+        raw_iv = Intervals([(start, stop, self.env['resource.calendar'])])
+        clipped = raw_iv & schedule
+        return [(s, e) for s, e, _ in clipped] if clipped else [(start, stop)]
+
+    def _get_source_extra_fields_domain(self):
+        """Only validated requests are time rule sources.
+
+        :rtype: list
+        """
+        return [('state', '=', 'validate')]
+
+    def _get_write_source_extra_source_fields(self):
+        """Run the time rules again when the type or the state of a request changes.
+
+        :rtype: set[str]
+        """
+        return {'work_entry_type_id', 'state'}
+
+    def _get_time_rule_end_write_vals(self, end_utc, stop_local):
+        """Return the values shortening a request to ``end_utc``.
+
+        Writes ``date_to`` and the request fields; requests by day or half day are flagged
+        ``is_time_rule_trimmed`` so that their end is not recomputed from the schedule.
+
+        :param datetime end_utc: new end, naive UTC
+        :param datetime stop_local: the same instant in the employee's timezone
+        :rtype: dict
+        """
+        tz = ZoneInfo(self.employee_id._get_tz())
+        start_local = self.date_from.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+        vals = {
+            'date_to': end_utc,
+            'request_date_to': stop_local.date(),
+            'request_hour_from': start_local.hour + start_local.minute / 60,
+            'request_hour_to': stop_local.hour + stop_local.minute / 60,
+        }
+        if self.work_entry_type_request_unit in ('day', 'half_day'):
+            vals['is_time_rule_trimmed'] = True
+        return vals
+
+    def _get_time_rule_deficit_occupied(self, employee_id, start_utc, period_end_utc):
+        """Return the validated time off of the employee within a period.
+
+        Deficit outputs are only placed outside these intervals.
+
+        :param int employee_id: employee id
+        :param datetime start_utc: naive UTC
+        :param datetime period_end_utc: naive UTC
+        :return: intervals of naive UTC datetimes
+        :rtype: Intervals
+        """
+        dummy = self.env['resource.calendar']
+        existing = self.env['hr.leave'].sudo().search([
+            ('employee_id', '=', employee_id),
+            ('date_from', '<', period_end_utc),
+            ('date_to', '>', start_utc),
+            ('state', '=', 'validate'),
+        ])
+        return Intervals([(l.date_from, l.date_to, dummy) for l in existing], keep_distinct=True)
+
+    def _get_time_rule_output_vals(self, rule, df, dt, pp):
+        """Return the creation values of an output time off.
+
+        See :meth:`~odoo.addons.hr_holidays.models.hr_time_rule.HrTimeRule._get_output_leave_vals`.
+
+        :rtype: dict
+        """
+        return rule._get_output_leave_vals(self.employee_id, rule, df, dt, self, accumulated_pp=pp)
+
+    def _get_time_rule_remainder_vals(self, df, dt):
+        """Return the creation values of a remainder: a validated time off linked to the source.
+
+        :param datetime df: start, naive UTC
+        :param datetime dt: end, naive UTC
+        :rtype: dict
+        """
+        tz = ZoneInfo(self.employee_id._get_tz())
+        df_local = df.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+        dt_local = dt.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
+        return {
+            'employee_id': self.employee_id.id,
+            'date_from': df,
+            'date_to': dt,
+            'request_date_from': df_local.date(),
+            'request_date_to': dt_local.date(),
+            'request_hour_from': df_local.hour + df_local.minute / 60,
+            'request_hour_to': dt_local.hour + dt_local.minute / 60,
+            'source_leave_id': self.id,
+            'resource_calendar_id': self.resource_calendar_id.id,
+            'state': 'validate',
+        }
+
     def copy_data(self, default=None):
-        raise UserError(_('A leave cannot be duplicated.'))
+        vals_list = super().copy_data(default=default)
+        if self.env.context.get('skip_copy_check'):
+            return vals_list
+        if all(leave.state in ['cancel', 'refuse'] for leave in self):  # No overlap constraint in these cases
+            return vals_list
+        # Those fields have to be passed explictly, because otherwise they will take the default value of today().
+        # In that case, if there exists a leave for that employee that includes today, it will block the duplication.
+        for leave, vals in zip(self, vals_list):
+            if vals.get('request_date_hour_from') or vals.get('request_date_hour_to'):
+                vals.update(leave._get_request_vals_from_date_hours(
+                    fields.Datetime.to_datetime(vals.get('request_date_hour_from')),
+                    fields.Datetime.to_datetime(vals.get('request_date_hour_to')),
+                ))
+        return vals_list
+
 
     ####################################################
     # Business methods
     ####################################################
 
-    @api.multi
-    def _create_resource_leave(self):
-        """ This method will create entry in resource calendar leave object at the time of holidays validated """
-        for leave in self:
-            date_from = fields.Datetime.from_string(leave.date_from)
-            date_to = fields.Datetime.from_string(leave.date_to)
+    def _prepare_resource_leave_vals(self):
+        """Return the values of the ``resource.calendar.leaves`` of a validated request.
 
-            self.env['resource.calendar.leaves'].create({
-                'name': leave.name,
-                'date_from': fields.Datetime.to_string(date_from),
-                'holiday_id': leave.id,
-                'date_to': fields.Datetime.to_string(date_to),
-                'resource_id': leave.employee_id.resource_id.id,
-                'calendar_id': leave.employee_id.resource_calendar_id.id,
-                'time_type': leave.holiday_status_id.time_type,
-            })
-        return True
+        Hook to add values. The leave copies the type (``work_entry_type_id``, ``count_as``,
+        ``elligible_for_accrual_rate``), the dates and the calendar of the request, and is linked
+        to the employee's resource and to the request (``holiday_id``).
 
-    @api.multi
-    def _remove_resource_leave(self):
-        """ This method will create entry in resource calendar leave object at the time of holidays cancel/removed """
-        return self.env['resource.calendar.leaves'].search([('holiday_id', 'in', self.ids)]).unlink()
-
-    def _validate_leave_request(self):
-        """ Validate leave requests (holiday_type='employee')
-        by creating a calendar event and a resource leaves. """
-        for holiday in self.filtered(lambda request: request.holiday_type == 'employee'):
-            meeting_values = holiday._prepare_holidays_meeting_values()
-            meeting = self.env['calendar.event'].with_context(no_mail_to_attendees=True).create(meeting_values)
-            holiday.write({'meeting_id': meeting.id})
-            holiday._create_resource_leave()
-
-    @api.multi
-    def _prepare_holidays_meeting_values(self):
+        :rtype: dict
+        """
         self.ensure_one()
-        meeting_values = {
-            'name': self.display_name,
-            'categ_ids': [(6, 0, [
-                self.holiday_status_id.categ_id.id])] if self.holiday_status_id.categ_id else [],
-            'duration': self.number_of_days_temp * self.employee_id.resource_calendar_id.hours_per_day,
-            'description': self.notes,
-            'user_id': self.user_id.id,
-            'start': self.date_from,
-            'stop': self.date_to,
-            'allday': False,
-            'state': 'open',  # to block that meeting date in the calendar
-            'privacy': 'confidential'
-        }
-        # Add the partner_id (if exist) as an attendee
-        if self.user_id and self.user_id.partner_id:
-            meeting_values['partner_ids'] = [
-                (4, self.user_id.partner_id.id)]
-        return meeting_values
-
-    @api.multi
-    def _prepare_holiday_values(self, employee):
-        self.ensure_one()
-        values = {
-            'name': self.name,
-            'holiday_type': 'employee',
-            'holiday_status_id': self.holiday_status_id.id,
+        return {
+            'name': _("%s: Time Off", self.employee_id.name),
+            'work_entry_type_id': self.work_entry_type_id.id,
+            'count_as': self.work_entry_type_id.count_as,
+            'elligible_for_accrual_rate': self.work_entry_type_id.elligible_for_accrual_rate,
+            'resource_id': self.employee_id.resource_id.id,
+            'calendar_id': self.resource_calendar_id.id,
+            'holiday_id': self.id,
             'date_from': self.date_from,
             'date_to': self.date_to,
-            'notes': self.notes,
-            'number_of_days_temp': self.number_of_days_temp,
-            'parent_id': self.id,
-            'employee_id': employee.id
         }
-        return values
 
-    @api.multi
-    def action_draft(self):
+    def _create_resource_leave(self):
+        """Create the ``resource.calendar.leaves`` of the requests, replacing existing ones.
+
+        Requests with an empty span get none. Called on validation.
+
+        :return: the created leaves
+        :rtype: resource.calendar.leaves
+        """
+        self.env['resource.calendar.leaves'].sudo().search([('holiday_id', 'in', self.ids)]).unlink()
+        vals_list = [
+            leave._prepare_resource_leave_vals()
+            for leave in self.filtered(lambda l: l.date_from and l.date_to and l.date_from != l.date_to)
+        ]
+        return self.env['resource.calendar.leaves'].sudo().create(vals_list)
+
+    def _remove_resource_leave(self):
+        """Delete the ``resource.calendar.leaves`` of the requests (on refusal, cancellation, ...).
+        """
+        self.env.flush_all()  # mimic old behaviour of unlink
+        leaves = self.env['resource.calendar.leaves'].search([('holiday_id', 'in', self.ids)])
+        if self.has_access('write'):
+            leaves = leaves.sudo()
+        leaves.unlink()
+        self.env.invalidate_all()
+
+    def _amend_resource_leave_dates(self):
+        """Update the resource leaves of validated requests whose dates or type changed.
+
+        Rewrites them with :meth:`_prepare_resource_leave_vals`; requests without resource
+        leave are ignored.
+        """
+        resource_leaves = self.env['resource.calendar.leaves'].sudo().search([
+            ('holiday_id', 'in', self.ids),
+        ])
+
+        resource_leaves_by_holiday_id = {resource_leave.holiday_id: resource_leave for resource_leave in resource_leaves}
+
+        for leave in self:
+            resource_leave = resource_leaves_by_holiday_id.get(leave)
+            if resource_leave:
+                resource_leave.write(leave._prepare_resource_leave_vals())
+
+    def _validate_leave_request(self):
+        """Apply the effects of the validation of the requests.
+
+        Creates the resource leaves (:meth:`_create_resource_leave`), the calendar events when
+        the type has ``create_calendar_meeting``, and posts a message to the employee.
+        """
+        holidays = self.filtered("employee_id")
+        holidays.sudo()._create_resource_leave()
+        meeting_holidays = holidays.filtered(lambda l: l.work_entry_type_id.create_calendar_meeting and not (l.meeting_id and l.meeting_id.active))
+        meetings = self.env['calendar.event']
+        if meeting_holidays:
+            Meeting = self.env['calendar.event']
+            Meeting.check_access('create')
+            meeting_values_for_user_id = meeting_holidays._prepare_holidays_meeting_values()
+            Meeting = self.env['calendar.event']
+            for user_id, meeting_values in meeting_values_for_user_id.items():
+                meetings += Meeting.with_user(user_id or self.env.uid).sudo().with_context(clean_context({**self.env.context, **dict(
+                                allowed_company_ids=[],
+                                no_mail_to_attendees=True,
+                                calendar_no_videocall=True,
+                                active_model=self._name
+                            )})).create(meeting_values)
+        Holiday = self.env['hr.leave']
+        for meeting in meetings:
+            Holiday.browse(meeting.res_id).meeting_id = meeting
+
+        for holiday in holidays:
+            user_tz = ZoneInfo(holiday.tz)
+            utc_tz = holiday.date_from.replace(tzinfo=UTC).astimezone(user_tz)
+            notify_partner_ids = holiday.employee_id.user_id.partner_id.ids
+            holiday.message_post(
+                body=_(
+                    'Your %(work_entry_type)s planned on %(date)s has been accepted',
+                    work_entry_type=holiday.work_entry_type_id.display_name,
+                    date=utc_tz.replace(tzinfo=None)
+                ),
+                partner_ids=notify_partner_ids)
+
+    def _subtract_public_holidays(self, public_holidays):
+        """Return the clock hours of the request minus the given public holidays.
+
+        :param public_holidays: global ``resource.calendar.leaves``
+        :rtype: float
+        """
+        self.ensure_one()
+        public_holidays_intervals = Intervals([])
+        if public_holidays:
+            public_holidays_intervals = Intervals([(ph.date_from, ph.date_to, ph) for ph in public_holidays])
+        leave_intervals = Intervals([(self.date_from, self.date_to, self)])
+        real_leave_intervals = leave_intervals - public_holidays_intervals
+        return sum_intervals(real_leave_intervals)
+
+    def _prepare_holidays_meeting_values(self):
+        result = defaultdict(list)
         for holiday in self:
-            if not holiday.can_reset:
-                raise UserError(_('Only an HR Manager or the concerned employee can reset the leave request to draft.'))
-            if holiday.state not in ['confirm', 'refuse']:
-                raise UserError(_('Leave request state must be "Refused" or "To Approve" in order to be reset to draft.'))
-            holiday.write({
-                'state': 'draft',
-                'first_approver_id': False,
-                'second_approver_id': False,
-            })
-            linked_requests = holiday.mapped('linked_request_ids')
-            for linked_request in linked_requests:
-                linked_request.action_draft()
-            linked_requests.unlink()
-        self.activity_update()
+            user = holiday.user_id
+            meeting_name = _(
+                "%(employee)s on Time Off : %(duration)s",
+                employee=holiday.employee_id.name,
+                duration=holiday.duration_display)
+            allday_value = (holiday.work_entry_type_request_unit != 'half_day' or holiday.request_date_from_period == 'am' and holiday.request_date_to_period == 'pm')
+            if holiday.work_entry_type_request_unit == 'hour':
+                allday_value = float_compare(holiday.number_of_days, 1.0, 1) >= 0
+
+            if allday_value:
+                leave_tz = ZoneInfo(holiday.tz) if holiday.tz else UTC
+                start_value = holiday.date_from.replace(tzinfo=UTC).astimezone(leave_tz).replace(tzinfo=None)
+                stop_value = holiday.date_to.replace(tzinfo=UTC).astimezone(leave_tz).replace(tzinfo=None)
+            else:
+                start_value = holiday.date_from
+                stop_value = holiday.date_to
+
+            meeting_values = {
+                'name': meeting_name,
+                'duration': self.env['calendar.event']._get_duration(start_value, stop_value),
+                'description': holiday.notes,
+                'user_id': user.id,
+                'start': start_value,
+                'stop': stop_value,
+                'allday': allday_value,
+                'privacy': 'confidential',
+                'event_tz': user.tz,
+                'meeting_activity_ids': [(5, 0, 0)],
+                'res_id': holiday.id,
+            }
+            # Add the partner_id (if exist) as an attendee
+            partner_id = (user and user.partner_id) or (holiday.employee_id and holiday.employee_id.work_contact_id)
+            if partner_id:
+                meeting_values['partner_ids'] = [(4, partner_id.id)]
+            result[user.id].append(meeting_values)
+        return result
+
+    def action_cancel(self):
+        self.ensure_one()
+
+        return {
+            'name': _('Cancel Time Off'),
+            'type': 'ir.actions.act_window',
+            'target': 'new',
+            'res_model': 'hr.holidays.cancel.leave',
+            'view_mode': 'form',
+            'views': [[False, 'form']],
+            'context': {
+                'default_leave_id': self.id,
+                'dialog_size': "medium",
+            }
+        }
+
+    def action_approve(self, check_state=True):
+        """Approve the requests.
+
+        A request goes to ``'validate'`` (see :meth:`_action_validate`) when the user can
+        validate it, otherwise to ``'validate1'`` (first approval of a type validated twice)
+        when the user can approve it. Time off officers can validate in one step.
+
+        :param bool check_state: ``False`` to skip the rights check: types validated twice go
+            to ``'validate1'``, others are validated
+        :raise UserError: when the user can neither approve nor validate a request
+        """
+        current_employee = self.env.user.employee_id
+        leave_to_validate, leave_to_approve, invalid_leaves = self.partitioned(
+            lambda leave: (check_state and leave.can_validate) or (not check_state and leave.validation_type != "both"),
+            lambda leave: (check_state and leave.can_approve) or (not check_state and leave.validation_type == 'both'),
+        )
+        if invalid_leaves:
+            raise UserError(self.env._('You cannot approve this leave.'))
+        leave_to_approve.write({'state': 'validate1', 'first_approver_id': current_employee.id})
+        leave_to_validate._action_validate(check_state)
+        if not self.env.context.get('leave_fast_create'):
+            self.activity_update()
         return True
 
-    @api.multi
-    def action_confirm(self):
-        if self.filtered(lambda holiday: holiday.state != 'draft'):
-            raise UserError(_('Leave request must be in Draft state ("To Submit") in order to confirm it.'))
+    def action_back_to_approval(self):
+        """Reset to ``'confirm'`` the requests the user may reset; others are ignored."""
+        self.filtered(lambda l: l.can_back_to_approve)._move_validate_leave_to_confirm()
+        return True
+
+    def _move_validate_leave_to_confirm(self):
+        """Reset the requests to ``'confirm'``, removing their meetings and resource leaves."""
         self.write({'state': 'confirm'})
         self.activity_update()
+        self._post_leave_cancel()
+
+    def _get_leaves_on_public_holiday(self):
+        """Return the absences of zero duration, which cannot be validated.
+
+        Such a request covers no working time (e.g. a public holiday). Some types (sick leave,
+        maternity, work accident codes) are accepted anyway.
+
+        :rtype: hr.leave
+        """
+        bypass_work_entry_types = [
+            '013.00',  # Sick Time Off
+            '128.00',  # Maternity Time Off
+            '123.00',  # Long Term Sick
+            '010.00',  # Incapacity for work with guaranteed salary - 1st week
+            '082.00',  # Incapacity for work with guaranteed salary system for workers - 2nd week
+            '072.01',  # Incapacity for work with guaranteed salary system for workers - 2nd week (Short Term Employee)
+            '072.00',  # Incapacity for work with salary supplement for workers - after the 2nd week CCT 12bis/13bis
+            '122.00',  # days of illness after 30th day
+            '009.00',  # Work accident or occupational illness with normal daily pay at 100% for the first week
+            '070.00',  # Work accident or occupational illness with employer supplement from the 2nd week of CCT 12bis/13bis
+            '082.01',  # Work accident or occupational illness with employer supplement from the 2nd week of CCT 12bis/13bis (Short Term Employee)
+            '110.00',  # Work Accident (Unpaid)
+            '086.00',  # Public holiday during temporary unemployment - no onss
+            '006.11',  # Public holiday during temporary unemployment - with onss
+        ]
+        return self.filtered(
+            lambda l: l.employee_id and not l.number_of_days and not l.number_of_hours and l.work_entry_type_id.count_as == 'absence' and l.work_entry_type_id.code not in bypass_work_entry_types)
+
+    def _get_split_hour_vals(self, date_from=None, date_to=None):
+        """Return the hours of a part of a request in hours cut by :meth:`_split_leaves`.
+
+        The part whose first (or last) day changes takes the first (or last) hour of the
+        schedule on that day.
+
+        :rtype: dict
+        """
+        self.ensure_one()
+        if self.work_entry_type_request_unit != 'hour':
+            return {}
+        vals = {'request_duration': 'specific'}
+        if date_from and date_from != self.request_date_from:
+            vals['request_hour_from'] = self.employee_id.sudo()._get_hours_for_date(date_from)[0]
+        if date_to and date_to != self.request_date_to:
+            vals['request_hour_to'] = self.employee_id.sudo()._get_hours_for_date(date_to)[1]
+        return vals
+
+    def _split_leaves(self, split_date_from, split_date_to=False):
+        """Cut the requests out of a period, keeping the parts before and after it.
+
+        ``[request_date_from, request_date_to]`` becomes
+        ``[request_date_from, split_date_from - 1 day]`` and
+        ``[split_date_to, request_date_to]``; parts without working time are dropped. The
+        request keeps the first part (or the only one), a copy in the same state is created for
+        the other one. Used when an employee leaves the company.
+
+        :param datetime.date split_date_from: first day removed
+        :param datetime.date split_date_to: first day kept after the cut; defaults to
+            ``split_date_from``, which cuts the request in two without removing anything
+        :return: the created requests
+        :rtype: hr.leave
+        """
+        new_leaves_vals = []
+        if not split_date_to:
+            split_date_to = split_date_from
+
+        # Only leaves that span a period outside of the split interval need
+        # to be split.
+        multi_day_leaves = self.filtered(lambda l: l.request_date_from < split_date_from or l.request_date_to >= split_date_to)
+        for leave in multi_day_leaves:
+            new_leave_vals = []
+            target_leave_vals = []
+            # both parts are whole where they are cut, not the half day of the original
+            if leave.request_date_from < split_date_from:
+                date_to = split_date_from + timedelta(days=-1)
+                period_to = leave.request_date_to_period if date_to == leave.request_date_to else 'pm'
+                new_leave_vals.append(leave.with_context(skip_copy_check=True).copy_data({
+                    'request_date_to': date_to,
+                    'request_date_to_period': period_to,
+                    'request_duration': leave._get_request_duration(
+                        leave.request_date_from, leave.request_date_from_period, date_to, period_to),
+                    'state': leave.state,
+                    **leave._get_split_hour_vals(date_to=date_to),
+                })[0])
+
+            # Do the same for the new leave after the split
+            if leave.request_date_to >= split_date_to:
+                period_from = (leave.request_date_from_period
+                               if split_date_to == leave.request_date_from else 'am')
+                new_leave_vals.append(leave.with_context(skip_copy_check=True).copy_data({
+                    'request_date_from': split_date_to,
+                    'request_date_from_period': period_from,
+                    'request_duration': leave._get_request_duration(
+                        split_date_to, period_from, leave.request_date_to, leave.request_date_to_period),
+                    'state': leave.state,
+                    **leave._get_split_hour_vals(date_from=split_date_to),
+                })[0])
+
+            # For those two new leaves, only create them if they actually have a non-zero duration.
+            for leave_vals in new_leave_vals:
+                new_leave = self.env['hr.leave'].new(leave_vals)
+                new_leave._compute_date_from_to()
+                if new_leave.date_from < new_leave.date_to:
+                    target_leave_vals.append(new_leave._convert_to_write(new_leave._cache))
+
+            if target_leave_vals:
+                vals = target_leave_vals.pop(0)
+                leave.with_context(leave_skip_state_check=True).write({
+                    # date_from/date_to too, so this part is not left waiting for a recompute
+                    fname: vals[fname]
+                    for fname in ('request_date_from', 'request_date_to', 'request_duration',
+                                  'request_date_from_period', 'request_date_to_period',
+                                  'request_hour_from', 'request_hour_to', 'date_from', 'date_to')
+                    if fname in vals
+                })
+                if target_leave_vals:
+                    new_leaves_vals.extend(target_leave_vals)
+
+        if not new_leaves_vals:
+            return self.env['hr.leave']
+
+        # TODO To check: leave_fast_create skips the creation of resource calendar leaves.
+        return self.env['hr.leave'].with_context(
+            tracking_disable=True,
+            mail_activity_automation_skip=True,
+            leave_fast_create=True,
+            leave_skip_state_check=True
+        ).create(new_leaves_vals)
+
+    def _action_validate(self, check_state=True):
+        """Validate the requests (state ``'validate'``).
+
+        Sets the approvers, creates the resource leaves and meetings
+        (:meth:`_validate_leave_request`), closes the activities and runs the time rules.
+
+        :param bool check_state: check that the user can validate the requests
+        :raise UserError: when the user cannot validate a request
+        :raise ValidationError: when an absence covers no working time, see
+            :meth:`_get_leaves_on_public_holiday`
+        """
+        if not self:
+            return True
+        current_employee = self.env.user.employee_id
+        leaves = self._get_leaves_on_public_holiday()
+        if check_state and any(not holiday.can_validate for holiday in self):
+            raise UserError(_('You can\'t validate this leave.'))
+        if leaves:
+            raise ValidationError(_('The following employees are not supposed to work during that period:\n %s') % ','.join(leaves.mapped('employee_id.name')))
+
+        # skip_time_rules: resource.calendar.leaves doesn't exist yet so recompute after _validate_leave_request
+        self.with_context(skip_time_rules=True).write({'state': 'validate'})
+
+        leaves_second_approver, leaves_first_approver = self.partitioned(lambda leave: leave.validation_type == 'both')
+
+        leaves_second_approver.write({'second_approver_id': current_employee.id})
+        leaves_first_approver.write({'first_approver_id': current_employee.id})
+
+        self._validate_leave_request()
+        if not self.env.context.get('leave_fast_create'):
+            self.filtered(lambda holiday: holiday.validation_type != 'no_validation').activity_update()
+
+        if not self.env.context.get('skip_time_rules'):
+            self._trigger_time_rules()
+
         return True
 
-    @api.multi
-    def action_approve(self):
-        # if validation_type == 'both': this method is the first approval approval
-        # if validation_type != 'both': this method calls action_validate() below
-        if not self.env.user.has_group('hr_holidays.group_hr_holidays_user'):
-            raise UserError(_('Only an HR Officer or Manager can approve leave requests.'))
-
-        current_employee = self.env['hr.employee'].search([('user_id', '=', self.env.uid)], limit=1)
-        if any(holiday.state != 'confirm' for holiday in self):
-            raise UserError(_('Leave request must be confirmed ("To Approve") in order to approve it.'))
-
-        for holiday in self:
-            validation_type = holiday.holiday_status_id.validation_type
-            manager = holiday.employee_id.parent_id or holiday.employee_id.department_id.manager_id
-            if (validation_type in ['hr', 'both']) and (manager and manager != current_employee)\
-              and not self.env.user.has_group('hr_holidays.group_hr_holidays_manager'):
-                raise UserError(_('You must be %s manager to approve this leave') % (holiday.employee_id.name))
-            elif validation_type == 'manager' and not self.env.user.has_group('hr_holidays.group_hr_holidays_manager'):
-                raise UserError(_('You must be a Human Resource Manager to approve this leave.'))
-
-        self.filtered(lambda hol: hol.validation_type == 'both').write({'state': 'validate1', 'first_approver_id': current_employee.id})
-        self.filtered(lambda hol: not hol.validation_type == 'both').action_validate()
-        self.activity_update()
-        return True
-
-    @api.multi
-    def action_validate(self):
-        if not self.env.user.has_group('hr_holidays.group_hr_holidays_user'):
-            raise UserError(_('Only an HR Officer or Manager can approve leave requests.'))
-
-        if any(not holiday.can_approve for holiday in self):
-            raise UserError(_('Only your manager can approve your leave requests'))
-
-        current_employee = self.env['hr.employee'].search([('user_id', '=', self.env.uid)], limit=1)
-        for holiday in self:
-            if holiday.state not in ['confirm', 'validate1']:
-                raise UserError(_('Leave request must be confirmed in order to approve it.'))
-            if holiday.state == 'validate1' and not holiday.env.user.has_group('hr_holidays.group_hr_holidays_manager'):
-                raise UserError(_('Only an HR Manager can apply the second approval on leave requests.'))
-
-            holiday.write({'state': 'validate'})
-            if holiday.validation_type == 'both':
-                holiday.write({'second_approver_id': current_employee.id})
-            else:
-                holiday.write({'first_approver_id': current_employee.id})
-            if holiday.holiday_type == 'employee':
-                holiday._validate_leave_request()
-            elif holiday.holiday_type in ['category', 'department']:
-                leaves = self.env['hr.leave']
-                employees = holiday.category_id.employee_ids if holiday.holiday_type == 'category' else holiday.department_id.member_ids
-                for employee in employees:
-                    values = holiday._prepare_holiday_values(employee)
-                    leaves += self.with_context(mail_notify_force_send=False).create(values)
-                # TODO is it necessary to interleave the calls?
-                leaves.action_approve()
-                if leaves and leaves[0].validation_type == 'both':
-                    leaves.action_validate()
-        self.activity_update()
-        return True
-
-    @api.multi
     def action_refuse(self):
-        if not self.env.user.has_group('hr_holidays.group_hr_holidays_user'):
-            raise UserError(_('Only an HR Officer or Manager can refuse leave requests.'))
+        """Refuse requests to approve or approved: the resource leaves and meetings are removed.
 
-        current_employee = self.env['hr.employee'].search([('user_id', '=', self.env.uid)], limit=1)
+        :raise UserError: when a request is not ``'confirm'``, ``'validate1'`` or ``'validate'``
+        """
+        current_employee = self.env.user.employee_id
+        if any(holiday.state not in ['confirm', 'validate', 'validate1'] for holiday in self):
+            raise UserError(_('Time off request must be confirmed or validated in order to refuse it.'))
+
+        self._notify_manager()
+        validated_holidays = self.filtered(lambda hol: hol.state == 'validate1')
+        validated_holidays.with_context(skip_time_rules=True).write({'state': 'refuse', 'first_approver_id': current_employee.id})
+        (self - validated_holidays).with_context(skip_time_rules=True).write({'state': 'refuse', 'second_approver_id': current_employee.id})
+        # Delete the meeting
+        self.mapped('meeting_id').write({'active': False})
+        # Post a second message, more verbose than the tracking message
         for holiday in self:
-            if holiday.state not in ['confirm', 'validate', 'validate1']:
-                raise UserError(_('Leave request must be confirmed or validated in order to refuse it.'))
+            if holiday.employee_id.user_id:
+                holiday.message_post(
+                    body=_('Your %(work_entry_type)s planned on %(date)s has been refused', work_entry_type=holiday.work_entry_type_id.display_name, date=holiday.date_from),
+                    partner_ids=holiday.employee_id.user_id.partner_id.ids)
 
-            if holiday.state == 'validate1':
-                holiday.write({'state': 'refuse', 'first_approver_id': current_employee.id})
-            else:
-                holiday.write({'state': 'refuse', 'second_approver_id': current_employee.id})
-            # Delete the meeting
-            if holiday.meeting_id:
-                holiday.meeting_id.unlink()
-            # If a category that created several holidays, cancel all related
-            holiday.linked_request_ids.action_refuse()
-        self._remove_resource_leave()
         self.activity_update()
         return True
 
+    def _notify_manager(self):
+        """Notify the time off approver of the employee when a request it approved is refused."""
+        leaves = self.filtered(lambda hol: (hol.validation_type == 'both' and hol.state in ['validate1', 'validate']) or (hol.validation_type == 'manager' and hol.state == 'validate'))
+        model_description = self.env['ir.model']._get('hr.leave').name
+        for holiday in leaves:
+            responsible = holiday.employee_id.leave_manager_id.partner_id.ids
+            if responsible:
+                holiday.sudo().with_context(
+                    email_notification_force_header=True,
+                    email_notification_force_footer=True,
+                ).message_notify(
+                    partner_ids=responsible,
+                    model_description=model_description,
+                    subject=_('Refused Time Off'),
+                    body=_(
+                        '%(holiday_name)s has been refused.',
+                        holiday_name=holiday.display_name,
+                    ),
+                    email_layout_xmlid="mail.mail_notification_layout",
+                    subtitles=[holiday.display_name],
+                )
+
+    def _action_user_cancel(self, reason=None):
+        """Cancel a request on behalf of its employee, see :meth:`_force_cancel`.
+
+        :param str reason: reason posted on the request
+        :raise ValidationError: when the user cannot cancel the request (``can_cancel``)
+        """
+        self.ensure_one()
+        if not self.can_cancel:
+            raise ValidationError(_('This time off cannot be cancelled.'))
+
+        self._force_cancel(reason, 'mail.mt_note')
+
+    def _force_cancel(self, reason=None, msg_subtype='mail.mt_comment', notify_responsibles=True):
+        """Cancel the requests without checking the rights.
+
+        The state becomes ``'cancel'``, the meetings and resource leaves are removed. With a
+        reason, it is posted on each request and the approvers who already approved it are
+        notified.
+
+        :param str reason: reason of the cancellation
+        :param str msg_subtype: xmlid of the subtype of the posted message
+        :param bool notify_responsibles: notify the approvers
+        """
+        leaves = self.browse() if self.env.context.get('force_delete') else self
+        if reason:
+            model_description = self.env['ir.model']._get('hr.leave').display_name
+            for leave in leaves:
+                body = self.env._(
+                    "The time off request has been cancelled for the following reason:%(reason)s",
+                    reason=Markup("<p>{reason}</p>").format(reason=reason)
+                )
+                leave.message_post(
+                    body=body,
+                    subtype_xmlid=msg_subtype
+                )
+
+                if not notify_responsibles:
+                    continue
+
+                responsibles = self.env['res.partner']
+                employee_sudo = leave.employee_id.sudo()
+                # manager
+                if (leave.work_entry_type_id.leave_validation_type == 'manager' and leave.state == 'validate') or (leave.work_entry_type_id.leave_validation_type == 'both' and leave.state == 'validate1'):
+                    responsibles = employee_sudo.leave_manager_id.partner_id
+                # officer
+                elif leave.work_entry_type_id.leave_validation_type == 'hr' and leave.state == 'validate':
+                    responsibles = employee_sudo.hr_responsible_id.partner_id
+                # both
+                elif leave.work_entry_type_id.leave_validation_type == 'both' and leave.state == 'validate':
+                    responsibles = employee_sudo.leave_manager_id.partner_id
+                    responsibles |= employee_sudo.hr_responsible_id.partner_id
+
+                if responsibles:
+                    body = self.env._(
+                        "%(leave_name)s has been cancelled for the following reason: %(reason)s",
+                        leave_name=leave.display_name,
+                        reason=Markup("<blockquote>{reason}</blockquote>").format(reason=reason),
+                    )
+                    leave.with_context(
+                        email_notification_force_header=True,
+                        email_notification_force_footer=True,
+                    ).message_notify(
+                        partner_ids=responsibles.ids,
+                        model_description=model_description,
+                        subject=self.env._('Cancelled Time Off'),
+                        body=body,
+                        email_layout_xmlid="mail.mail_notification_layout",
+                        subtitles=[leave.display_name],
+                    )
+        leaves_sudo = self.sudo()
+        leaves_sudo.state = "cancel"
+        leaves_sudo.activity_update()
+        leaves_sudo._post_leave_cancel()
+
+    def _post_leave_cancel(self):
+        """Archive the meetings and remove the resource leaves of the requests."""
+        self.meeting_id.active = False
+        self._remove_resource_leave()
+
+    def action_documents(self):
+        domain = [('id', 'in', self.attachment_ids.ids)]
+        return {
+            'name': _("Supporting Documents"),
+            'type': 'ir.actions.act_window',
+            'res_model': 'ir.attachment',
+            'context': {'create': False},
+            'view_mode': 'kanban',
+            'domain': domain
+        }
+
+    def _get_next_states_by_state(self):
+        """Return the states the current user can move the request to, from each state.
+
+        Officers can move between all states (and to ``'validate1'`` for types validated twice),
+        time off approvers of the employee can approve and refuse depending on the validation
+        type, and employees can cancel their own requests, unless started.
+
+        :return: ``{state: set(next_states)}``
+        :rtype: dict
+        """
+        self.ensure_one()
+        state_result = {
+            'confirm': set(),
+            'validate1': set(),
+            'validate': set(),
+            'refuse': set(),
+            'cancel': set()
+        }
+        validation_type = self.validation_type
+
+        user_employees = self.env.user.employee_ids
+        is_own_leave = self.employee_id in user_employees
+        is_in_past = self.date_from and self.date_from.date() < fields.Date.context_today(self)
+
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+        is_time_off_manager = self.employee_id.leave_manager_id == self.env.user
+
+        if is_own_leave and (not is_in_past or is_officer):
+            state_result['validate1'].add('cancel')
+            state_result['validate'].add('cancel')
+            state_result['refuse'].add('cancel')
+
+        if is_officer:
+            if validation_type == 'both':
+                state_result['confirm'].add('validate1')
+                state_result['refuse'].add('validate1')
+                state_result['cancel'].add('validate1')
+            state_result['confirm'].update({'validate', 'refuse'})
+            state_result['validate1'].update({'confirm', 'validate', 'refuse'})
+            state_result['validate'].update({'confirm', 'refuse'})
+            state_result['refuse'].update({'confirm', 'validate'})
+            state_result['cancel'].update({'confirm', 'validate', 'refuse'})
+        elif is_time_off_manager:
+            if validation_type != 'hr':
+                state_result['confirm'].add('refuse')
+                state_result['validate'].add('refuse')
+            if validation_type == 'both':
+                state_result['confirm'].add('validate1')
+                state_result['validate1'].add('refuse')
+            elif validation_type == 'manager':
+                state_result['confirm'].add('validate')
+                state_result['refuse'].add('validate')
+
+        return state_result
+
+    def _check_approval_update(self, state, raise_if_not_possible=True):
+        """Check that the current user can move the requests to ``state``.
+
+        Based on :meth:`_get_next_states_by_state`; the superuser can do everything.
+
+        :param str state: target state
+        :param bool raise_if_not_possible: raise instead of returning ``False``
+        :rtype: bool
+        :raise UserError: when not possible and ``raise_if_not_possible``
+        """
+        if self.env.su:
+            return True
+
+        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user')
+
+        for holiday in self:
+            is_time_off_manager = holiday.employee_id.leave_manager_id == self.env.user
+            dict_all_possible_state = holiday._get_next_states_by_state()
+            validation_type = holiday.validation_type
+            error_message = ""
+            # Standard Check
+            if holiday.state == state:
+                error_message = self.env._('You can\'t do the same action twice.')
+            elif state == 'validate1' and validation_type != 'both':
+                error_message = self.env._('Not possible state. State Approve is only used for leave needed 2 approvals')
+            elif holiday.state == 'cancel':
+                error_message = self.env._('A cancelled leave cannot be modified.')
+            elif state not in dict_all_possible_state.get(holiday.state, {}):
+                if state == 'cancel':
+                    error_message = self.env._('You can only cancel your own leave. You can cancel a leave only if this leave \
+    is approved, validated or refused.')
+                elif state == 'confirm':
+                    error_message = self.env._('You can\'t reset a leave. Cancel/delete this one and create an other')
+                elif state == 'validate1':
+                    if not is_time_off_manager:
+                        error_message = self.env._('Only a Time Off Officer/Manager can approve a leave.')
+                    else:
+                        error_message = self.env._('You can\'t approve a validated leave.')
+                elif state == "validate":
+                    if not is_time_off_manager:
+                        error_message = self.env._('Only a Time Off Officer/Manager can validate a leave.')
+                    elif holiday.state == "refuse":
+                        error_message = self.env._('You can\'t approve this refused leave.')
+                    else:
+                        error_message = self.env._('You can only validate a leave with validation by Time Off Manager.')
+                elif state == "refuse":
+                    if not is_time_off_manager:
+                        error_message = self.env._('Only a Time Off Officer/Manager can refuse a leave.')
+                    else:
+                        error_message = self.env._('You can\'t refuse a leave with validation by Time Off Officer.')
+            elif state != "cancel":
+                try:
+                    holiday.check_access('write')
+                except UserError as e:
+                    if raise_if_not_possible:
+                        raise UserError(e)
+                    return False
+                else:
+                    continue
+            if error_message:
+                if raise_if_not_possible:
+                    raise UserError(error_message)
+                return False
+        return True
+
+    @api.model
+    def open_pending_requests(self):
+        user_employee = self.env.user.employee_id
+        employee = self.env['hr.employee']._get_contextual_employee()
+        context = {'search_default_approve': True, 'search_default_second_approval': True}
+        domain = []
+        if employee != user_employee:
+            view_name = 'hr_holidays.hr_leave_allocation_view_tree'
+            context.update({'search_default_employee_id': employee.id})
+        else:
+            view_name = 'hr_holidays.hr_leave_allocation_view_tree_my'
+            domain = [('employee_id', '=', employee.id)]
+        return {
+            'name': self.env._('Allocation Requests'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'hr.leave.allocation',
+            'views': [(self.env.ref(view_name).id, 'list'), (False, 'form')],
+            'domain': domain,
+            'context': context,
+        }
     # ------------------------------------------------------------
     # Activity methods
     # ------------------------------------------------------------
 
     def _get_responsible_for_approval(self):
-        if self.state == 'confirm' and self.manager_id.user_id:
-            return self.manager_id.user_id
-        elif self.state == 'confirm' and self.employee_id.parent_id.user_id:
-            return self.employee_id.parent_id.user_id
-        elif self.department_id.manager_id.user_id:
-            return self.department_id.manager_id.user_id
-        return self.env.user
+        """Return the user who must approve the request in its current state.
+
+        For the approval by the time off approver (``'manager'``, or ``'both'`` in
+        ``'confirm'``): the employee's ``leave_manager_id``, else the manager's user, else the
+        HR responsible. For the approval by HR (``'hr'``, or ``'both'`` in ``'validate1'``): the
+        employee's ``hr_responsible_id``.
+
+        :rtype: res.users
+        """
+        self.ensure_one()
+
+        responsible = self.env['res.users']
+        if self.validation_type == 'manager' or (self.validation_type == 'both' and self.state == 'confirm'):
+            if self.employee_id.leave_manager_id:
+                responsible = self.employee_id.leave_manager_id
+            elif self.employee_id.parent_id.user_id:
+                responsible = self.employee_id.parent_id.user_id
+            elif self.employee_id.hr_responsible_id:
+                responsible = self.employee_id.hr_responsible_id
+        elif self.validation_type == 'hr' or (self.validation_type == 'both' and self.state == 'validate1'):
+            if self.employee_id.hr_responsible_id:
+                responsible = self.employee_id.hr_responsible_id
+        return responsible
+
+    def _get_to_clean_activities(self):
+        return ['hr_holidays.mail_act_leave_approval', 'hr_holidays.mail_act_leave_second_approval']
 
     def activity_update(self):
-        to_clean, to_do = self.env['hr.leave'], self.env['hr.leave']
+        """Schedule or close the approval activities according to the state of the requests."""
+        if not self or self.env.context.get('mail_activity_automation_skip'):
+            return
+
+        to_clean, to_do, to_do_confirm_activity = self.env['hr.leave'], self.env['hr.leave'], self.env['hr.leave']
+        activity_vals = []
+        today = fields.Date.context_today(self)
+        model_id = self.env['ir.model']._get_id('hr.leave')
+        confirm_activity = self.env.ref('hr_holidays.mail_act_leave_approval')
+        approval_activity = self.env.ref('hr_holidays.mail_act_leave_second_approval')
         for holiday in self:
-            if holiday.state == 'draft':
-                to_clean |= holiday
-            elif holiday.state == 'confirm':
-                holiday.activity_schedule(
-                    'hr_holidays.mail_act_leave_approval',
-                    user_id=holiday._get_responsible_for_approval().id)
-            elif holiday.state == 'validate1':
-                holiday.activity_feedback(['hr_holidays.mail_act_leave_approval'])
-                holiday.activity_schedule(
-                    'hr_holidays.mail_act_leave_second_approval',
-                    user_id=holiday._get_responsible_for_approval().id)
+            if holiday.state in ['confirm', 'validate1']:
+                if holiday.work_entry_type_id.leave_validation_type != 'no_validation':
+                    if holiday.state == 'confirm':
+                        activity_type = confirm_activity
+                        note = _(
+                            'New %(work_entry_type)s Request created by %(user)s',
+                            work_entry_type=holiday.work_entry_type_id.name,
+                            user=holiday.create_uid.name,
+                        )
+                    else:
+                        activity_type = approval_activity
+                        note = _(
+                            'Second approval request for %(work_entry_type)s',
+                            work_entry_type=holiday.work_entry_type_id.name,
+                        )
+                        to_do_confirm_activity += holiday
+                    user_ids = holiday.sudo()._get_responsible_for_approval().ids
+                    for user_id in user_ids:
+                        date_deadline = (
+                            (holiday.date_from -
+                             relativedelta(**{activity_type.delay_unit or 'days': activity_type.delay_count or 0})).date()
+                            if holiday.date_from else today)
+                        if date_deadline < today:
+                            date_deadline = today
+                        activity_vals.append({
+                            'activity_type_id': activity_type.id,
+                            'automated': True,
+                            'date_deadline': date_deadline,
+                            'note': note,
+                            'user_id': user_id,
+                            'res_id': holiday.id,
+                            'res_model_id': model_id,
+                        })
             elif holiday.state == 'validate':
                 to_do |= holiday
-            elif holiday.state == 'refuse':
+            elif holiday.state in ['refuse', 'cancel']:
                 to_clean |= holiday
         if to_clean:
-            to_clean.activity_unlink(['hr_holidays.mail_act_leave_approval', 'hr_holidays.mail_act_leave_second_approval'])
+            to_clean.activity_unlink(self._get_to_clean_activities(), only_automated=False)
+        if to_do_confirm_activity:
+            to_do_confirm_activity.activity_feedback(['hr_holidays.mail_act_leave_approval'])
         if to_do:
             to_do.activity_feedback(['hr_holidays.mail_act_leave_approval', 'hr_holidays.mail_act_leave_second_approval'])
+        self.env['mail.activity'].with_context(short_name=False, mail_activity_quick_update=True).create(activity_vals)
+        if activity_vals:
+            self._notify_leave_request()
 
     ####################################################
     # Messaging methods
     ####################################################
 
-    @api.multi
-    def _track_subtype(self, init_values):
-        if 'state' in init_values and self.state == 'validate':
-            return 'hr_holidays.mt_leave_approved'
-        elif 'state' in init_values and self.state == 'refuse':
-            return 'hr_holidays.mt_leave_refused'
-        return super(HolidaysRequest, self)._track_subtype(init_values)
+    def _notify_change(self, message, subtype_xmlid='mail.mt_note'):
+        """Post ``message`` on the requests and notify their employee.
 
-    @api.multi
-    def _notify_get_groups(self, message, groups):
-        """ Handle HR users and officers recipients that can validate or refuse holidays
-        directly from email. """
-        groups = super(HolidaysRequest, self)._notify_get_groups(message, groups)
+        :param str message: message to post
+        :param str subtype_xmlid: subtype of the posted message
+        """
+        for leave in self:
+            leave.message_post(body=message, subtype_xmlid=subtype_xmlid)
 
-        self.ensure_one()
-        hr_actions = []
-        if self.state == 'confirm':
-            app_action = self._notify_get_action_link('controller', controller='/leave/validate')
-            hr_actions += [{'url': app_action, 'title': _('Approve')}]
-        if self.state in ['confirm', 'validate', 'validate1']:
-            ref_action = self._notify_get_action_link('controller', controller='/leave/refuse')
-            hr_actions += [{'url': ref_action, 'title': _('Refuse')}]
+            recipient = None
+            if leave.user_id:
+                recipient = leave.user_id.partner_id.id
+            elif leave.employee_id:
+                recipient = leave.employee_id.work_contact_id.id
 
-        holiday_user_group_id = self.env.ref('hr_holidays.group_hr_holidays_user').id
-        new_group = (
-            'group_hr_holidays_user', lambda pdata: pdata['type'] == 'user' and holiday_user_group_id in pdata['groups'], {
-                'actions': hr_actions,
-            })
+            if recipient:
+                self.env['mail.thread'].sudo().message_notify(
+                    body=message,
+                    partner_ids=[recipient],
+                    subject=_('Your Time Off'),
+                )
 
-        return [new_group] + groups
+    def _track_log_get_default_subtype(self, track_init_values):
+        if 'state' in track_init_values and self.state == 'validate':
+            leave_notif_subtype = self.work_entry_type_id.leave_notif_subtype_id
+            return leave_notif_subtype or self.env.ref('hr_holidays.mt_leave')
+        return super()._track_log_get_default_subtype(track_init_values)
 
-    @api.multi
-    def message_subscribe(self, partner_ids=None, channel_ids=None, subtype_ids=None):
+    def message_subscribe(self, partner_ids=None, subtype_ids=None):
         # due to record rule can not allow to add follower and mention on validated leave so subscribe through sudo
-        if self.state in ['validate', 'validate1']:
-            self.check_access_rights('read')
-            self.check_access_rule('read')
-            return super(HolidaysRequest, self.sudo()).message_subscribe(partner_ids=partner_ids, channel_ids=channel_ids, subtype_ids=subtype_ids)
-        return super(HolidaysRequest, self).message_subscribe(partner_ids=partner_ids, channel_ids=channel_ids, subtype_ids=subtype_ids)
+        if any(holiday.state in ['validate', 'validate1'] for holiday in self):
+            self.check_access('read')
+            return super(HrLeave, self.sudo()).message_subscribe(partner_ids=partner_ids, subtype_ids=subtype_ids)
+        return super().message_subscribe(partner_ids=partner_ids, subtype_ids=subtype_ids)
+
+    def _notify_leave_request(self):
+        """Notify the approvers (:meth:`_get_responsible_for_approval`) of new requests."""
+        if self.env.context.get('mail_activity_automation_skip'):
+            return False
+
+        leave_model_description = self.env['ir.model']._get(self._name).display_name
+        subject = self.env.ref('hr_holidays.new_timeoff_request_template')._render_field('subject', self.ids, compute_lang=True)
+        for holiday in self:
+            if holiday.work_entry_type_id.leave_validation_type == 'no_validation':
+                continue
+
+            partner_ids = holiday.sudo()._get_responsible_for_approval().mapped('partner_id')
+
+            if not partner_ids:
+                continue
+            leave_msg = self.env.ref('hr_holidays.new_timeoff_request_template').with_context(
+                manager=', '.join(partner_ids.mapped('name'))
+            )._render_field(
+                'body_html',
+                holiday.ids,
+                compute_lang=True
+            )[holiday.id]
+
+            subtitles = [
+                self.env._('%(employee_name)s requested a time-off \n',
+                    employee_name=holiday.employee_id.name),
+                self.env._('%(start_date)s → %(end_date)s (%(duration)s)',
+                    start_date=format_date(self.env, holiday.request_date_from, date_format='MMM dd'),
+                    end_date=format_date(self.env, holiday.request_date_to, date_format='MMM dd'),
+                    duration=holiday.duration_display)
+            ]
+            holiday.message_notify(
+                subject=subject[holiday.id],
+                body=leave_msg,
+                partner_ids=partner_ids.ids,
+                email_layout_xmlid='mail.mail_notification_layout',
+                model_description=leave_model_description,
+                subtitles=subtitles,
+            )
+
+    @api.model
+    def get_unusual_days(self, date_from, date_to=None):
+        """Return the unusual days of the employee of the context (or of the user).
+
+        See :meth:`~odoo.addons.hr.models.hr_employee.HrEmployee._get_unusual_days`.
+
+        :return: ``{'YYYY-MM-DD': bool}``
+        :rtype: dict
+        """
+        employee_id = self.env.context.get('employee_id', False)
+        employee = self.env['hr.employee'].browse(employee_id) if employee_id else self.env.user.employee_id
+        return employee.sudo(False)._get_unusual_days(date_from, date_to)
+
+    def _to_utc(self, date, hour, resource):
+        """Return the naive UTC datetime of ``hour`` on ``date`` in the resource's timezone.
+
+        :param datetime.date date: local day
+        :param float hour: local hour, capped at 24
+        :param resource: record with a ``tz`` field (employee); the user's timezone without it
+        :rtype: datetime.datetime
+        """
+        # float_to_time carries the rounded minutes itself, but stops at 24h
+        holiday_tz = ZoneInfo(resource.tz) if resource.tz else self.env.tz
+        return datetime.combine(date, float_to_time(min(float(hour), 24.0)), tzinfo=holiday_tz).astimezone(UTC).replace(tzinfo=None)
+
+    def _get_hour_from_to(self, request_date_from, request_date_to, day_period=None, count_non_working_days=False):
+        """Return the local hours a request starts and ends at.
+
+        The start is the first hour of the schedule of the employee on ``request_date_from``,
+        the end the last hour on ``request_date_to``, see
+        :meth:`~odoo.addons.hr_holidays.models.hr_employee.HrEmployee._get_hours_for_date`.
+        Working time types in hours keep their explicit hours, or last the planned hours of the
+        day from its start.
+
+        :param datetime.date request_date_from: first day
+        :param datetime.date request_date_to: last day
+        :param str day_period: ``'morning'`` or ``'afternoon'`` for a half day
+        :param bool count_non_working_days: count the days off as working days, centered on noon
+        :return: ``(hour_from, hour_to)`` as float hours
+        :rtype: tuple
+        """
+        working_time_in_hours = self.work_entry_type_id.request_unit == "hour" and self.work_entry_type_id.count_as == "working_time"
+        if working_time_in_hours and self.request_hour_to > self.request_hour_from:
+            # explicit hours given
+            hour_from, hour_to = self.request_hour_from, self.request_hour_to
+        else:
+            hour_from, _ = self.employee_id.sudo()._get_hours_for_date(request_date_from, day_period, count_non_working_days)
+            _, hour_to = self.employee_id.sudo()._get_hours_for_date(request_date_to, day_period, count_non_working_days)
+            if working_time_in_hours and hour_to - hour_from >= 24:
+                half_day = HOURS_PER_DAY / 2
+                hour_from, hour_to = 12.0 - half_day, 12.0 + half_day
+            elif working_time_in_hours and self.employee_id and request_date_from == request_date_to and not day_period:
+                # a day of work is counted on the clock, so by default it lasts its planned hours from its start
+                calendar = self.employee_id.sudo()._get_version(request_date_from).resource_calendar_id
+                day_start = self._to_utc(request_date_from, 0, self.employee_id).replace(tzinfo=UTC)
+                day_end = self._to_utc(request_date_from + timedelta(days=1), 0, self.employee_id).replace(tzinfo=UTC)
+                planned_hours = calendar.get_work_hours_count(day_start, day_end, compute_leaves=False)
+                hour_to = min(hour_from + (planned_hours or calendar.hours_per_day or HOURS_PER_DAY), 24)
+
+        return (hour_from, hour_to)
+
+    ####################################################
+    # Cron methods
+    ####################################################
+
+    @api.model
+    def _cancel_invalid_leaves(self):
+        """Cron: cancel the requests of the next 31 days that accruals will not cover.
+
+        Only types with an accrual allocation are checked: a request whose balance on its start
+        date exceeds the allowed negative amount is cancelled.
+        """
+        inspected_date = fields.Date.context_today(self) + timedelta(days=31)
+        start_datetime = datetime.combine(fields.Date.context_today(self), datetime.min.time())
+        end_datetime = datetime.combine(inspected_date, datetime.max.time())
+        concerned_leaves = self.search([
+            ('date_from', '>=', start_datetime),
+            ('date_from', '<=', end_datetime),
+            ('state', 'in', ['confirm', 'validate1', 'validate']),
+        ], order='date_from desc')
+        accrual_allocations = self.env['hr.leave.allocation'].search([
+            ('employee_id', 'in', concerned_leaves.employee_id.ids),
+            ('work_entry_type_id', 'in', concerned_leaves.work_entry_type_id.ids),
+            ('accrual_plan_id', '!=', False),
+            ('date_from', '<=', end_datetime),
+            '|',
+            ('date_to', '>=', start_datetime),
+            ('date_to', '=', False),
+        ])
+        # only take leaves linked to accruals
+        concerned_leaves = concerned_leaves\
+            .filtered(lambda leave: leave.work_entry_type_id in accrual_allocations.work_entry_type_id)\
+            .sorted('date_from', reverse=True)
+        reason = _("the accruated amount is insufficient for that duration.")
+        for leave in concerned_leaves:
+            work_entry_type = leave.work_entry_type_id
+            date = leave.date_from.date()
+            work_entry_type_data = work_entry_type.get_allocation_data(leave.employee_id, date)
+            if not work_entry_type_data[leave.employee_id][0][1]['max_leaves']:
+                leave._force_cancel(reason, 'mail.mt_note')
+                continue
+            exceeding_duration = work_entry_type_data[leave.employee_id][0][1]['total_virtual_excess']
+            excess_limit = work_entry_type.max_allowed_negative if work_entry_type.allows_negative else 0
+            if exceeding_duration <= excess_limit:
+                continue
+            leave._force_cancel(reason, 'mail.mt_note')
+
+    def _get_calendar_days_between_leaves(self, leave_from, leave_to):
+        """Return the number of calendar days between two requests.
+
+        The days strictly between the end of ``leave_from`` and the start of ``leave_to``.
+
+        Half days are counted as 0.5.
+
+        :param leave_from: the first ``hr.leave``
+        :param leave_to: the second ``hr.leave``
+        :rtype: float
+        """
+        date_from = leave_from.date_to.astimezone(ZoneInfo(leave_from.tz)).date()
+        date_to = leave_to.date_from.astimezone(ZoneInfo(leave_to.tz)).date()
+        full_days = (date_to - date_from).days + 1
+
+        from_period = (
+            leave_from.request_date_to_period
+            if leave_from.work_entry_type_request_unit == "half_day"
+            else "pm"
+        )
+        to_period = (
+            leave_to.request_date_from_period
+            if leave_to.work_entry_type_request_unit == "half_day"
+            else "am"
+        )
+
+        half_days_correction = -2.0
+        if from_period == "am":
+            half_days_correction += 0.5
+        if to_period == "pm":
+            half_days_correction += 0.5
+
+        return full_days + half_days_correction
+
+    def _get_calendar_days(self, date_min=date.min, date_max=date.max):
+        """Return the number of calendar days of the request within ``[date_min, date_max]``.
+
+        Half days are counted as 0.5.
+
+        :rtype: float
+        """
+        self.ensure_one()
+        leave_tz = ZoneInfo(self.tz)
+        date_from = max(date_min, self.date_from.astimezone(leave_tz).date())
+        date_to = min(date_max, self.date_to.astimezone(leave_tz).date())
+        days = (date_to - date_from).days + 1
+        if self.work_entry_type_request_unit == "half_day":
+            if self.request_date_from_period == self.request_date_to_period:
+                return days - 0.5
+            elif (
+                self.request_date_from_period == "pm"
+                and self.request_date_to_period == "am"
+            ):
+                return days - 1
+        return days
+
+    def _create_leaves_from_split(self, leave_split, use_worked_days=False):
+        """Split the request into consecutive requests of the given types and durations.
+
+        Used by localizations to switch the type of a long absence (e.g. a sick leave paid by
+        the employer, then by the social security). With a single entry, only the type of the
+        request changes.
+
+        :param list leave_split: ``(work_entry_type, number_of_days)`` tuples, in order
+        :param bool use_worked_days: count the working days of the schedule instead of the
+            calendar days
+        :return: the request and the created ones
+        :rtype: hr.leave
+        """
+        # leave_split: List of tuple (work_entry_type_id, number_of_days) of the time off to create
+        # use_worked_days: Take into account the working days instead of the calendar days
+        #                  If True, we will deduct the time off date to value according to the
+        #                  employee working schedule and public time off according to time off type
+        #                  configuration
+        self.ensure_one()
+        if len(leave_split) == 1:
+            # If the split results on one work entry type, change it if it differs from the original one
+            work_entry_type = leave_split[0][0]
+            if work_entry_type != self.work_entry_type_id:
+                self.work_entry_type_id = work_entry_type
+            return self
+
+        res = self.env['hr.leave']
+        current_leave = self
+        remaining_days = self.number_of_days if use_worked_days else self._get_calendar_days()
+        if use_worked_days:
+            domain = [('count_as', '=', 'absence'),
+                      ('company_id', 'in', self.env.companies.ids + self.env.context.get('allowed_company_ids', [])),
+                      '|', ('holiday_id', '=', False), ('holiday_id', '!=', self.id)]
+            work_intervals = self.resource_calendar_id._work_intervals_batch(
+                self.date_from.astimezone(UTC), self.date_to.astimezone(UTC), resources_per_tz=self.employee_id.resource_id._get_resources_per_tz(),
+                domain=domain, compute_leaves=not self.work_entry_type_id.include_public_holidays_in_duration,
+            )[self.employee_id.resource_id.id]
+            compined_intervals = {}
+            for start, stop, _ in work_intervals:
+                compined_intervals[start.date()] = 1
+            days_data = sorted(compined_intervals.items())
+
+        for work_entry_type, nbr_days in leave_split:
+            full_days = floor(nbr_days)
+            half_days = nbr_days - full_days
+
+            remaining_days -= nbr_days
+
+            if use_worked_days:
+                if half_days:
+                    new_request_date_to, new_request_date_to_period = current_leave._get_request_date_to_with_period(nbr_days, work_intervals)
+                else:
+                    new_request_date_to = current_leave._get_request_date_to(nbr_days, days_data)
+                    new_request_date_to_period = 'pm'
+            else:
+                new_request_date_to = current_leave.request_date_from + relativedelta(days=full_days - 1)
+                if half_days:
+                    new_request_date_to_period = current_leave.request_date_from_period
+                else:
+                    new_request_date_to_period = 'am' if current_leave.request_date_from_period == 'pm' else 'pm'
+
+                if half_days or current_leave.request_date_from_period == 'pm':
+                    new_request_date_to += relativedelta(days=1)
+
+            old_request_date_to = current_leave.request_date_to
+            old_request_date_to_period = current_leave.request_date_to_period
+
+            current_leave.request_date_to = new_request_date_to
+            current_leave.request_date_to_period = new_request_date_to_period
+            current_leave.work_entry_type_id = work_entry_type
+
+            new_leave_request_date_from = new_request_date_to + relativedelta(days=1)
+            new_leave_request_date_from_period = 'am'
+            if new_request_date_to_period == 'am':
+                new_leave_request_date_from_period = 'pm'
+                new_leave_request_date_from -= relativedelta(days=1)
+
+            if remaining_days:
+                new_leave = current_leave.with_context({'skip_copy_check': True, 'leave_fast_create': True}).copy(
+                    default={
+                        'request_date_from': new_leave_request_date_from,
+                        'request_date_from_period': new_leave_request_date_from_period,
+                        'request_date_to': old_request_date_to,  # Will be recomputed at next iteration
+                        'request_date_to_period': old_request_date_to_period,  # Will be recomputed at next iteration
+                        'request_duration': False,
+                        **current_leave._get_extra_default_leave_values_for_split(),
+                    }
+                )
+                res += current_leave
+                current_leave = new_leave
+            else:
+                res += current_leave
+        return res
+
+    def _get_extra_default_leave_values_for_split(self):
+        """Hook returning extra values for the requests created when splitting.
+
+        See :meth:`_create_leaves_from_split`.
+
+        :rtype: dict
+        """
+        return {}
+
+    def _get_request_date_to(self, number_of_days, days_data):
+        """Return the day at which ``number_of_days`` working days are reached, from the start.
+
+        :param float number_of_days: number of working days
+        :param list days_data: ``(date, duration)`` of the working days
+        :return: the day, ``False`` if not reached
+        """
+        self.ensure_one()
+        for day, duration in days_data:
+            if day < self.request_date_from:
+                continue
+            number_of_days -= 1
+            if number_of_days == 0:
+                return day
+        return False
+
+    def _get_request_date_to_with_period(self, number_of_days, work_intervals):
+        """Return the day and the period at which ``number_of_days`` working days are reached.
+
+        :param float number_of_days: number of working days, possibly with a half day
+        :param work_intervals: work intervals of the request
+        :return: ``(date, 'am' or 'pm')``, ``False`` if not reached
+        """
+        self.ensure_one()
+        for interval in work_intervals:
+            if interval[1].date() < self.request_date_from:
+                continue
+            interval_days = self.resource_calendar_id._get_attendance_intervals_days_data([interval])['days']
+            if number_of_days < interval_days:
+                return (interval[1].date(), 'am')
+            if number_of_days == interval_days:
+                if float_compare(number_of_days, 0.5, precision_digits=2) == 0:
+                    last_day_morning_hours = self.employee_id._get_hours_for_date(interval[0].date(), day_period='morning')
+                    last_day_morning = last_day_morning_hours[1] - last_day_morning_hours[0]
+                    return (interval[1].date(), 'am') if interval[2].day_period != 'afternoon' and last_day_morning else (interval[1].date(), 'pm')
+                return (interval[1].date(), 'pm')
+            number_of_days -= interval_days
+        return False
+
+    def _get_work_entry_type_change_warning(self, leave_split):
+        """Return the message warning that the request will be split or change type.
+
+        :param list leave_split: see :meth:`_create_leaves_from_split`
+        :rtype: str
+        """
+        self.ensure_one()
+        if len(leave_split) > 1:
+            lines = []
+            for work_entry_type, nbr_days in leave_split:
+                days_display = nbr_days if nbr_days != int(nbr_days) else int(nbr_days)
+                lines.append(self.env._("- %(code)s - %(name)s: %(nbr_days)s days", code=work_entry_type.code, name=work_entry_type.name, nbr_days=days_display))
+            return self.env._("This time off will be split into:\n") + "\n".join(lines)
+        if len(leave_split) == 1 and leave_split[0][0] != self.work_entry_type_id:
+            work_entry_type = leave_split[0][0]
+            return self.env._(
+                "This time off will be entirely replaced with %(code)s - %(name)s", code=work_entry_type.code, name=work_entry_type.name
+            )
+        return ""

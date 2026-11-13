@@ -1,75 +1,87 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # * product_margin
-# 
+#
 # Translators:
-# Jeffery CHEN Fan <jeffery9@gmail.com>, 2016
+# Martin Trigaux, 2022
+# Raymond Yu <cl_yu@hotmail.com>, 2022
+# "Tiffany Chang (tic)" <tic@odoo.com>, 2025.
+# "Chloe Wang (chwa)" <chwa@odoo.com>, 2026.
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server saas~11.2\n"
+"Project-Id-Version: Odoo Server 15.5alpha1\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2018-03-22 14:10+0000\n"
-"PO-Revision-Date: 2018-03-22 14:10+0000\n"
-"Last-Translator: Jeffery CHEN Fan <jeffery9@gmail.com>, 2016\n"
-"Language-Team: Chinese (China) (https://www.transifex.com/odoo/teams/41243/zh_CN/)\n"
+"POT-Creation-Date: 2026-08-28 17:42+0000\n"
+"PO-Revision-Date: 2026-08-31 17:58+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Chinese (Simplified Han script) <https://translate.odoo.com/"
+"projects/odoo-s19-4/product_margin/zh_Hans/>\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: zh_CN\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Weblate 2026.8.1\n"
+
+#. module: product_margin
+#: model:ir.module.module,description:base.module_product_margin
+msgid ""
+"\n"
+"Adds a reporting menu in products that computes sales, purchases, margins "
+"and other interesting indicators based on invoices.\n"
+"=============================================================================================================================\n"
+"\n"
+"The wizard to launch the report has several options to help you get the data "
+"you need.\n"
+msgstr ""
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__purchase_num_invoiced
 msgid "# Invoiced in Purchase"
-msgstr "# 采购开票"
+msgstr "# 采购结算"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__sale_num_invoiced
 msgid "# Invoiced in Sale"
-msgstr "# 销售开票"
+msgstr "# 销售结算"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_tree
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_tree
 msgid "# Purchased"
 msgstr "# 采购笔数"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Analysis Criteria"
 msgstr "分析准则"
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__sale_avg_price
 msgid "Avg. Price in Customer Invoices."
-msgstr "客户发票中的平均价格"
+msgstr "客户结算单中的平均价格"
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__purchase_avg_price
-msgid "Avg. Price in Vendor Bills "
-msgstr "供应商发票的平均价格"
+msgid "Avg. Price in Vendor Bills"
+msgstr "供应商账单的平均价格"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__purchase_avg_price
 msgid "Avg. Purchase Unit Price"
-msgstr ""
+msgstr "平均采购单价"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__sale_avg_price
 msgid "Avg. Sale Unit Price"
-msgstr ""
+msgstr "平均销售单价"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Avg. Unit Price"
 msgstr "平均单价"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.product_margin_form_view
-msgid "Cancel"
-msgstr "取消"
-
-#. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Catalog Price"
 msgstr "目录价格"
 
@@ -81,16 +93,17 @@ msgstr "创建人"
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__create_date
 msgid "Created on"
-msgstr "创建时间"
+msgstr "创建日期"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__display_name
+#: model:ir.model.fields,field_description:product_margin.field_product_product__display_name
 msgid "Display Name"
 msgstr "显示名称"
 
 #. module: product_margin
-#: selection:product.margin,invoice_state:0
-#: selection:product.product,invoice_state:0
+#: model:ir.model.fields.selection,name:product_margin.selection__product_margin__invoice_state__draft_open_paid
+#: model:ir.model.fields.selection,name:product_margin.selection__product_product__invoice_state__draft_open_paid
 msgid "Draft, Open and Paid"
 msgstr "草稿、开放和已支付"
 
@@ -127,15 +140,16 @@ msgstr "预期毛利 * 100 / 预期销售"
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__from_date
 msgid "From"
-msgstr "从"
+msgstr "由"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.product_margin_form_view
+#: model_terms:ir.ui.view,arch_db:product_margin.product_margin_form_view
 msgid "General Information"
-msgstr "一般信息"
+msgstr "基本信息"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__id
+#: model:ir.model.fields,field_description:product_margin.field_product_product__id
 msgid "ID"
 msgstr "ID"
 
@@ -143,12 +157,7 @@ msgstr "ID"
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__invoice_state
 #: model:ir.model.fields,field_description:product_margin.field_product_product__invoice_state
 msgid "Invoice State"
-msgstr "发票状态"
-
-#. module: product_margin
-#: model:ir.model.fields,field_description:product_margin.field_product_margin____last_update
-msgid "Last Modified on"
-msgstr "最后修改日"
+msgstr "结算单状态"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__write_uid
@@ -158,7 +167,7 @@ msgstr "最后更新人"
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__write_date
 msgid "Last Updated on"
-msgstr "最后更新时间"
+msgstr "上次更新日期"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__date_from
@@ -171,9 +180,14 @@ msgid "Margin Date To"
 msgstr "毛利结束日"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Margins"
 msgstr "毛利"
+
+#. module: product_margin
+#: model:ir.module.module,shortdesc:base.module_product_margin
+msgid "Margins by Products"
+msgstr ""
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__normal_cost
@@ -186,26 +200,21 @@ msgid "Normal Cost - Total Cost"
 msgstr "正常成本 - 总成本"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.product_margin_form_view
+#: model_terms:ir.ui.view,arch_db:product_margin.product_margin_form_view
 msgid "Open Margins"
 msgstr "开放毛利"
 
 #. module: product_margin
-#: selection:product.margin,invoice_state:0
-#: selection:product.product,invoice_state:0
+#: model:ir.model.fields.selection,name:product_margin.selection__product_margin__invoice_state__open_paid
+#: model:ir.model.fields.selection,name:product_margin.selection__product_product__invoice_state__open_paid
 msgid "Open and Paid"
 msgstr "开放和已支付"
 
 #. module: product_margin
-#: selection:product.margin,invoice_state:0
-#: selection:product.product,invoice_state:0
+#: model:ir.model.fields.selection,name:product_margin.selection__product_margin__invoice_state__paid
+#: model:ir.model.fields.selection,name:product_margin.selection__product_product__invoice_state__paid
 msgid "Paid"
-msgstr "已支付"
-
-#. module: product_margin
-#: model:ir.model,name:product_margin.model_product_product
-msgid "Product"
-msgstr "产品"
+msgstr "已支"
 
 #. module: product_margin
 #: model:ir.model,name:product_margin.model_product_margin
@@ -213,18 +222,27 @@ msgid "Product Margin"
 msgstr "产品毛利"
 
 #. module: product_margin
-#: code:addons/product_margin/wizard/product_margin.py:49
+#. odoo-python
+#: code:addons/product_margin/wizard/product_margin.py:0
 #: model:ir.actions.act_window,name:product_margin.product_margin_act_window
-#: model:ir.ui.menu,name:product_margin.menu_action_product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_graph
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_tree
-#, python-format
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_graph
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_tree
 msgid "Product Margins"
 msgstr "产品毛利"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.product_margin_form_view
+#: model:ir.ui.menu,name:product_margin.menu_action_product_margin
+msgid "Product Margins…"
+msgstr "产品毛利…"
+
+#. module: product_margin
+#: model:ir.model,name:product_margin.model_product_product
+msgid "Product Variant"
+msgstr "产品变体"
+
+#. module: product_margin
+#: model_terms:ir.ui.view,arch_db:product_margin.product_margin_form_view
 msgid "Properties categories"
 msgstr "属性类别"
 
@@ -234,23 +252,23 @@ msgid "Purchase Gap"
 msgstr "采购差距"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Purchases"
 msgstr "采购"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Sales"
 msgstr "销售"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__sales_gap
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_tree
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_tree
 msgid "Sales Gap"
 msgstr "销售差距"
 
 #. module: product_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_form
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_form
 msgid "Standard Price"
 msgstr "标准价格"
 
@@ -263,29 +281,28 @@ msgstr "供应商发票成本价和数量的相乘的总和"
 #: model:ir.model.fields,help:product_margin.field_product_product__turnover
 msgid ""
 "Sum of Multiplication of Invoice price and quantity of Customer Invoices"
-msgstr "客户发票的开票价格和数量相乘的汇总"
+msgstr "客户结算单的开票价格和数量相乘的汇总"
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__total_cost
 msgid "Sum of Multiplication of Invoice price and quantity of Vendor Bills "
-msgstr "供应商发票成本价和数量的相乘的总和"
+msgstr "供应商结算单结算单价格和数量的乘积汇总 "
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__sale_expected
 msgid ""
-"Sum of Multiplication of Sale Catalog price and quantity of Customer "
-"Invoices"
-msgstr "客户发票的销售分类价格和数量相乘的汇总"
+"Sum of Multiplication of Sale Catalog price and quantity of Customer Invoices"
+msgstr "客户结算单的销售分类价格和数量相乘的汇总"
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__sale_num_invoiced
 msgid "Sum of Quantity in Customer Invoices"
-msgstr "客户发票数量合计"
+msgstr "客户结算单数量合计"
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__purchase_num_invoiced
 msgid "Sum of Quantity in Vendor Bills"
-msgstr "供应商发票中数量总和"
+msgstr "供应商发票数量总和"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_margin__to_date
@@ -294,13 +311,13 @@ msgstr "至"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__total_cost
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_tree
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_tree
 msgid "Total Cost"
 msgstr "总成本"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__total_margin
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_tree
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_tree
 msgid "Total Margin"
 msgstr "总毛利"
 
@@ -316,11 +333,11 @@ msgstr "总毛利* 100 / 营业额"
 
 #. module: product_margin
 #: model:ir.model.fields,field_description:product_margin.field_product_product__turnover
-#: model:ir.ui.view,arch_db:product_margin.view_product_margin_tree
+#: model_terms:ir.ui.view,arch_db:product_margin.view_product_margin_tree
 msgid "Turnover"
 msgstr "营业额"
 
 #. module: product_margin
 #: model:ir.model.fields,help:product_margin.field_product_product__total_margin
-msgid "Turnover - Standard price"
-msgstr "营业额  -  标准价格"
+msgid "Turnover - Total cost"
+msgstr "周转 - 总成本"

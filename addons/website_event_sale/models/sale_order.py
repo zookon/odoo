@@ -1,113 +1,171 @@
-# -*- coding: utf-8 -*-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import api, models, _
-from odoo.exceptions import UserError
+from odoo import _, models
+from odoo.exceptions import UserError, ValidationError
 
 
 class SaleOrder(models.Model):
     _inherit = "sale.order"
 
-    @api.multi
-    def _cart_find_product_line(self, product_id=None, line_id=None, **kwargs):
-        self.ensure_one()
-        lines = super(SaleOrder, self)._cart_find_product_line(product_id, line_id)
-        if line_id:
+    def _cart_find_product_line(self, *args, event_slot_id=False, event_ticket_id=False, **kwargs):
+        lines = super()._cart_find_product_line(
+            *args, event_slot_id=event_slot_id, event_ticket_id=event_ticket_id, **kwargs,
+        )
+        if not event_slot_id and not event_ticket_id:
             return lines
-        domain = [('id', 'in', lines.ids)]
-        if self.env.context.get("event_ticket_id"):
-            domain.append(('event_ticket_id', '=', self.env.context.get("event_ticket_id")))
-        return self.env['sale.order.line'].sudo().search(domain)
 
-    @api.multi
-    def _website_product_id_change(self, order_id, product_id, qty=0):
-        order = self.env['sale.order'].sudo().browse(order_id)
-        if self._context.get('pricelist') != order.pricelist_id.id:
-            self = self.with_context(pricelist=order.pricelist_id.id)
+        return lines.filtered(lambda line: line.event_slot_id.id == event_slot_id and line.event_ticket_id.id == event_ticket_id)
 
-        values = super(SaleOrder, self)._website_product_id_change(order_id, product_id, qty=qty)
-        event_ticket_id = None
-        if self.env.context.get("event_ticket_id"):
-            event_ticket_id = self.env.context.get("event_ticket_id")
-        else:
-            product = self.env['product.product'].browse(product_id)
-            if product.event_ticket_ids:
-                event_ticket_id = product.event_ticket_ids[0].id
+    def _verify_updated_quantity(
+        self, order_line, product_id, new_qty, uom_id, *, event_slot_id=False, event_ticket_id=False, **kwargs
+    ):
+        """Restrict quantity updates for event tickets according to available seats."""
+        new_qty, warning = super()._verify_updated_quantity(
+            order_line,
+            product_id,
+            new_qty,
+            uom_id,
+            event_slot_id=event_slot_id,
+            event_ticket_id=event_ticket_id,
+            **kwargs,
+        )
 
-        if event_ticket_id:
-            ticket = self.env['event.event.ticket'].browse(event_ticket_id)
-            if product_id != ticket.product_id.id:
-                raise UserError(_("The ticket doesn't match with this product."))
+        if not event_ticket_id:
+            if not order_line.event_ticket_id or new_qty < order_line.product_uom_qty:
+                return new_qty, warning
+            else:
+                return order_line.product_uom_qty, _("You cannot raise manually the event ticket quantity in your cart")
 
-            values['product_id'] = ticket.product_id.id
-            values['event_id'] = ticket.event_id.id
-            values['event_ticket_id'] = ticket.id
-            values['price_unit'] = ticket.price_reduce or ticket.price
-            values['name'] = ticket.get_ticket_multiline_description_sale()
+        # Adding new ticket to the cart (might be automatically linked to an existing line)
+        ticket = self.env['event.event.ticket'].browse(event_ticket_id).exists()
+        if not ticket:
+            raise UserError(_("The provided ticket doesn't exist"))
+        slot = self.env['event.slot'].browse(event_slot_id).exists()
+        if event_slot_id and not slot:
+            raise UserError(_("The provided ticket slot doesn't exist"))
 
-        # avoid writing related values that end up locking the product record
-        values.pop('event_ok', None)
+        # TODO TDE consider full cart qty and not only added qty
+        # if event seats are not auto confirmed.
+        # Since created registrations are automatically reserved
+        # We should only consider new added qty and not full quantity
+        # when checking for seat availability
+        existing_qty = order_line.product_uom_qty if order_line else 0
+        qty_added = new_qty - existing_qty
+        warning = ''
+        ticket_seats_available = ticket.event_id._get_seats_availability([(slot, ticket)])[0] if slot else ticket.seats_available
+        if ticket.seats_limited and ticket_seats_available is not None and ticket_seats_available <= 0:
+            # Remove existing line if exists and do not add a new one
+            # if no ticket is available anymore
+            new_qty = existing_qty
+            warning = _(
+                'Sorry, The %(ticket)s tickets for the %(event)s event are sold out.',
+                ticket=ticket.name,
+                event=ticket.event_id.name,
+            )
+        elif ticket.seats_limited and ticket_seats_available is not None and qty_added > ticket_seats_available:
+            new_qty = existing_qty + ticket_seats_available
+            warning = _(
+                'Sorry, only %(remaining_seats)d seats are still available for the %(ticket)s ticket for the %(event)s event%(slot)s.',
+                remaining_seats=ticket_seats_available,
+                slot=f' on {slot.name}' if slot else '',
+                ticket=ticket.name,
+                event=ticket.event_id.name,
+            )
+
+        return new_qty, warning
+
+    def _prepare_order_line_values(self, product_id, *args, event_slot_id=False, event_ticket_id=False, **kwargs):
+        """Add corresponding event to the SOline creation values (if ticket is provided)."""
+        values = super()._prepare_order_line_values(
+            product_id, *args, event_ticket_id=event_ticket_id, **kwargs,
+        )
+
+        if not event_ticket_id:
+            return values
+
+        ticket = self.env['event.event.ticket'].browse(event_ticket_id)
+
+        if ticket.product_id.id != product_id:
+            raise UserError(_("The ticket doesn't match with this product."))
+
+        values['event_id'] = ticket.event_id.id
+        values['event_ticket_id'] = ticket.id
+        values['event_slot_id'] = event_slot_id
 
         return values
 
-    @api.multi
-    def _cart_update(self, product_id=None, line_id=None, add_qty=0, set_qty=0, **kwargs):
-        OrderLine = self.env['sale.order.line']
+    def _cart_update_order_line(self, order_line, quantity, **kwargs):
+        old_qty = order_line.product_uom_qty
 
-        if line_id:
-            line = OrderLine.browse(line_id)
-            ticket = line.event_ticket_id
-            old_qty = int(line.product_uom_qty)
-            if ticket.id:
-                self = self.with_context(event_ticket_id=ticket.id, fixed_price=1)
-        else:
-            line = None
-            ticket = self.env['event.event.ticket'].search([('product_id', '=', product_id)], limit=1)
-            old_qty = 0
-        new_qty = set_qty if set_qty else (add_qty or 0 + old_qty)
+        updated_line = super()._cart_update_order_line(order_line, quantity, **kwargs)
 
-        # case: buying tickets for a sold out ticket
-        values = {}
-        if ticket and ticket.seats_availability == 'limited' and ticket.seats_available <= 0:
-            values['warning'] = _('Sorry, The %(ticket)s tickets for the %(event)s event are sold out.') % {
-                'ticket': ticket.name,
-                'event': ticket.event_id.name}
-            new_qty, set_qty, add_qty = 0, 0, 0
-        # case: buying tickets, too much attendees
-        elif ticket and ticket.seats_availability == 'limited' and new_qty > ticket.seats_available:
-            values['warning'] = _('Sorry, only %(remaining_seats)d seats are still available for the %(ticket)s ticket for the %(event)s event.') % {
-                'remaining_seats': ticket.seats_available,
-                'ticket': ticket.name,
-                'event': ticket.event_id.name}
-            new_qty, set_qty, add_qty = ticket.seats_available, ticket.seats_available, 0
-        values.update(super(SaleOrder, self)._cart_update(product_id, line_id, add_qty, set_qty, **kwargs))
+        # Remove event registrations on quantity decrease.
+        if (
+            updated_line
+            and updated_line.event_ticket_id
+            and (diff := old_qty - updated_line.product_uom_qty) > 0
+        ):
+            attendees = self.env['event.registration'].search(
+                domain=[
+                    ('state', '!=', 'cancel'),
+                    ('sale_order_id', '=', self.id),
+                    ('event_slot_id', '=', order_line.event_slot_id.id),
+                    ('event_ticket_id', '=', order_line.event_ticket_id.id),
+                ],
+                offset=updated_line.product_uom_qty,
+                limit=diff,
+                order='create_date asc',
+            )
+            attendees.action_cancel()
 
-        # removing attendees
-        if ticket and new_qty < old_qty:
-            attendees = self.env['event.registration'].search([
-                ('state', '!=', 'cancel'),
-                ('sale_order_id', 'in', self.ids),  # To avoid break on multi record set
-                ('event_ticket_id', '=', ticket.id),
-            ], offset=new_qty, limit=(old_qty - new_qty), order='create_date asc')
-            attendees.button_reg_cancel()
-        # adding attendees
-        elif ticket and new_qty > old_qty:
-            line = OrderLine.browse(values['line_id'])
-            line._update_registrations(confirm=False, cancel_to_draft=True, registration_data=kwargs.get('registration_data', []))
-            # add in return values the registrations, to display them on website (or not)
-            values['attendee_ids'] = self.env['event.registration'].search([('sale_order_line_id', '=', line.id), ('state', '!=', 'cancel')]).ids
-        return values
+        return updated_line
 
+    def _filter_can_send_abandoned_cart_followup(self):
+        # Prevent carts with expired/sold out tickets from being subject of reminder emails
+        return super()._filter_can_send_abandoned_cart_followup().filtered(
+            lambda so: all(ticket.sale_available for ticket in so.order_line.event_ticket_id),
+        )
 
-class SaleOrderLine(models.Model):
-    _inherit = "sale.order.line"
+    def _needs_customer_address(self):
+        """Override of `website_sale` to avoid requesting full address details for event
+        registrations."""
+        res = super()._needs_customer_address()
 
-    @api.multi
-    @api.depends('product_id.display_name', 'event_ticket_id.display_name')
-    def _compute_name_short(self):
-        """ If the sale order line concerns a ticket, we don't want the product name, but the ticket name instead.
-        """
-        super(SaleOrderLine, self)._compute_name_short()
+        if self.order_line and all(line.event_ticket_id for line in self.order_line):
+            return self.env["ir.config_parameter"].sudo().get_bool(
+                    "website_event_sale.require_billing_details_for_events"
+            )
 
-        for record in self:
-            if record.event_ticket_id:
-                record.name_short = record.event_ticket_id.display_name
+        return res
+
+    def _is_cart_ready_for_checkout(self):
+        """Override of `website_sale` to check if the user is trying to order a ticket that is no
+        longer available."""
+        ready = super()._is_cart_ready_for_checkout()
+        if not self.order_line.event_id:
+            return ready
+
+        # Check that there are enough seats available per ticket.
+        registration_domain = [
+            ('sale_order_id', '=', self.id),
+            ('event_ticket_id', '!=', False),
+            ('state', '!=', 'cancel'),
+        ]
+        registrations_per_event = self.env['event.registration'].sudo()._read_group(
+            registration_domain,
+            ['event_id'], ['id:recordset']
+        )
+        for event, registrations in registrations_per_event:
+            count_per_slot_ticket = self.env['event.registration'].sudo()._read_group(
+                [('id', 'in', registrations.ids)],
+                ['event_slot_id', 'event_ticket_id'], ['__count']
+            )
+            try:
+                event._verify_seats_availability(count_per_slot_ticket)
+            except ValidationError as exc:
+                self._add_blocking_alert(str(exc))
+                # Displayed in a little sign next to the order line.
+                registrations.sale_order_line_id._add_warning_alert(str(exc))
+                ready = False
+
+        return ready

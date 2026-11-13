@@ -1,7 +1,12 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from . import models
-from . import controllers
-from odoo.addons.payment.models.payment_acquirer import create_missing_journal_for_acquirers
+from . import controllers, models
+from odoo.addons.payment import reset_payment_provider, setup_provider
 
+
+def post_init_hook(env):
+    setup_provider(env, "paypal")
+
+
+def uninstall_hook(env):
+    reset_payment_provider(env, "paypal")

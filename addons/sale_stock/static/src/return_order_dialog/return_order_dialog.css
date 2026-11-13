@@ -1,0 +1,16 @@
+.o_return_order_dialog {
+    @media (max-width: 575.98px) {
+        --ReturnOrderDialog-img-size-sm: 3.5rem;
+
+        .o_return_order_dialog_price {
+            margin-left: calc(var(--ReturnOrderDialog-img-size-sm) + var(--o-bs-spacer-2));
+        }
+    }
+    .o_return_order_dialog_img {
+        width: var(--ReturnOrderDialog-img-size-sm, 6rem);
+    }
+
+    .o_return_order_dialog_return_reason {
+        background: hsl(from var(--o-bs-modal-content-bg) h s calc(l - 2));
+    }
+}

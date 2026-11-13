@@ -1,20 +1,10 @@
-# -*- coding: utf-8 -*-
-
-# Author: Gustavo Valverde <gvalverde@iterativo.do> iterativo | Consultores
-# Contributors: Edser Solis - iterativo
-
-# Odoo 8.0 author: Eneldo Serrata <eneldo@marcos.do>
-# (Marcos Organizador de Negocios SRL..)
-# Odoo 7.0 author: Jose Ernesto Mendez <tecnologia@obsdr.com>
-# (Open Business Solutions SRL.)
-
-# Copyright (c) 2016 - Present | iterativo, SRL. - http://iterativo.do
-# All rights reserved.
-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
 {
     'name': 'Dominican Republic - Accounting',
+    'icon': '/account/static/description/l10n.png',
+    'countries': ['do'],
     'version': '2.0',
-    'category': 'Localization',
+    'category': 'Accounting/Localizations/Account Charts',
     'description': """
 
 Localization Module for Dominican Republic
@@ -82,24 +72,24 @@ en Odoo):
 110101- Caja
 11010101 Caja General
     """,
-    'author': 'Gustavo Valverde - iterativo | Consultores de Odoo',
-    'website': 'http://iterativo.do',
-    'depends': ['account',
-                'base_iban'
-                ],
-    'data': [
-        # Basic accounting data
-        'data/l10n_do_chart_data.xml',
-        'data/account_account_tag_data.xml',
-        'data/account.account.template.csv',
-        'data/account_chart_template_data.xml',
-        'data/account_data.xml',
-        'data/account.tax.template.xml',
-        # Country States
-        'data/l10n_do_state_data.xml',
-        # Adds fiscal position
-        'data/fiscal_position_template.xml',
-        # configuration wizard, views, reports...
-        'data/account_chart_template_configure_data.xml',
+    'author': 'Gustavo Valverde - INDEXA | Desarrollo de Productos (https://indexa.do)',
+    'website': 'https://www.odoo.com/documentation/latest/applications/finance/fiscal_localizations.html',
+    'depends': [
+        'account',
+        'l10n_latam_invoice_document',
     ],
+    'auto_install': ['account'],
+    'data': [
+        'data/account_account_tag_data.xml',
+        'data/account_tax_report_data.xml',
+        'data/l10n_latam_document_type_data.xml',
+        'views/account_move_views.xml',
+        'views/account_tax_views.xml',
+    ],
+    'demo': [
+        'demo/demo_company.xml',
+        'demo/demo_res_partner.xml',
+        'demo/demo_account_journal.xml',
+    ],
+    'license': 'LGPL-3',
 }

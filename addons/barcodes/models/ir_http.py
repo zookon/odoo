@@ -9,6 +9,6 @@ class IrHttp(models.AbstractModel):
 
     def session_info(self):
         res = super(IrHttp, self).session_info()
-        res['max_time_between_keys_in_ms'] = int(
-            self.env['ir.config_parameter'].sudo().get_param('barcode.max_time_between_keys_in_ms', default='55'))
+        if self.env.user._is_internal():
+            res['max_time_between_keys_in_ms'] = self.env['ir.config_parameter'].sudo().get_int('barcode.max_time_between_keys_in_ms') or 150
         return res

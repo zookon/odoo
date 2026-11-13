@@ -6,12 +6,12 @@
             <form string="Grant Badge To">
                 Set the current value you have reached for this goal
                 <group>
-                    <field name="goal_id" invisible="1"/>
+                    <field name="goal_id" invisible="1"/> <!-- source record(s) the wizard works on, filled from the context -->
                     <field name="current" />
                 </group>
                 <footer>
-                    <button string="Update" type="object" name="action_update_current" class="btn-primary" />
-                    <button string="Cancel" special="cancel" class="btn-secondary"/>
+                    <button string="Update" type="object" name="action_update_current" class="btn-primary" data-hotkey="q"/>
+                    <button special="cancel" data-hotkey="x" class="btn-secondary"/>
                 </footer>
             </form>
         </field>

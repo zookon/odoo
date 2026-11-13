@@ -1,2 +1,3 @@
-# -*- coding: utf-8 -*-
-from . import test_stripe
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
+
+from . import common, test_processing_flows, test_refund_flows, test_stripe

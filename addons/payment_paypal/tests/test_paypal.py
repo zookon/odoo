@@ -1,199 +1,376 @@
-# -*- coding: utf-8 -*-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo.addons.payment.models.payment_acquirer import ValidationError
-from odoo.addons.payment.tests.common import PaymentAcquirerCommon
-from odoo.addons.payment_paypal.controllers.main import PaypalController
-from werkzeug import urls
+from unittest.mock import patch
 
-from odoo.tools import mute_logger
+from odoo import Command
+from odoo.exceptions import ValidationError
 from odoo.tests import tagged
+from odoo.tools import mute_logger
 
-from lxml import objectify
-
-
-class PaypalCommon(PaymentAcquirerCommon):
-
-    def setUp(self):
-        super(PaypalCommon, self).setUp()
-
-        self.paypal = self.env.ref('payment.payment_acquirer_paypal')
-
-        # some CC
-        self.amex = (('378282246310005', '123'), ('371449635398431', '123'))
-        self.amex_corporate = (('378734493671000', '123'))
-        self.autralian_bankcard = (('5610591081018250', '123'))
-        self.dinersclub = (('30569309025904', '123'), ('38520000023237', '123'))
-        self.discover = (('6011111111111117', '123'), ('6011000990139424', '123'))
-        self.jcb = (('3530111333300000', '123'), ('3566002020360505', '123'))
-        self.mastercard = (('5555555555554444', '123'), ('5105105105105100', '123'))
-        self.visa = (('4111111111111111', '123'), ('4012888888881881', '123'), ('4222222222222', '123'))
-        self.dankord_pbs = (('76009244561', '123'), ('5019717010103742', '123'))
-        self.switch_polo = (('6331101999990016', '123'))
+from odoo.addons.payment.tests.http_common import PaymentHttpCommon
+from odoo.addons.payment_paypal import const
+from odoo.addons.payment_paypal import utils as paypal_utils
+from odoo.addons.payment_paypal.controllers.main import PaypalController
+from odoo.addons.payment_paypal.tests.common import PaypalCommon
 
 
-@tagged('post_install', '-at_install', 'external', '-standard')
-class PaypalForm(PaypalCommon):
+@tagged("post_install", "-at_install")
+class PaypalTest(PaypalCommon, PaymentHttpCommon):
+    def test_processing_values(self):
+        tx = self._create_transaction(flow="direct")
+        with (
+            patch(
+                "odoo.addons.payment.models.payment_provider.PaymentProvider._send_api_request",
+                return_value={"id": self.order_id},
+            ),
+            patch(
+                "odoo.addons.payment.utils.generate_access_token",
+                new=self._generate_test_access_token,
+            ),
+        ):
+            processing_values = tx._get_processing_values()
+        self.assertEqual(processing_values["order_id"], self.order_id)
 
-    def test_10_paypal_form_render(self):
-        base_url = self.env['ir.config_parameter'].get_param('web.base.url')
-        # be sure not to do stupid things
-        self.paypal.write({'paypal_email_account': 'tde+paypal-facilitator@odoo.com', 'fees_active': False})
-        self.assertEqual(self.paypal.environment, 'test', 'test without test environment')
+    def test_apm_rendering_values(self):
+        """Test that an alternative payment method redirects the customer to PayPal."""
+        bancontact_pm = self.env.ref("payment_paypal.payment_method_bancontact").id
+        tx = self._create_transaction(flow="redirect", payment_method_id=bancontact_pm)
+        with (
+            patch(
+                "odoo.addons.payment.models.payment_provider.PaymentProvider._send_api_request",
+                return_value=self.apm_order_data,
+            ),
+            patch(
+                "odoo.addons.payment.utils.generate_access_token",
+                new=self._generate_test_access_token,
+            ),
+        ):
+            processing_values = tx._get_processing_values()
+        form_info = self._extract_values_from_html_form(processing_values["redirect_form_html"])
+        self.assertEqual(form_info["action"], self.payer_action_url)
+        self.assertEqual(form_info["method"], "get")
+        self.assertEqual(tx.provider_reference, self.order_id)
 
-        # ----------------------------------------
-        # Test: button direct rendering
-        # ----------------------------------------
+    def test_order_payload_values_for_public_user(self):
+        """If a payment is made with the public user we need to make sure that the email address is
+        not sent to PayPal and that we provide the country code of the company instead."""
+        paypal_pm = self.env.ref("payment_paypal.payment_method_paypal").id
+        tx = self._create_transaction(
+            flow="direct", partner_id=self.public_user.partner_id.id, payment_method_id=paypal_pm
+        )
+        with patch(
+            "odoo.addons.payment.utils.generate_access_token", new=self._generate_test_access_token
+        ):
+            payload = tx._paypal_prepare_order_payload()
+        customer_payload = payload["payment_source"]["paypal"]
+        self.assertTrue("email_address" not in customer_payload)
+        self.assertEqual(customer_payload["address"]["country_code"], self.company.country_id.code)
 
-        # render the button
-        res = self.paypal.render(
-            'test_ref0', 0.01, self.currency_euro.id,
-            values=self.buyer_values)
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_complete_order_confirms_transaction(self):
+        """Test the processing of a webhook notification."""
+        self._disable_process_patcher()
+        tx = self._create_transaction("direct")
+        normalized_data = paypal_utils.normalize_payment_data(
+            self.completed_order, has_capture_data=True
+        )
+        tx.with_context(payment_safe_write=True)._process(normalized_data)
+        self.assertEqual(tx.state, "done")
+        self.assertEqual(tx.provider_reference, normalized_data["id"])
 
-        form_values = {
-            'cmd': '_xclick',
-            'business': 'tde+paypal-facilitator@odoo.com',
-            'item_name': 'YourCompany: test_ref0',
-            'item_number': 'test_ref0',
-            'first_name': 'Norbert',
-            'last_name': 'Buyer',
-            'amount': '0.01',
-            'currency_code': 'EUR',
-            'address1': 'Huge Street 2/543',
-            'city': 'Sin City',
-            'zip': '1000',
-            'country': 'BE',
-            'email': 'norbert.buyer@example.com',
-            'return': urls.url_join(base_url, PaypalController._return_url),
-            'notify_url': urls.url_join(base_url, PaypalController._notify_url),
-            'cancel_return': urls.url_join(base_url, PaypalController._cancel_url),
+    def test_feedback_processing(self):
+        self._disable_process_patcher()
+        normalized_data = paypal_utils.normalize_payment_data(self.payment_data.get("resource"))
+
+        # Confirmed transaction
+        tx = self._create_transaction("direct")
+        tx.with_context(payment_safe_write=True)._process(normalized_data)
+        self.assertEqual(tx.state, "done")
+        self.assertEqual(tx.provider_reference, normalized_data["id"])
+
+        # Pending transaction
+        self.reference = "Test Transaction 2"
+        tx = self._create_transaction("direct")
+        payload = {
+            **normalized_data,
+            "reference_id": self.reference,
+            "status": "PENDING",
+            "pending_reason": "multi_currency",
         }
+        tx.with_context(payment_safe_write=True)._process(payload)
+        self.assertEqual(tx.state, "pending")
+        self.assertEqual(tx.state_message, payload["pending_reason"])
 
-        # check form result
-        tree = objectify.fromstring(res)
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_webhook_notification_confirms_transaction(self):
+        """Test the processing of a webhook notification."""
+        self._disable_process_patcher()
+        tx = self._create_transaction("direct")
+        url = self._build_url(const.WEBHOOK_ROUTE)
+        with patch(
+            "odoo.addons.payment_paypal.controllers.main.PaypalController"
+            "._verify_notification_origin"
+        ):
+            self._make_json_request(url, data=self.payment_data)
+        self._run_processing()
+        self.assertEqual(tx.state, "done")
 
-        data_set = tree.xpath("//input[@name='data_set']")
-        self.assertEqual(len(data_set), 1, 'paypal: Found %d "data_set" input instead of 1' % len(data_set))
-        self.assertEqual(data_set[0].get('data-action-url'), 'https://www.sandbox.paypal.com/cgi-bin/webscr', 'paypal: wrong form POST url')
-        for form_input in tree.input:
-            if form_input.get('name') in ['submit', 'data_set']:
-                continue
-            self.assertEqual(
-                form_input.get('value'),
-                form_values[form_input.get('name')],
-                'paypal: wrong value for input %s: received %s instead of %s' % (form_input.get('name'), form_input.get('value'), form_values[form_input.get('name')])
-            )
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_order_declined_webhook_errors_transaction(self):
+        """Test that a `CHECKOUT.ORDER.DECLINED` webhook notification errors the transaction."""
+        self._disable_process_patcher()
+        tx = self._create_transaction("redirect")
+        url = self._build_url(const.WEBHOOK_ROUTE)
+        with patch(
+            "odoo.addons.payment_paypal.controllers.main.PaypalController"
+            "._verify_notification_origin"
+        ):
+            self._make_json_request(url, data=self.declined_notification)
+        self._run_processing()
+        self.assertEqual(tx.state, "error")
+        self.assertEqual(tx.state_message, "The provided payment source cannot be used.")
 
-    def test_11_paypal_form_with_fees(self):
-        # be sure not to do stupid things
-        self.assertEqual(self.paypal.environment, 'test', 'test without test environment')
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_capture_denied_webhook_updates_tx_error_status(self):
+        """Test that a `PAYMENT.CAPTURE.DENIED` webhook notification cancels the transaction.
 
-        # update acquirer: compute fees
-        self.paypal.write({
-            'fees_active': True,
-            'fees_dom_fixed': 1.0,
-            'fees_dom_var': 0.35,
-            'fees_int_fixed': 1.5,
-            'fees_int_var': 0.50,
+        The transaction is matched through the order id (`provider_reference`) as the denied capture
+        resource does not echo back the shared reference_id.
+        """
+        self._disable_process_patcher()
+        tx = self._create_transaction("redirect")
+        self._update_transaction(tx, provider_reference=self.order_id)
+        denied_notification = {
+            "event_type": "PAYMENT.CAPTURE.DENIED",
+            "resource": {
+                "id": "8SS60826HT082593F",
+                "status": "DECLINED",
+                "amount": {"currency_code": self.currency.name, "value": str(self.amount)},
+                "supplementary_data": {"related_ids": {"order_id": self.order_id}},
+            },
+        }
+        url = self._build_url(const.WEBHOOK_ROUTE)
+        with patch(
+            "odoo.addons.payment_paypal.controllers.main.PaypalController"
+            "._verify_notification_origin"
+        ):
+            self._make_json_request(url, data=denied_notification)
+        self._run_processing()
+        self.assertEqual(tx.state, "error")
+
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_webhook_notification_triggers_origin_check(self):
+        """Test that receiving a webhook notification triggers an origin check."""
+        self._create_transaction("direct")
+        url = self._build_url(const.WEBHOOK_ROUTE)
+        with patch(
+            "odoo.addons.payment_paypal.controllers.main.PaypalController"
+            "._verify_notification_origin"
+        ) as origin_check_mock:
+            self._make_json_request(url, data=self.payment_data)
+            self.assertEqual(origin_check_mock.call_count, 1)
+
+    @mute_logger("odoo.addons.payment_paypal.controllers.main", "odoo.http")
+    def test_webhook_notification_skips_processing_for_errored_txs(self):
+        self._create_transaction("direct")
+        PaymentTransaction = self.env.registry["payment.transaction"]
+        PaymentProvider = self.env.registry["payment.provider"]
+        url = self._build_url(const.WEBHOOK_ROUTE)
+        with (
+            patch.object(
+                PaymentProvider, "_send_api_request", side_effect=ValidationError("Test error")
+            ),
+            patch.object(PaymentTransaction, "_record") as record_mock,
+        ):
+            self._make_json_request(url, data=self.payment_data)
+            self.assertEqual(record_mock.call_count, 0)
+
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_deferred_vaulting_creates_token_from_webhook(self):
+        """A wallet vaulted asynchronously (vault.status APPROVED, no vault id) is tokenized from
+        the VAULT.PAYMENT-TOKEN.CREATED webhook, correlated through the order id."""
+        self._disable_process_patcher()
+        paypal_pm = self.env.ref("payment_paypal.payment_method_paypal").id
+        tx = self._create_transaction("direct", payment_method_id=paypal_pm, tokenize=True)
+        vault_id = "VAULT456"
+        approved_capture = {
+            "status": "COMPLETED",
+            "id": self.order_id,
+            "reference_id": self.reference,
+            "amount": {"currency_code": self.currency.name, "value": str(self.amount)},
+            "payment_source": {"paypal": {"attributes": {"vault": {"status": "APPROVED"}}}},
+        }
+        tx.with_context(payment_safe_write=True)._process(approved_capture)
+        self.assertEqual(tx.state, "done")
+        self.assertFalse(tx.token_id, "No token should be created before the vault webhook.")
+
+        notification = {
+            "event_type": "VAULT.PAYMENT-TOKEN.CREATED",
+            "resource": {
+                "id": vault_id,
+                "metadata": {"order_id": self.order_id},
+                "payment_source": {"paypal": {"email_address": "buyer@example.com"}},
+            },
+        }
+        url = self._build_url(PaypalController._webhook_url)
+        with patch(
+            "odoo.addons.payment_paypal.controllers.main.PaypalController"
+            "._verify_notification_origin"
+        ):
+            self._make_json_request(url, data=notification)
+        self._run_processing()
+        tx.invalidate_recordset()
+        self.assertTrue(tx.token_id, "The vault webhook should create the token.")
+        self.assertEqual(tx.token_id.provider_ref, vault_id)
+        self.assertEqual(tx.token_id.payment_details, "buyer@example.com")
+        self.assertFalse(tx.tokenize)
+
+    @mute_logger("odoo.addons.payment_paypal.controllers.main")
+    def test_paypal_token_payment(self):
+        """A customer-present token payment is charged through `_send_payment_request` and recorded
+        without any payer action."""
+        self._disable_process_patcher()
+        paypal_pm = self.env.ref("payment_paypal.payment_method_paypal").id
+        token = self._create_token(payment_method_id=paypal_pm, provider_ref="VAULT-TOKEN-1")
+        tx = self._create_transaction("token", payment_method_id=paypal_pm, token_id=token.id)
+        # PayPal returns a minimal representation of the completed order: the amount and the final
+        # status live on the capture, not on the purchase unit.
+        capture_id = "CAPTURE-1"
+        completed_order = {
+            "id": self.order_id,
+            "status": "COMPLETED",
+            "payment_source": {"paypal": {"account_id": "59XDVNACRAZZJ"}},
+            "purchase_units": [
+                {
+                    "reference_id": self.reference,
+                    "payments": {
+                        "captures": [
+                            {
+                                "id": capture_id,
+                                "status": "COMPLETED",
+                                "amount": {
+                                    "currency_code": self.currency.name,
+                                    "value": str(self.amount),
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        with (
+            patch(
+                "odoo.addons.payment.models.payment_provider.PaymentProvider._send_api_request",
+                return_value=completed_order,
+            ),
+            patch(
+                "odoo.addons.payment.utils.generate_access_token",
+                new=self._generate_test_access_token,
+            ),
+        ):
+            tx._charge_with_token()
+        payment_data = self.env["payment.data"].search([("transaction_id", "=", tx.id)])
+        self.assertTrue(payment_data)
+        self.assertEqual(
+            payment_data.payload["amount"],
+            {"currency_code": self.currency.name, "value": str(self.amount)},
+            "The amount should be normalized from the capture embedded in the order.",
+        )
+
+        tx.with_context(payment_safe_write=True)._process(payment_data.payload)
+        self.assertEqual(tx.state, "done")
+        self.assertEqual(tx.provider_reference, capture_id)
+        with patch(
+            "odoo.addons.payment.utils.generate_access_token", new=self._generate_test_access_token
+        ):
+            payment_source = tx._paypal_prepare_order_payload()["payment_source"]["paypal"]
+        self.assertNotIn("stored_credential", payment_source)
+
+    def test_access_token_is_fetched_when_expiry_is_unset(self):
+        self.paypal.paypal_access_token_expiry = False
+        self.paypal.paypal_access_token = "old_token"
+        with patch.object(
+            self.env.registry["payment.provider"],
+            "_send_api_request",
+            return_value={"access_token": "new_token", "expires_in": 3600},
+        ):
+            access_token = self.paypal._paypal_fetch_access_token()
+        self.assertEqual(access_token, "new_token")
+
+    def test_provide_shipping_address(self):
+        if "sale.order" not in self.env:
+            self.skipTest("Skipping shipping address test because sale is not installed.")
+
+        product = self.env["product.product"].create({"name": "$5", "list_price": 5.0})
+        order = self.env["sale.order"].create({
+            "partner_id": self.partner.id,
+            "order_line": [Command.create({"product_id": product.id})],
         })
+        paypal_pm = self.env.ref("payment_paypal.payment_method_paypal").id
+        tx = self._create_transaction(
+            flow="direct", sale_order_ids=[Command.set(order.ids)], payment_method_id=paypal_pm
+        )
+        with patch(
+            "odoo.addons.payment.utils.generate_access_token", new=self._generate_test_access_token
+        ):
+            payload = tx._paypal_prepare_order_payload()
+        self.assertEqual(
+            payload["payment_source"]["paypal"]["experience_context"]["shipping_preference"],
+            "SET_PROVIDED_ADDRESS",
+            "Address should be provided when possible",
+        )
+        self.assertDictEqual(
+            payload["purchase_units"][0]["shipping"]["address"],
+            {
+                "address_line_1": tx.partner_id.street,
+                "address_line_2": tx.partner_id.street2,
+                "postal_code": tx.partner_id.zip,
+                "admin_area_2": tx.partner_id.city,
+                "country_code": tx.partner_id.country_code,
+            },
+        )
 
-        # render the button
-        res = self.paypal.render(
-            'test_ref0', 12.50, self.currency_euro.id,
-            values=self.buyer_values)
+        # Set country to one where state is required
+        self.partner.country_id = self.env.ref("base.us")
+        with patch(
+            "odoo.addons.payment.utils.generate_access_token", new=self._generate_test_access_token
+        ):
+            payload = tx._paypal_prepare_order_payload()
+        self.assertEqual(
+            payload["payment_source"]["paypal"]["experience_context"]["shipping_preference"],
+            "NO_SHIPPING",
+            "No shipping should be set if address values are incomplete",
+        )
+        self.assertNotIn("shipping", payload["purchase_units"][0])
 
-        # check form result
-        handling_found = False
-        tree = objectify.fromstring(res)
-
-        data_set = tree.xpath("//input[@name='data_set']")
-        self.assertEqual(len(data_set), 1, 'paypal: Found %d "data_set" input instead of 1' % len(data_set))
-        self.assertEqual(data_set[0].get('data-action-url'), 'https://www.sandbox.paypal.com/cgi-bin/webscr', 'paypal: wrong form POST url')
-        for form_input in tree.input:
-            if form_input.get('name') in ['handling']:
-                handling_found = True
-                self.assertEqual(form_input.get('value'), '1.57', 'paypal: wrong computed fees')
-        self.assertTrue(handling_found, 'paypal: fees_active did not add handling input in rendered form')
-
-    @mute_logger('odoo.addons.payment_paypal.models.payment', 'ValidationError')
-    def test_20_paypal_form_management(self):
-        # be sure not to do stupid things
-        self.assertEqual(self.paypal.environment, 'test', 'test without test environment')
-
-        # typical data posted by paypal after client has successfully paid
-        paypal_post_data = {
-            'protection_eligibility': u'Ineligible',
-            'last_name': u'Poilu',
-            'txn_id': u'08D73520KX778924N',
-            'receiver_email': u'dummy',
-            'payment_status': u'Pending',
-            'payment_gross': u'',
-            'tax': u'0.00',
-            'residence_country': u'FR',
-            'address_state': u'Alsace',
-            'payer_status': u'verified',
-            'txn_type': u'web_accept',
-            'address_street': u'Av. de la Pelouse, 87648672 Mayet',
-            'handling_amount': u'0.00',
-            'payment_date': u'03:21:19 Nov 18, 2013 PST',
-            'first_name': u'Norbert',
-            'item_name': u'test_ref_2',
-            'address_country': u'France',
-            'charset': u'windows-1252',
-            'custom': u'',
-            'notify_version': u'3.7',
-            'address_name': u'Norbert Poilu',
-            'pending_reason': u'multi_currency',
-            'item_number': u'test_ref_2',
-            'receiver_id': u'dummy',
-            'transaction_subject': u'',
-            'business': u'dummy',
-            'test_ipn': u'1',
-            'payer_id': u'VTDKRZQSAHYPS',
-            'verify_sign': u'An5ns1Kso7MWUdW4ErQKJJJ4qi4-AVoiUf-3478q3vrSmqh08IouiYpM',
-            'address_zip': u'75002',
-            'address_country_code': u'FR',
-            'address_city': u'Paris',
-            'address_status': u'unconfirmed',
-            'mc_currency': u'EUR',
-            'shipping': u'0.00',
-            'payer_email': u'tde+buyer@odoo.com',
-            'payment_type': u'instant',
-            'mc_gross': u'1.95',
-            'ipn_track_id': u'866df2ccd444b',
-            'quantity': u'1'
-        }
-
-        # should raise error about unknown tx
-        with self.assertRaises(ValidationError):
-            self.env['payment.transaction'].form_feedback(paypal_post_data, 'paypal')
-
-        # create tx
-        tx = self.env['payment.transaction'].create({
-            'amount': 1.95,
-            'acquirer_id': self.paypal.id,
-            'currency_id': self.currency_euro.id,
-            'reference': 'test_ref_2',
-            'partner_name': 'Norbert Buyer',
-            'partner_country_id': self.country_france.id})
-
-        # validate it
-        tx.form_feedback(paypal_post_data, 'paypal')
-        # check
-        self.assertEqual(tx.state, 'pending', 'paypal: wrong state after receiving a valid pending notification')
-        self.assertEqual(tx.state_message, 'multi_currency', 'paypal: wrong state message after receiving a valid pending notification')
-        self.assertEqual(tx.acquirer_reference, '08D73520KX778924N', 'paypal: wrong txn_id after receiving a valid pending notification')
-        self.assertFalse(tx.date, 'paypal: validation date should not be updated whenr receiving pending notification')
-
-        # update tx
-        tx.write({
-            'state': 'draft',
-            'acquirer_reference': False})
-
-        # update notification from paypal
-        paypal_post_data['payment_status'] = 'Completed'
-        # validate it
-        tx.form_feedback(paypal_post_data, 'paypal')
-        # check
-        self.assertEqual(tx.state, 'done', 'paypal: wrong state after receiving a valid pending notification')
-        self.assertEqual(tx.acquirer_reference, '08D73520KX778924N', 'paypal: wrong txn_id after receiving a valid pending notification')
-        self.assertEqual(tx.date, '2013-11-18 11:21:19', 'paypal: wrong validation date')
+        self.partner.child_ids = [
+            Command.create({
+                "name": tx.partner_id.name,
+                "type": "delivery",
+                "street": "40 Wall Street",
+                "city": "New York City",
+                "zip": "10005",
+                "state_id": self.env.ref("base.state_us_27").id,
+                "country_id": tx.partner_id.country_id.id,
+            })
+        ]
+        shipping_partner = tx.sale_order_ids.partner_shipping_id = self.partner.child_ids
+        with patch(
+            "odoo.addons.payment.utils.generate_access_token", new=self._generate_test_access_token
+        ):
+            payload = tx._paypal_prepare_order_payload()
+        self.assertEqual(
+            payload["payment_source"]["paypal"]["experience_context"]["shipping_preference"],
+            "SET_PROVIDED_ADDRESS",
+            "Address should be provided when partner has a complete delivery address",
+        )
+        self.assertDictEqual(
+            payload["purchase_units"][0]["shipping"]["address"],
+            {
+                "address_line_1": shipping_partner.street,
+                "postal_code": shipping_partner.zip,
+                "admin_area_1": shipping_partner.state_id.code,
+                "admin_area_2": shipping_partner.city,
+                "country_code": shipping_partner.country_code,
+            },
+        )

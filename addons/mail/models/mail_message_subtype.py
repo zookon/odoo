@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import api, fields, models, tools
+from odoo import api, exceptions, fields, models, tools, _
 
 
 class MailMessageSubtype(models.Model):
@@ -9,8 +8,9 @@ class MailMessageSubtype(models.Model):
         the follower subscription, allowing only some subtypes to be pushed
         on the Wall. """
     _name = 'mail.message.subtype'
-    _description = 'Message subtypes'
+    _description = 'Message Subtype'
     _order = 'sequence, id'
+    _clear_cache_name = 'default'  # _get_auto_subscription_subtypes
 
     name = fields.Char(
         'Message Type', required=True, translate=True,
@@ -20,7 +20,7 @@ class MailMessageSubtype(models.Model):
              'change in a process (Stage change). Message subtypes allow to '
              'precisely tune the notifications the user want to receive on its wall.')
     description = fields.Text(
-        'Description', translate=True,
+        'Description', translate=True, prefetch=True,
         help='Description that will be added in the message posted for this '
              'subtype. If void, the name will be added instead.')
     internal = fields.Boolean(
@@ -40,25 +40,15 @@ class MailMessageSubtype(models.Model):
     default = fields.Boolean('Default', default=True, help="Activated by default when subscribing.")
     sequence = fields.Integer('Sequence', default=1, help="Used to order subtypes.")
     hidden = fields.Boolean('Hidden', help="Hide the subtype in the follower options")
+    track_recipients = fields.Boolean('Track Recipients',
+                                      help="Whether to display all the recipients or only the important ones.")
 
-    @api.model
-    def create(self, vals):
-        self.clear_caches()
-        return super(MailMessageSubtype, self).create(vals)
-
-    @api.multi
-    def write(self, vals):
-        self.clear_caches()
-        return super(MailMessageSubtype, self).write(vals)
-
-    @api.multi
-    def unlink(self):
-        self.clear_caches()
-        return super(MailMessageSubtype, self).unlink()
-
-    @tools.ormcache('self.env.uid', 'model_name')
+    @api.ormcache('model_name')
     def _get_auto_subscription_subtypes(self, model_name):
         """ Return data related to auto subscription based on subtype matching.
+        Here model_name indicates child model (like a task) on which we want to
+        make subtype matching based on its parents (like a project).
+
         Example with tasks and project :
 
          * generic: discussion, res_model = False
@@ -67,13 +57,15 @@ class MailMessageSubtype(models.Model):
 
         Returned data
 
-          * all_ids: all subtypes that are generic or related to task and project
-          * def_ids: for task, default subtypes ids
-          * int_ids: for task, internal-only default subtypes ids
+          * child_ids: all subtypes that are generic or related to task (res_model = False or model_name)
+          * def_ids: default subtypes ids (either generic or task specific)
+          * all_int_ids: all internal-only subtypes ids (generic or task or project)
           * parent: dict(parent subtype id, child subtype id), i.e. {task_new.id: new.id}
           * relation: dict(parent_model, relation_fields), i.e. {'project.project': ['project_id']}
         """
-        all_ids, def_ids, int_ids, parent, relation = list(), list(), list(), dict(), dict()
+        child_ids, def_ids = list(), list()
+        all_int_ids = list()
+        parent, relation = dict(), dict()
         subtypes = self.sudo().search([
             '|', '|', ('res_model', '=', False),
             ('res_model', '=', model_name),
@@ -81,15 +73,16 @@ class MailMessageSubtype(models.Model):
         ])
         for subtype in subtypes:
             if not subtype.res_model or subtype.res_model == model_name:
-                all_ids += subtype.ids
+                child_ids += subtype.ids
                 if subtype.default:
                     def_ids += subtype.ids
-            elif subtype.relation_field:
+            if subtype.relation_field:
                 parent[subtype.id] = subtype.parent_id.id
                 relation.setdefault(subtype.res_model, set()).add(subtype.relation_field)
+            # required for backward compatibility
             if subtype.internal:
-                int_ids += subtype.ids
-        return all_ids, def_ids, int_ids, parent, relation
+                all_int_ids += subtype.ids
+        return child_ids, def_ids, all_int_ids, parent, relation
 
     @api.model
     def default_subtypes(self, model_name):
@@ -97,10 +90,58 @@ class MailMessageSubtype(models.Model):
         subtype_ids, internal_ids, external_ids = self._default_subtypes(model_name)
         return self.browse(subtype_ids), self.browse(internal_ids), self.browse(external_ids)
 
-    @tools.ormcache('self.env.uid', 'model_name')
+    @api.ormcache('self.env.uid', 'self.env.su', 'model_name')
     def _default_subtypes(self, model_name):
         domain = [('default', '=', True),
                   '|', ('res_model', '=', model_name), ('res_model', '=', False)]
         subtypes = self.search(domain)
         internal = subtypes.filtered('internal')
         return subtypes.ids, internal.ids, (subtypes - internal).ids
+
+    def write(self, vals):
+        # Protect some master types against model change when they are used
+        # as default in apps, in business flows, plans, ...
+        protected = self.browse()
+        model_info = self._get_model_info_by_xmlid()
+        protected_fnames = {fname for required_values in model_info.values() for fname in required_values}
+        if protected_fnames & vals.keys():
+            for xml_id, required_values in model_info.items():
+                subtype = self.env.ref(xml_id, raise_if_not_found=False)
+                if not subtype or subtype not in self:
+                    continue
+                for fname in required_values:
+                    # beware '' and False for void res_model
+                    if fname in vals and (vals[fname] or False) != (required_values[fname] or False):
+                        protected += subtype
+                        continue
+            if protected:
+                raise exceptions.UserError(
+                    _('You cannot modify %(subtype_names)s as their configuration are required in various apps.',
+                      subtype_names=tools.format_list(self.env, protected.mapped('name'), style="standard"),
+                ))
+        return super().write(vals)
+
+    @api.ondelete(at_uninstall=False)
+    def _unlink_except_protected(self):
+        """ Prevent from removing master data, as defined by '_get_model_info_by_xmlid' """
+        master_data = self.browse()
+        for xml_id in self._get_model_info_by_xmlid():
+            subtype = self.env.ref(xml_id, raise_if_not_found=False)
+            if subtype and subtype in self:
+                master_data += subtype
+        if master_data:
+            raise exceptions.UserError(
+                _('You cannot delete %(subtype_names)s as they are required in various apps.',
+                  subtype_names=tools.format_list(self.env, master_data.mapped('name'), style="standard"),
+            ))
+
+    @api.model
+    def _get_model_info_by_xmlid(self):
+        """ Get model info based on xml ids for master subtypes """
+        return {
+            # comment / note: generic master types for send a message / log a note
+            'mail.mt_comment': {'internal': False, 'res_model': False},
+            'mail.mt_note': {'internal': True, 'res_model': False},
+            # activity log: less critical but helper anyway
+            'mail.mt_activities': {'res_model': False},
+        }

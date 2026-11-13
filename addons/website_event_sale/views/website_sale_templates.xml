@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- If the sale order line concerns an event, we want the "product" link to point to the event itself and not to the product on the ecommerce -->
+    <template id="cart_line_product_link_inherit_website_event_sale" inherit_id="website_sale.cart_line_product_link" name="Event Shopping Cart Line Product Link">
+        <xpath expr="//a" position="attributes">
+            <attribute name="t-attf-href"/>
+            <attribute name="t-att-href">
+                line.event_id and ('/event/%s/register' % slug(line.event_id)) or line.product_id.website_url
+            </attribute>
+        </xpath>
+    </template>
+
+    <!-- If the sale order line concerns an event, we want to show an additional line with the event name even on small screens -->
+    <template id="cart_summary_inherit_website_event_sale" inherit_id="website_sale.cart_summary_content">
+        <xpath expr="//td[@name='website_sale_cart_summary_product_name']/span" position="after">
+            <span t-if="line.event_slot_id" class="text-muted" t-out="line.event_slot_id.display_name"/>
+        </xpath>
+    </template>
+
+    <template id="event_confirmation" inherit_id="website_sale.confirmation">
+        <div id="oe_website_sale_address" position="before">
+            <t t-if="events">
+                <section class="row mx-0 my-2 border rounded" t-foreach="events" t-as="event">
+                    <t t-set="attendees" t-value="attendee_ids_per_event.get(event, [])"/>
+                    <t t-set="no_cover" t-value="json.loads(event.cover_properties).get('background-image') in (None, '', 'none')"/>
+                    <t t-set="website_visitor_timezone" t-value="request.env['website.visitor']._get_visitor_timezone()"/>
+                    <div class="col-4 position-relative p-0">
+                        <span t-if="event.is_participating" class="o_wevent_badge badge position-absolute top-0 start-0 z-1 m-3 p-2 text-bg-success">
+                            <i class="oi me-2" data-icon="check" role="img" aria-hidden="true"/>Registered
+                        </span>
+                        <t t-call="website.record_cover"
+                            _record="event"
+                            use_size="True"
+                            use_text_align="True"
+                            additionnal_classes.f="d-block h-100 w-100 overflow-hidden ratio ratio-4x3 rounded-start {{'bg-secondary' if no_cover else ''}}"/>
+                    </div>
+                    <div class="col-8 d-flex flex-column align-items-start my-3">
+                        <div class="d-flex align-items-center gap-1 w-100">
+                            <a class="text-decoration-none" t-att-href="event.event_url or event.website_url">
+                                <h4 class="m-2 text-primary">
+                                    <i t-if="not event.address_id" class="oi oi-filled me-1" data-icon="videocam" role="img" aria-label="Online event"/>
+                                    <span t-field="event.name" placeholder="Event Title"/>
+                                </h4>
+                            </a>
+                        </div>
+                        <h6 t-if="not event.is_multi_slots" class="mx-2 mb-0">
+                            <span t-out="event.date_begin" t-options="{'widget': 'datetime', 'tz_name': event.date_tz, 'format': 'medium'}"/>
+                            <span t-if="website_visitor_timezone != event.date_tz" class="d-block mt-1 smaller opacity-75">(<t t-out="event.date_tz"/>)</span>
+                        </h6>
+                        <div t-if="attendees and not event.is_multi_slots" class="ms-2 my-3">
+                            <t t-call="website_event.registration_ticket_access" attendees="attendees"/>
+                        </div>
+                        <div class="d-flex flex-column m-2 w-100">
+                            <div t-if="attendees and event.is_multi_slots" t-foreach="attendees" t-as="slot" t-att-class="not slot_first and 'mt-4 pt-3 border-top'">
+                                <div t-attf-class="d-flex flex-column justify-content-between mb-2">
+                                    <div>
+                                        <div class="row">
+                                            <div class="col-12 col-md-2">
+                                                <b>Start</b>
+                                            </div>
+                                            <div class="col-12 col-md-auto ps-md-0">
+                                                <span t-out="slot.start_datetime"
+                                                    t-options='{"widget": "datetime", "show_seconds": False, "tz_name": event.date_tz, "format": "medium"}'/>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-12 col-md-2">
+                                                <b>End</b>
+                                            </div>
+                                            <div class="col-12 col-md-auto ps-md-0">
+                                                <span t-out="slot.end_datetime"
+                                                    t-options='{"widget": "datetime", "show_seconds": False, "tz_name": event.date_tz, "format": "medium"}'/>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <span t-if="website_visitor_timezone != event.date_tz" class="smaller opacity-75">(<t t-out="event.date_tz"/>)</span>
+                                        </div>
+                                    </div>
+                                    <div t-if="attendees[slot]" class="mt-2 mb-3">
+                                        <t t-call="website_event.registration_ticket_access" attendees="attendees[slot]"/>
+                                    </div>
+                                </div>
+                                <t t-call="website_event.event_calendar_links"
+                                    iCal_url="urls_per_event.get(event.id, {}).get(slot.id, {}).get('iCal_url', '')"
+                                    google_url="urls_per_event.get(event.id, {}).get(slot.id, {}).get('google_url', '')"/>
+                            </div>
+                            <div t-if="not event.is_multi_slots" class="mt-auto">
+                                <t t-call="website_event.event_calendar_links"
+                                    iCal_url="urls_per_event.get(event.id, {}).get('iCal_url', '')"
+                                    google_url="urls_per_event.get(event.id, {}).get('google_url', '')"/>
+                            </div>
+                            <t t-call="website_event.event_confirmation_end_page_hook"/>
+                        </div>
+                    </div>
+                </section>
+            </t>
+        </div>
+    </template>
+
+</odoo>

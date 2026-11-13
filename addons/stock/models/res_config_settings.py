@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import api, fields, models
+from odoo import api, fields, models, _
+from odoo.exceptions import UserError
 
 
 class ResConfigSettings(models.TransientModel):
     _inherit = 'res.config.settings'
 
-    module_procurement_jit = fields.Selection([
-        (1, 'Immediately after sales order confirmation'),
-        (0, 'Manually or based on automatic scheduler')
-        ], "Reservation",
-        help="Reserving products manually in delivery orders or by running the scheduler is advised to better manage priorities in case of long customer lead times or/and frequent stock-outs.")
     module_product_expiry = fields.Boolean("Expiration Dates",
         help="Track following dates on lots & serial numbers: best before, removal, end of life, alert. \n Such dates are set automatically at lot/serial number creation based on values set on the product (in days).")
     group_stock_production_lot = fields.Boolean("Lots & Serial Numbers",
-        implied_group='stock.group_production_lot')
-    group_lot_on_delivery_slip = fields.Boolean("Display Lots & Serial Numbers",
-        implied_group='stock.group_lot_on_delivery_slip')
-    group_stock_tracking_lot = fields.Boolean("Delivery Packages",
+        implied_group='stock.group_production_lot', group="base.group_user,base.group_portal")
+    group_stock_lot_print_gs1 = fields.Boolean("Print GS1 Barcodes for Lots & Serial Numbers",
+        implied_group='stock.group_stock_lot_print_gs1')
+    group_lot_on_delivery_slip = fields.Boolean("Display Lots & Serial Numbers on Delivery Slips",
+        implied_group='stock.group_lot_on_delivery_slip', group="base.group_user,base.group_portal")
+    group_stock_picking_batch = fields.Boolean("Batch, Wave & Cluster Transfers",
+        implied_group='stock.group_stock_picking_batch')
+    group_stock_tracking_lot = fields.Boolean("Packages",
         implied_group='stock.group_tracking_lot')
     group_stock_tracking_owner = fields.Boolean("Consignment",
         implied_group='stock.group_tracking_owner')
@@ -26,69 +26,138 @@ class ResConfigSettings(models.TransientModel):
         implied_group='stock.group_adv_location',
         help="Add and customize route operations to process product moves in your warehouse(s): e.g. unload > quality control > stock for incoming products, pick > pack > ship for outgoing products. \n You can also set putaway strategies on warehouse locations in order to send incoming products into specific child locations straight away (e.g. specific bins, racks).")
     group_warning_stock = fields.Boolean("Warnings for Stock", implied_group='stock.group_warning_stock')
-    propagation_minimum_delta = fields.Integer(related='company_id.propagation_minimum_delta', string="Minimum Delta for Propagation")
-    use_propagation_minimum_delta = fields.Boolean(
-        string="No Rescheduling Propagation",
-        oldname='default_new_propagation_minimum_delta',
-        config_parameter='stock.use_propagation_minimum_delta',
-        help="Rescheduling applies to any chain of operations (e.g. Make To Order, Pick Pack Ship). In the case of MTO sales, a vendor delay (updated incoming date) impacts the expected delivery date to the customer. \n This option allows to not propagate the rescheduling if the change is not critical.")
-    module_stock_picking_batch = fields.Boolean("Batch Pickings", oldname="module_stock_picking_wave")
+    group_stock_sign_delivery = fields.Boolean("Signature", implied_group='stock.group_stock_sign_delivery')
     module_stock_barcode = fields.Boolean("Barcode Scanner")
-    module_delivery_dhl = fields.Boolean("DHL USA")
-    module_delivery_fedex = fields.Boolean("FedEx")
-    module_delivery_ups = fields.Boolean("UPS")
-    module_delivery_usps = fields.Boolean("USPS")
-    module_delivery_bpost = fields.Boolean("bpost")
-    module_delivery_easypost = fields.Boolean("Easypost")
+    module_stock_barcode_barcodelookup = fields.Boolean("Stock Barcode Database")
+    stock_move_email_validation = fields.Boolean(related='company_id.stock_move_email_validation', readonly=False)
+    module_stock_sms = fields.Boolean("SMS Confirmation")
+    module_delivery = fields.Boolean("Delivery Methods")
+    module_quality_control = fields.Boolean("Quality")
+    module_quality_control_worksheet = fields.Boolean("Quality Worksheet")
     group_stock_multi_locations = fields.Boolean('Storage Locations', implied_group='stock.group_stock_multi_locations',
         help="Store products in specific locations of your warehouse (e.g. bins, racks) and to track inventory accordingly.")
-    group_stock_multi_warehouses = fields.Boolean('Multi-Warehouses', implied_group='stock.group_stock_multi_warehouses')
+    annual_inventory_month = fields.Selection(related='company_id.annual_inventory_month', readonly=False)
+    annual_inventory_day = fields.Integer(related='company_id.annual_inventory_day', readonly=False)
+    module_stock_dropshipping = fields.Boolean("Dropshipping")
+    barcode_separator = fields.Char(
+        "Separator", config_parameter='stock.barcode_separator',
+        help="Character(s) used to separate data contained within an aggregate barcode (i.e. a barcode containing multiple barcode encodings)")
+    module_stock_fleet = fields.Boolean("Transport Management")
+    replenish_on_order = fields.Boolean("Replenish on Order (MTO)", compute='_compute_replenish_on_order', inverse='_inverse_replenish_on_order')
+    stock_text_confirmation = fields.Boolean(related='company_id.stock_text_confirmation', string='Stock Text Validation with stock move', readonly=False)
+    stock_confirmation_type = fields.Selection(related='company_id.stock_confirmation_type', string='Stock Text Validation type', readonly=False)
+    horizon_days = fields.Integer(related='company_id.horizon_days', readonly=False)
+    picking_policy = fields.Selection(related="company_id.picking_policy", readonly=False, required=True)
 
-    @api.onchange('use_propagation_minimum_delta')
-    def _onchange_use_propagation_minimum_delta(self):
-        if not self.use_propagation_minimum_delta:
-            self.propagation_minimum_delta = 1
+    def _compute_replenish_on_order(self):
+        route = self.env.ref('stock.route_warehouse0_mto', raise_if_not_found=False)
+        if route:
+            self.replenish_on_order = route.active
+
+    def _inverse_replenish_on_order(self):
+        route = self.env.ref('stock.route_warehouse0_mto', raise_if_not_found=False)
+        if route:
+            route.active = self.replenish_on_order
 
     @api.onchange('group_stock_multi_locations')
     def _onchange_group_stock_multi_locations(self):
         if not self.group_stock_multi_locations:
-            self.group_stock_multi_warehouses = False
             self.group_stock_adv_location = False
 
-    @api.onchange('group_stock_multi_warehouses')
-    def _onchange_group_stock_multi_warehouses(self):
-        if self.group_stock_multi_warehouses:
-            self.group_stock_multi_locations = True
+    @api.onchange('group_stock_picking_batch')
+    def _onchange_group_stock_picking_batch(self):
+        if not self.group_stock_picking_batch:
+            self.module_stock_fleet = False
 
     @api.onchange('group_stock_production_lot')
     def _onchange_group_stock_production_lot(self):
         if not self.group_stock_production_lot:
             self.group_lot_on_delivery_slip = False
+            self.module_product_expiry = False
+
+    @api.onchange('stock_confirmation_type', 'stock_text_confirmation')
+    def _onchange_stock_confirmation_fields(self):
+        if self.stock_text_confirmation and self.stock_confirmation_type == 'sms':
+            self.module_stock_sms = True
+
+    @api.onchange('module_product_barcodelookup')
+    def onchange_module_product_barcodelookup(self):
+        if not self.module_product_barcodelookup:
+            self.module_stock_barcode_barcodelookup = False
+
+    @api.onchange('module_stock_barcode_barcodelookup')
+    def onchange_module_stock_barcode_barcodelookup(self):
+        if self.module_stock_barcode_barcodelookup:
+            self.module_product_barcodelookup = True
+
+    @api.onchange('module_stock_fleet')
+    def _onchange_module_stock_fleet(self):
+        if self.module_stock_fleet and not self.group_stock_picking_batch:
+            self.group_stock_picking_batch = True
 
     @api.onchange('group_stock_adv_location')
     def onchange_adv_location(self):
         if self.group_stock_adv_location and not self.group_stock_multi_locations:
             self.group_stock_multi_locations = True
 
-    @api.multi
     def set_values(self):
-        super(ResConfigSettings, self).set_values()
+        warehouse_grp = self.env.ref('stock.group_stock_multi_warehouses')
+        location_grp = self.env.ref('stock.group_stock_multi_locations')
+        base_user = self.env.ref('base.group_user')
+        base_user_implied_ids = base_user.implied_ids
+        if not self.group_stock_multi_locations and location_grp in base_user_implied_ids and warehouse_grp in base_user_implied_ids:
+            raise UserError(_("You can't deactivate the multi-location feature if you have more than one warehouse per company"))
 
-        if not self.user_has_groups('stock.group_stock_manager'):
+        # Update all picking types of this company to keep their move_type aligned with the configured picking policy
+        picking_types = self.env['stock.picking.type'].search([
+            ('move_type', '!=', self.picking_policy),
+            ('company_id', '=', self.company_id.id)
+        ])
+        if picking_types:
+            picking_types.move_type = self.picking_policy
+
+        previous_group = self.default_get(['group_stock_multi_locations', 'group_stock_production_lot', 'group_stock_tracking_lot'])
+        super().set_values()
+
+        if not self.env.user.has_group('stock.group_stock_manager'):
             return
 
-        """ If we are not in multiple locations, we can deactivate the internal
-        operation types of the warehouses, so they won't appear in the dashboard.
-        Otherwise, activate them.
-        """
+        # If we just enabled multiple locations with this settings change, we can deactivate
+        # the internal operation types of the warehouses, so they won't appear in the dashboard.
+        # Otherwise (if we just disabled multiple locations with this settings change), activate them
         warehouse_obj = self.env['stock.warehouse']
-        if self.group_stock_multi_locations:
+        if self.group_stock_multi_locations and not previous_group.get('group_stock_multi_locations'):
             # override active_test that is false in set_values
-            warehouses = warehouse_obj.with_context(active_test=True).search([])
-            active = True
-        else:
-            warehouses = warehouse_obj.search([
+            warehouse_obj.with_context(active_test=True).search([]).int_type_id.active = True
+            # Disable the views removing the create button from the location list and form.
+            # Be resilient if the views have been deleted manually.
+            for view in (
+                self.env.ref('stock.stock_location_view_tree2_editable', raise_if_not_found=False),
+                self.env.ref('stock.stock_location_view_form_editable', raise_if_not_found=False),
+            ):
+                if view:
+                    view.active = False
+        elif not self.group_stock_multi_locations and previous_group.get('group_stock_multi_locations'):
+            warehouse_obj.search([
                 ('reception_steps', '=', 'one_step'),
-                ('delivery_steps', '=', 'ship_only')])
-            active = False
-        warehouses.mapped('int_type_id').write({'active': active})
+                ('delivery_steps', '=', 'ship_only')
+            ]).int_type_id.active = False
+            # Enable the views removing the create button from the location list and form.
+            # Be resilient if the views have been deleted manually.
+            for view in (
+                self.env.ref('stock.stock_location_view_tree2_editable', raise_if_not_found=False),
+                self.env.ref('stock.stock_location_view_form_editable', raise_if_not_found=False),
+            ):
+                if view:
+                    view.active = True
+
+        if not self.group_stock_production_lot and previous_group.get('group_stock_production_lot'):
+            if self.env['product.product'].search_count([('tracking', 'in', ['lot', 'serial'])], limit=1):
+                raise UserError(_("You have product(s) in stock that have lot/serial number tracking enabled. \nSwitch off tracking on all the products before switching off this setting."))
+
+        return
+
+    def action_view_delivery_methods(self):
+        if action := self.env.ref('delivery.action_delivery_carrier_form', raise_if_not_found=False):
+            return action._get_action_dict()
+        return

@@ -1,8 +1,15 @@
-# -*- coding: utf-8 -*-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from . import payment_acquirer
-from . import account_invoice
-from . import res_partner
-from . import account_payment
-from . import chart_template
-from . import res_company
+from . import (
+    ir_http,
+    ir_websocket,
+    payment_data,
+    payment_method,
+    payment_provider,
+    payment_token,
+    payment_transaction,
+    portal_entry,
+    res_company,
+    res_country,
+    res_partner,
+)

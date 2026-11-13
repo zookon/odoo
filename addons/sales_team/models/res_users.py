@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import api, fields, models
@@ -7,22 +6,45 @@ from odoo import api, fields, models
 class ResUsers(models.Model):
     _inherit = 'res.users'
 
+    crm_team_ids = fields.Many2many(
+        'crm.team', 'crm_team_member', 'user_id', 'crm_team_id', string='Sales Teams',
+        check_company=True, copy=False, readonly=True,
+        compute='_compute_crm_team_ids', search='_search_crm_team_ids')
+    crm_team_member_ids = fields.One2many('crm.team.member', 'user_id', string='Sales Team Members')
     sale_team_id = fields.Many2one(
-        'crm.team', "User's Sales Team",
-        help='Sales Team the user is member of. Used to compute the members of a Sales Team through the inverse one2many')
+        'crm.team', string='User Sales Team', compute='_compute_sale_team_id',
+        readonly=True, store=True,
+        help="Main user sales team. Used notably for pipeline, or to set sales team in invoicing or subscription.")
 
-    group_sales_team_user = fields.Selection(
-        selection=lambda self: self._get_group_selection('base.module_category_sales_management'),
-        string="Sales", compute='_compute_groups_id', inverse='_inverse_groups_id',
-        category_xml_id='base.module_category_sales_management',
-        help='User: Own Documents Only: the user will have access to his own data in the sales application.\nUser: All Documents: the user will have access to all records of everyone in the sales application.\nManager: the user will have an access to the sales configuration as well as statistic reports.')
+    @api.depends('crm_team_member_ids.active')
+    def _compute_crm_team_ids(self):
+        for user in self:
+            user.crm_team_ids = user.crm_team_member_ids.crm_team_id
 
-    @api.model
-    def create(self, vals):
-        # Assign the new user in the sales team if there's only one sales team of type `Sales`
-        user = super(ResUsers, self).create(vals)
-        if user.has_group('sales_team.group_sale_salesman') and not user.sale_team_id:
-            teams = self.env['crm.team'].search([('team_type', '=', 'sales')])
-            if len(teams.ids) == 1:
-                user.sale_team_id = teams.id
-        return user
+    def _search_crm_team_ids(self, operator, value):
+        # Equivalent to searching on active teams to which the user belongs,
+        # but we inline the ids directly to simplify final queries and improve performance,
+        # as it's part of a few ir.rules.
+        # If we're going to inject too many `ids`, we fall back on the default behavior
+        # to avoid a performance regression.
+        IN_MAX = 10_000
+        # Only active memberships count, as in `_compute_crm_team_ids`.
+        domain = [('crm_team_member_ids', 'any', [('crm_team_id', operator, value), ('active', '=', True)])]
+        user_ids = self.env['res.users'].with_context(active_test=False)._search(domain, limit=IN_MAX).get_result_ids()
+        if len(user_ids) < IN_MAX:
+            return [('id', 'in', user_ids)]
+
+        return domain
+
+    @api.depends('crm_team_member_ids.crm_team_id', 'crm_team_member_ids.create_date', 'crm_team_member_ids.active')
+    def _compute_sale_team_id(self):
+        for user in self:
+            if not user.crm_team_member_ids.ids:
+                user.sale_team_id = False
+            else:
+                sorted_memberships = user.crm_team_member_ids  # sorted by create date
+                user.sale_team_id = sorted_memberships[0].crm_team_id if sorted_memberships else False
+
+    def action_archive(self):
+        self.env['crm.team.member'].search([('user_id', 'in', self.ids)]).action_archive()
+        return super().action_archive()

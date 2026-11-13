@@ -1,17 +1,296 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+import json
+
 from odoo.api import Environment
+from odoo.fields import Command
 import odoo.tests
+from odoo.tools import html2plaintext
+import unittest
+from odoo.tests.common import new_test_user
+
+from odoo.addons.http_routing.tests.common import MockRequest
+from odoo.addons.website_hr_recruitment.controllers.main import WebsiteHrRecruitment
 
 @odoo.tests.tagged('post_install', '-at_install')
 class TestWebsiteHrRecruitmentForm(odoo.tests.HttpCase):
     def test_tour(self):
-        self.phantom_js("/", "odoo.__DEBUG__.services['web_tour.tour'].run('website_hr_recruitment_tour')", "odoo.__DEBUG__.services['web_tour.tour'].tours.website_hr_recruitment_tour.ready")
+        department = self.env['hr.department'].create({'name': 'guru team'})
+        job_guru = self.env['hr.job'].create({
+            'name': 'Guru',
+            'is_published': True,
+            'department_id': department.id,
+        })
+        job_intern = self.env['hr.job'].create({
+            'name': 'Internship',
+            'is_published': True,
+            'department_id': department.id,
+        })
+        skill_type = self.env['hr.skill.type'].create({
+            'name': 'Tour Coding',
+            'sequence': 0,
+            'skill_ids': [
+                Command.create({'name': 'Tour Python'}),
+                Command.create({'name': 'Tour Owl'}),
+            ],
+            'skill_level_ids': [
+                Command.create({'name': 'Beginner', 'level_progress': 10}),
+                Command.create({'name': 'Good', 'level_progress': 50, 'default_level': True}),
+            ],
+        })
+
+        self.start_tour(self.env['website'].get_client_action_url('/jobs'), 'website_hr_recruitment_tour_edit_form', login='admin')
+
+        with odoo.tests.RecordCapturer(self.env['hr.applicant']) as capt:
+            self.start_tour("/jobs", 'website_hr_recruitment_tour')
 
         # check result
-        record = self.env['hr.applicant'].search([('description', '=', '### HR RECRUITMENT TEST DATA ###')])
-        self.assertEqual(len(record), 1)
-        self.assertEqual(record.partner_name, "John Smith")
-        self.assertEqual(record.email_from, "john@smith.com")
-        self.assertEqual(record.partner_phone, '118.218')
+        self.assertEqual(len(capt.records), 2)
+
+        guru_applicant = capt.records[0]
+        self.assertEqual(guru_applicant.partner_name, 'John Smith')
+        self.assertEqual(guru_applicant.email_from, 'john@smith.com')
+        self.assertEqual(guru_applicant.partner_phone, '118.218')
+        self.assertTrue(
+            any(
+                'Other Information:' in body_text and
+                'Short Introduction : ### [GURU] HR RECRUITMENT TEST DATA ###' in body_text
+                for body_text in (html2plaintext(m.body) for m in guru_applicant.message_ids)
+            ),
+            "The Guru custom fields should be correctly logged in the chatter."
+        )
+        self.assertEqual(guru_applicant.job_id, job_guru)
+        self.assertEqual(guru_applicant.applicant_skill_ids.skill_id, skill_type.skill_ids)
+        self.assertEqual(
+            guru_applicant.applicant_skill_ids.skill_level_id,
+            skill_type.skill_level_ids.filtered('default_level'),
+            "The default level of the skill type should be set on the applicant skills",
+        )
+
+        internship_applicant = capt.records[1]
+        self.assertEqual(internship_applicant.partner_name, 'Jack Doe')
+        self.assertEqual(internship_applicant.email_from, 'jack@doe.com')
+        self.assertEqual(internship_applicant.partner_phone, '118.712')
+        self.assertTrue(
+            any(
+                'Other Information:' in body_text and
+                'Short Introduction : ### HR [INTERN] RECRUITMENT TEST DATA ###' in body_text
+                for body_text in (html2plaintext(m.body) for m in internship_applicant.message_ids)
+            ),
+            "The Internship custom fields should be correctly logged in the chatter."
+        )
+        self.assertEqual(internship_applicant.job_id, job_intern)
+        self.assertFalse(internship_applicant.applicant_skill_ids)
+
+    def test_jobs_listing_city_unspecified(self):
+        """ Test that the jobs listing page does not crash when a job has no address. """
+        an_address, no_address = self.env['res.partner'].create([
+            {
+                'name': "An address",
+                'company_id': self.env.company.id,
+                'city': 'Paris',
+            },
+            {
+                'name': "No address",
+                'company_id': self.env.company.id,
+            },
+        ])
+        self.env['hr.job'].create([
+            {
+                'name': 'Job A',
+                'is_published': True,
+                'address_id': an_address.id,
+            },
+            {
+                'name': 'Job B',
+                'is_published': True,
+                'address_id': no_address.id,
+            },
+        ])
+        WebsiteHrRecruitmentController = WebsiteHrRecruitment()
+        with MockRequest(self.env, website=self.env.ref('base.default_website')):
+            response = WebsiteHrRecruitmentController.jobs()
+        self.assertEqual(response.status, '200 OK')
+
+    def test_apply_job(self):
+        """ Test a user can apply to a job via the website form and add extra information inside custom field """
+        research_and_development_department = self.env['hr.department'].create({
+            'name': 'R&D',
+        })
+        developer_job = self.env['hr.job'].create({
+            'name': 'Developer',
+            'is_published': True,
+            'department_id': research_and_development_department.id
+        })
+        applicant_data = {
+            'partner_name': 'Georges',
+            'email_from': 'georges@test.com',
+            'partner_phone': '12345678',
+            'job_id': developer_job.id,
+            'department_id': research_and_development_department.id,
+            'description': 'This is a short introduction',
+            'Additional info': 'Test',
+        }
+        self.authenticate(None, None)
+        response = self.url_open('/website/form/hr.applicant', data=applicant_data)
+        applicant = self.env['hr.applicant'].browse(response.json().get('id'))
+        self.assertTrue(applicant.exists())
+        self.assertEqual(applicant.job_id, developer_job)
+        self.assertEqual(applicant.department_id, research_and_development_department)
+        self.assertEqual(applicant.partner_name, 'Georges')
+        self.assertEqual(applicant.email_from, 'georges@test.com')
+        self.assertEqual(applicant.partner_phone, '12345678')
+        self.assertEqual(applicant.medium_id, self.env['utm.mixin']._utm_ref('utm.utm_medium_website'))
+        self.assertEqual(applicant.source_id, self.env.ref('website_hr_recruitment.utm_source_website_page_generator'))
+        self.assertTrue(
+            any(
+                'Other Information:' in body_text and
+                'description : This is a short introduction' in body_text and
+                'Additional info : Test' in body_text
+                for body_text in (html2plaintext(message.body) for message in applicant.message_ids)
+            ),
+            "One message in the chatter should contain the extra information filled in by the applicant"
+        )
+
+    def test_apply_job_with_skills(self):
+        """ The skills posted with the website form are linked to the applicant.
+
+        Duplicated skill ids must not lose the application: one active skill
+        per skill_id is enforced by hr.individual.skill.mixin, so two rows for
+        the same skill would roll back the applicant creation.
+        """
+        levels = [Command.create({'name': 'Good', 'level_progress': 50})]
+        skill_type, other_type, certification_type = self.env['hr.skill.type'].create([{
+            'name': 'Programming',
+            'skill_ids': [Command.create({'name': 'Python'}), Command.create({'name': 'JavaScript'})],
+            'skill_level_ids': levels,
+        }, {
+            'name': 'Fictional Languages',
+            'skill_ids': [Command.create({'name': 'Klingon'})],
+            'skill_level_ids': levels,
+        }, {
+            'name': 'Certifications',
+            'is_certification': True,
+            'skill_ids': [Command.create({'name': 'Odoo Certified'})],
+            'skill_level_ids': levels,
+        }])
+        skill_a, skill_b = skill_type.skill_ids
+        other_skill = other_type.skill_ids
+        certification = certification_type.skill_ids
+
+        job = self.env['hr.job'].create({'name': 'Developer', 'is_published': True})
+        self.authenticate(None, None)
+        for skill_ids, expected_skills in (
+            (f'{skill_a.id},{skill_b.id},{other_skill.id}', skill_a + skill_b + other_skill),
+            (f'{skill_a.id},{skill_a.id}', skill_a),
+            (f'{skill_a.id},0,abc,999999999', skill_a),
+            # Certifications are proven by a document, not self-declared.
+            (f'{skill_a.id},{certification.id}', skill_a),
+            ('', self.env['hr.skill']),
+        ):
+            with self.subTest(skill_ids=skill_ids):
+                response = self.url_open('/website/form/hr.applicant', data={
+                    'partner_name': 'John Smith',
+                    'email_from': 'john@smith.com',
+                    'job_id': job.id,
+                    'skill_ids': skill_ids,
+                })
+                applicant = self.env['hr.applicant'].browse(response.json().get('id'))
+                self.assertTrue(applicant.exists())
+                self.assertEqual(applicant.applicant_skill_ids.skill_id, expected_skills)
+                self.assertEqual(applicant.applicant_skill_ids.skill_level_id, expected_skills.skill_type_id.skill_level_ids)
+
+        # A submission rejected by super() with skills selected returns the
+        # validation error rather than a server error.
+        response = self.url_open('/website/form/hr.applicant', data={
+            'partner_name': 'John Smith',
+            'email_from': 'john@smith.com',
+            'job_id': 'not-an-id',
+            'skill_ids': str(skill_a.id),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'error_fields': ['job_id']})
+
+        # Certifications are not offered in the form builder.
+        skills_field = self.env['ir.model'].get_authorized_fields('hr.applicant', {})['applicant_skill_ids']
+        offered_types = {record['id'] for record in skills_field['records']}
+        self.assertIn(skill_type.id, offered_types)
+        self.assertNotIn(certification_type.id, offered_types)
+
+    def test_apply_job_does_not_update_existing_user(self):
+        internal_user = new_test_user(
+            self.env,
+            login='internal.user@example.com',
+            name='Internal User',
+        )
+        job = self.env['hr.job'].create({
+            'name': 'Developer',
+            'is_published': True,
+        })
+
+        self.authenticate(None, None)
+        response = self.url_open('/website/form/hr.applicant', data={
+            'partner_name': 'Impersonated User',
+            'email_from': internal_user.email,
+            'partner_phone': '12345678',
+            'job_id': job.id,
+        })
+
+        applicant = self.env['hr.applicant'].browse(response.json().get('id'))
+        self.assertEqual(applicant.partner_id, internal_user.partner_id)
+        self.assertEqual(applicant.partner_name, 'Impersonated User')
+        self.assertEqual(internal_user.name, 'Internal User')
+
+    @odoo.tests.users('admin')
+    def test_interview_invite_url_with_multi_website(self):
+        if self.env['ir.module.module']._get('appointment_hr_recruitment').state != 'installed':
+            self.skipTest('`appointment_hr_recruitment` module not installed')
+
+        company_1 = self.env.company
+        company_2 = self.add_company('base.test_company', {
+            'email': 'company_2@test.example.com',
+            'name': 'Company 2',
+        })
+        base_url = 'http://127.0.0.1:8069'
+        self.env['ir.config_parameter'].sudo().set_str('web.base.url', base_url)
+        website_1 = company_1.website_id
+        website_1.domain = 'http://127.0.0.1:8069'
+        website_2 = self.env['website'].create({
+            'name': 'Website Company 2',
+            'company_id': company_2.id,
+            'domain': 'http://localhost:8069',
+        })
+
+        self.authenticate(self.env.user.login, self.env.user.login)
+        test_cases = [
+            (website_2, 'localhost:8069'),
+            (website_1, '127.0.0.1:8069'),
+            (None, base_url),
+        ]
+        for website, expected_host in test_cases:
+            company_id = website.company_id.id if website else company_1.id
+            job = self.env['hr.job'].create({
+                'name': f'Test Job {expected_host}',
+                'company_id': company_id,
+                'website_id': website.id if website else False,
+            })
+            applicant = self.env['hr.applicant'].create({
+                'job_id': job.id,
+                'partner_name': f'Test Applicant {expected_host}',
+                'email_from': 'test@example.com',
+                'company_id': company_id,
+            })
+
+            res = self.url_open(
+                '/appointment/appointment_type/search_create_anytime',
+                data=json.dumps({
+                    'params': {
+                        'applicant_code': applicant.interview_invite_code,
+                    },
+                }),
+                headers={'Content-Type': 'application/json'},
+            )
+            self.assertEqual(res.status_code, 200, 'Response should be OK')
+            res_data = res.json()
+            self.assertIn(expected_host, res_data['result']['invite_url'])

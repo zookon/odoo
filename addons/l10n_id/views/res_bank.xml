@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_partner_bank_form_inherit_account" model="ir.ui.view">
+        <field name="name">res.partner.bank.form.inherit.account</field>
+        <field name="model">res.partner.bank</field>
+        <field name="inherit_id" ref="base.view_partner_bank_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//page[@name='internal_notes']" position="before">
+                <page string="Payment QR Settings" name="l10n_id_qris_settings" invisible="country_code != 'ID' or not company_qr_code">
+                    <group>
+                        <field name="l10n_id_qris_api_key"/>
+                        <field name="l10n_id_qris_mid"/>
+                        <label for="l10n_id_qris_webhook_url" invisible="not l10n_id_qris_webhook_url" groups="base.group_system"/>
+                        <div class="d-flex flex-row" invisible="not l10n_id_qris_webhook_url" groups="base.group_system">
+                            <field name="l10n_id_qris_webhook_url" class="oe_inline mb-0 text-break min-w-0" widget="CopyClipboardChar"/>
+                            <button type="object"
+                                name="action_l10n_id_qris_rotate_webhook_token"
+                                class="oe_inline btn btn-link flex-shrink-0 px-1 py-0"
+                                icon="refresh"
+                                string="Renew"
+                                help="Generate a new webhook URL. The current one stops working immediately; register the new one in your QRIS merchant portal."
+                            />
+                        </div>
+                        <p>
+                            <widget name="documentation_link"
+                                    path="/applications/finance/fiscal_localizations/indonesia.html#qris-qr-code-on-invoices"
+                                    label="Documentation"/>
+                        </p>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

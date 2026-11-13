@@ -1,0 +1,93 @@
+.o-mail-ChatWindow {
+    width: var(--o-mail-ChatWindow-width);
+    background-color: var(--o-mail-discussMainBgColor);
+
+    z-index: var(--o-bs-zindex-sticky);
+    &.o-mobile {
+        z-index: var(--mail-ChatWindow-mobileZindex, calc(var(--o-bs-zindex-sticky) - 2)) !important;
+    }
+    &:not(.o-mobile) {
+        height: Min(95vh, calc(var(--o-mail-ChatWindow-width) * 15 / 9));
+        border-radius: calc(var(--o-mail-Composer-chatWindowVPadding) + var(--o-mail-Composer-pillRadiusBase));
+        /* Translucent ring, visible on any host background. */
+        box-shadow: 0 0 0 1px rgba(136, 136, 136, .35), var(--box-shadow-sm);
+    }
+    outline: none;
+
+    transition: box-shadow 2.0s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    &.o-highlighted {
+        box-shadow: 0 0 1.5rem var(--o-component-active-border) !important;
+    }
+
+    /* A tinted pill on the surface. */
+    .o-mail-Composer:not(.o-editing) {
+        --mail-Composer-bg: var(--o-webclient-background-color);
+    }
+}
+
+.o-mail-ChatWindow-moreActions {
+    color: inherit !important;
+    background-color: inherit !important;
+    &:hover, &.o-active, &.o-hover {
+        color: var(--mail-ChatWindow-moreActionsHoverColor, black) !important;
+        backdrop-filter: invert(.025);
+        border-color: transparent !important;
+    }
+    &:not(.o-active):not(.o-hover) [data-icon="arrow_drop_down"] {
+        opacity: 50%;
+    }
+}
+
+.o-mail-ChatWindow-closePanel {
+    z-index: 2;
+}
+
+.o-mail-ChatWindow-counter {
+    margin-bottom: calc(var(--o-bs-spacer-1) / 2);
+}
+
+.o-mail-ChatWindow-country {
+    width: 24px;
+}
+
+.o-mail-ChatWindow-header {
+    --o-btn-circle-height: 0;
+
+    .o-mail-ActionList-group {
+        gap: var(--o-bs-spacer-3);
+
+        button:not(:hover):not(:focus-visible):not(:active):not(.btn-success) {
+            --o-mail-ActionList-Button-opacity: .5;
+        }
+
+        @media screen and (min-width: 768px), print and (min-width: 188mm) {
+            gap: var(--o-bs-spacer-1);
+        }
+    }
+
+    .o-mail-ChatWindow-threadAvatar img {
+        height: var(--o-mail-Avatar-sizeSmall);
+        width: var(--o-mail-Avatar-sizeSmall);
+    }
+
+    button:not(.o-tag-JOIN_LEAVE_CALL) {
+        --gradient: transparent;
+        padding: 0;
+    }
+
+    @media screen and (max-width: 767.98px), print and (max-width: 187.98mm) {
+        .o-mail-ActionList-button {
+            --btn-font-size: var(--o-bs-h3-font-size);
+        }
+    }
+}
+
+.o-mail-ChatWindow-imStatus {
+    bottom: -1px;
+    right: -2px;
+}
+
+.o-mail-ChatWindow-typing {
+    font-size: calc(var(--o-bs-small-font-size) * 0.9);
+    z-index: calc(var(--o-mail-NavigableList-zIndex) - 2);
+}

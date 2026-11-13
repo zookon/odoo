@@ -3,11 +3,15 @@
 
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
+from odoo.tools.translate import LazyTranslate
+
+_lt = LazyTranslate(__name__)
 
 
 class CrmLeadForwardToPartner(models.TransientModel):
     """ Forward info history to partners. """
     _name = 'crm.lead.forward.to.partner'
+    _description = 'Lead forward to partner'
 
     @api.model
     def _convert_to_assignation_line(self, lead, partner):
@@ -26,20 +30,20 @@ class CrmLeadForwardToPartner(models.TransientModel):
                 'lead_location': ", ".join(lead_location),
                 'partner_assigned_id': partner and partner.id or False,
                 'partner_location': ", ".join(partner_location),
-                'lead_link': self.get_lead_portal_url(lead.id, lead.type),
+                'lead_link': self.get_lead_portal_url(lead),
                 }
 
     @api.model
     def default_get(self, fields):
-        template = self.env.ref('website_crm_partner_assign.email_template_lead_forward_mail', False)
-
         res = super(CrmLeadForwardToPartner, self).default_get(fields)
         active_ids = self.env.context.get('active_ids')
-        default_composition_mode = self.env.context.get('default_composition_mode')
-        res['assignation_lines'] = []
-        if template:
-            res['body'] = template.body_html
+        if 'body' in fields:
+            template = self.env.ref('website_crm_partner_assign.email_template_lead_forward_mail', False)
+            if template:
+                res['body'] = template.body_html
         if active_ids:
+            default_composition_mode = self.env.context.get('default_composition_mode')
+            res['assignation_lines'] = []
             leads = self.env['crm.lead'].browse(active_ids)
             if default_composition_mode == 'mass_mail':
                 partner_assigned_dict = leads.search_geo_partner()
@@ -52,7 +56,6 @@ class CrmLeadForwardToPartner(models.TransientModel):
                 res['assignation_lines'].append((0, 0, self._convert_to_assignation_line(lead, partner)))
         return res
 
-    @api.multi
     def action_forward(self):
         self.ensure_one()
         template = self.env.ref('website_crm_partner_assign.email_template_lead_forward_mail', False)
@@ -67,9 +70,9 @@ class CrmLeadForwardToPartner(models.TransientModel):
                 if lead.partner_assigned_id and not lead.partner_assigned_id.email:
                     no_email.add(lead.partner_assigned_id.name)
             if no_email:
-                raise UserError(_('Set an email address for the partner(s): %s') % ", ".join(no_email))
+                raise UserError(_('Set an email address for the partner(s): %s', ", ".join(no_email)))
         if self.forward_type == 'single' and not self.partner_id.email:
-            raise UserError(_('Set an email address for the partner %s') % self.partner_id.name)
+            raise UserError(_('Set an email address for the partner %s', self.partner_id.name))
 
         partners_leads = {}
         for lead in self.assignation_lines:
@@ -89,47 +92,47 @@ class CrmLeadForwardToPartner(models.TransientModel):
             in_portal = False
             if portal_group:
                 for contact in (partner.child_ids or partner).filtered(lambda contact: contact.user_ids):
-                    in_portal = portal_group.id in [g.id for g in contact.user_ids[0].groups_id]
+                    in_portal = portal_group.id in [g.id for g in contact.user_ids[0].all_group_ids]
 
             local_context['partner_id'] = partner_leads['partner']
             local_context['partner_leads'] = partner_leads['leads']
             local_context['partner_in_portal'] = in_portal
-            template.with_context(local_context).send_mail(self.id)
+            template.with_context(
+                local_context,
+                email_notification_force_header=True,
+                email_notification_force_footer=True,
+                email_notification_subtitles=[_lt("Your leads")],
+            ).send_mail_batch(self.ids, email_layout_xmlid='mail.mail_notification_layout')
             leads = self.env['crm.lead']
             for lead_data in partner_leads['leads']:
                 leads |= lead_data['lead_id']
             values = {'partner_assigned_id': partner_id, 'user_id': partner_leads['partner'].user_id.id}
             leads.with_context(mail_auto_subscribe_no_notify=1).write(values)
+            # TDE FIXME: check for assigned in suggested recipients (master-)
             self.env['crm.lead'].message_subscribe([partner_id])
         return True
 
-    def get_lead_portal_url(self, lead_id, type):
-        action = type == 'opportunity' and 'action_portal_opportunities' or 'action_portal_leads'
-        action_ref = self.env.ref('website_crm_partner_assign.%s' % (action,), False)
-        portal_link = "%s/?db=%s#id=%s&action=%s&view_type=form" % (
-            self.env['ir.config_parameter'].sudo().get_param('web.base.url'),
-            self.env.cr.dbname,
-            lead_id,
-            action_ref and action_ref.id or False)
-        return portal_link
-
-    def get_portal_url(self):
-        portal_link = "%s/?db=%s" % (self.env['ir.config_parameter'].sudo().get_param('web.base.url'), self.env.cr.dbname)
-        return portal_link
+    def get_lead_portal_url(self, lead):
+        return "%s/my/%s/%s" % (
+            lead.get_base_url(),
+            lead.type,
+            lead.id,
+        )
 
     forward_type = fields.Selection([
         ('single', 'a single partner: manual selection of partner'),
-        ('assigned', "several partners: automatic assignation, using GPS coordinates and partner's grades")
+        ('assigned', "several partners: automatic assignment, using GPS coordinates and partner's grades")
     ], 'Forward selected leads to', default=lambda self: self.env.context.get('forward_type') or 'single')
     partner_id = fields.Many2one('res.partner', 'Forward Leads To')
-    assignation_lines = fields.One2many('crm.lead.assignation', 'forward_id', 'Partner Assignation')
+    assignation_lines = fields.One2many('crm.lead.assignation', 'forward_id', 'Partner Assignment')
     body = fields.Html('Contents', help='Automatically sanitized HTML contents')
 
 
 class CrmLeadAssignation(models.TransientModel):
     _name = 'crm.lead.assignation'
+    _description = 'Lead Assignation'
 
-    forward_id = fields.Many2one('crm.lead.forward.to.partner', 'Partner Assignation')
+    forward_id = fields.Many2one('crm.lead.forward.to.partner', 'Partner Assignment')
     lead_id = fields.Many2one('crm.lead', 'Lead')
     lead_location = fields.Char('Lead Location')
     partner_assigned_id = fields.Many2one('res.partner', 'Assigned Partner')

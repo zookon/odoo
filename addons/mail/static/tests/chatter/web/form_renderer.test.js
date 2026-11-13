@@ -1,0 +1,344 @@
+import {
+    SIZES,
+    click,
+    contains as mailContains,
+    defineMailModels,
+    openFormView,
+    patchUiSize,
+    scroll,
+    start,
+    startServer,
+} from "@mail/../tests/mail_test_helpers";
+import { insertTextInComposer } from "@mail/../tests/mail_test_helpers_composer";
+
+import { describe, expect, getFixture, test, waitFor } from "@odoo/hoot";
+import { contains, mockService, serverState } from "@web/../tests/web_test_helpers";
+
+import { range } from "@web/core/utils/numbers";
+
+describe.current.tags("desktop");
+defineMailModels();
+
+test.skip("Form view not scrolled when switching record", async () => {
+    // FIXME: test passed in test environment but in practice scroll are reset to 0
+    // HOOT matches behaviour in prod and shows tests not passing as expected
+    const pyEnv = await startServer();
+    const [partnerId_1, partnerId_2] = pyEnv["res.partner"].create([
+        {
+            description: range(60).join("\n"),
+            display_name: "Partner 1",
+        },
+        {
+            description: range(60).join("\n"),
+            display_name: "Partner 2",
+        },
+    ]);
+    const messages = range(60).map((id) => ({
+        body: "not empty",
+        model: "res.partner",
+        res_id: id < 29 ? partnerId_1 : partnerId_2,
+    }));
+    pyEnv["mail.message"].create(messages);
+    patchUiSize({ size: SIZES.LG });
+    await start();
+    await openFormView("res.partner", partnerId_1, {
+        arch: `
+            <form string="Partners">
+                <sheet>
+                    <field name="name"/>
+                    <field name="description"/>
+                </sheet>
+                <chatter/>
+            </form>`,
+        resIds: [partnerId_1, partnerId_2],
+    });
+    await waitFor(".o-mail-Message:count(29)");
+    await mailContains(".o_content", { scroll: 0 });
+    await scroll(".o_content", 150);
+    await contains(".o_pager_next:count(1)").click();
+    await waitFor(".o-mail-Message:count(30)");
+    await mailContains(".o_content", { scroll: 150 });
+    await scroll(".o_content", 0);
+    await contains(".o_pager_previous:count(1)").click();
+    await waitFor(".o-mail-Message:count(29)");
+    await mailContains(".o_content", { scroll: 0 });
+});
+
+test("Attachments that have been unlinked from server should be visually unlinked from record", async () => {
+    // Attachments that have been fetched from a record at certain time and then
+    // removed from the server should be reflected on the UI when the current
+    // partner accesses this record again.
+    const pyEnv = await startServer();
+    const [partnerId_1, partnerId_2] = pyEnv["res.partner"].create([
+        { display_name: "Partner1" },
+        { display_name: "Partner2" },
+    ]);
+    const [attachmentId_1] = pyEnv["ir.attachment"].create([
+        {
+            mimetype: "text.txt",
+            res_id: partnerId_1,
+            res_model: "res.partner",
+        },
+        {
+            mimetype: "text.txt",
+            res_id: partnerId_1,
+            res_model: "res.partner",
+        },
+    ]);
+    await start();
+    await openFormView("res.partner", partnerId_1, {
+        arch: `
+            <form string="Partners">
+                <sheet>
+                    <field name="name"/>
+                </sheet>
+                <chatter/>
+            </form>`,
+        resId: partnerId_1,
+        resIds: [partnerId_1, partnerId_2],
+    });
+    await waitFor("button[aria-label='Attach files']:text('2'):count(1)");
+    // The attachment links are updated on (re)load,
+    // so using pager is a way to reload the record "Partner1".
+    await contains(".o_pager_next:count(1)").click();
+    await waitFor("button[aria-label='Attach files']:not(:has(sup)):count(1)");
+    // Simulate unlinking attachment 1 from Partner 1.
+    pyEnv["ir.attachment"].write([attachmentId_1], { res_id: 0 });
+    await contains(".o_pager_previous:count(1)").click();
+    await waitFor("button[aria-label='Attach files']:text('1'):count(1)");
+});
+
+test("ellipsis button is not duplicated when switching from read to edit mode", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({});
+    pyEnv["mail.message"].create({
+        author_id: partnerId,
+        // "data-o-mail-quote" added by server is intended to be compacted in ellipsis block
+        body: `
+            <div>
+                Dear Joel Willis,<br>
+                Thank you for your enquiry.<br>
+                If you have any questions, please let us know.
+                <br><br>
+                Thank you,<br>
+                <div data-o-mail-quote="1">-- <br data-o-mail-quote="1">
+                    System
+                </div>
+            </div>`,
+        model: "res.partner",
+        res_id: partnerId,
+    });
+    await start();
+    await openFormView("res.partner", partnerId, {
+        arch: `
+            <form string="Partners">
+                <sheet>
+                    <field name="name"/>
+                </sheet>
+                <chatter/>
+            </form>`,
+    });
+    await waitFor(".o-mail-Chatter:count(1)");
+    await waitFor(".o-mail-Message:count(1)");
+    await waitFor(".o-mail-ellipsis:count(1)");
+});
+
+test("[TECHNICAL] unfolded ellipsis button should not fold on message click besides that button", async () => {
+    // message click triggers a re-render. Before writing of this test, the
+    // insertion of ellipsis button were done during render. This meant
+    // any re-render would re-insert the ellipsis button. If some buttons
+    // were unfolded, any re-render would fold them again.
+    //
+    // This previous behavior is undesirable, and results to bothersome UX
+    // such as inability to copy/paste unfolded message content due to click
+    // from text selection automatically folding all ellipsis buttons.
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({ display_name: "Someone" });
+    pyEnv["mail.message"].create({
+        author_id: partnerId,
+        // "data-o-mail-quote" added by server is intended to be compacted in ellipsis block
+        body: `
+            <div>
+                Dear Joel Willis,<br>
+                Thank you for your enquiry.<br>
+                If you have any questions, please let us know.
+                <br><br>
+                Thank you,<br>
+                <span data-o-mail-quote="1">-- <br data-o-mail-quote="1">
+                    System
+                </span>
+            </div>`,
+        model: "res.partner",
+        res_id: partnerId,
+    });
+    await start();
+    await openFormView("res.partner", partnerId, {
+        arch: `
+            <form string="Partners">
+                <sheet>
+                    <field name="name"/>
+                </sheet>
+                <chatter/>
+            </form>`,
+    });
+    expect(".o-mail-Message-body span").toHaveCount(0);
+    await contains(".o-mail-ellipsis:count(1)").click();
+    expect(".o-mail-Message-body span").toHaveText("--\nSystem");
+    await contains(".o-mail-Message:count(1)").click();
+    expect(".o-mail-Message-body span").toHaveCount(1);
+});
+
+test("nested quoted replies expand one level at a time", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({});
+    pyEnv["mail.message"].create({
+        author_id: partnerId,
+        body: `<p>New reply</p>
+            <div data-o-mail-quote="1">
+                <p data-o-mail-quote="1">Previous reply</p>
+                <blockquote data-o-mail-quote="1">
+                    <p class="earlier-reply">Earlier reply</p>
+                </blockquote>
+            </div>`,
+        model: "res.partner",
+        res_id: partnerId,
+    });
+    await start();
+    await openFormView("res.partner", partnerId);
+    await waitFor('.o-mail-Message-richBody p:text("New reply"):visible');
+    expect(".o-mail-ellipsis:visible").toHaveCount(1);
+
+    const ellipsisButtons = getFixture().querySelectorAll(".o-mail-ellipsis");
+    await contains(ellipsisButtons[0]).click();
+    expect(".o-mail-ellipsis:visible").toHaveCount(2);
+    await waitFor('.o-mail-Message-richBody p:text("Previous reply"):visible');
+    expect('.o-mail-Message-richBody p:text("Earlier reply")').not.toBeVisible();
+
+    await contains(ellipsisButtons[1]).click();
+    await waitFor('.o-mail-Message-richBody p:text("Earlier reply"):visible');
+});
+
+test("Gmail quote header does not add a quote level and reopening preserves expanded replies", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({});
+    pyEnv["mail.message"].create({
+        author_id: partnerId,
+        body: `<p>New reply</p>
+            <div data-o-mail-quote="1">
+                <div class="gmail_attr" data-o-mail-quote="1">On Friday, Alex wrote:</div>
+                <blockquote data-o-mail-quote="1">
+                    <p data-o-mail-quote="1">Previous reply</p>
+                    <blockquote data-o-mail-quote="1">
+                        <p>Earlier reply</p>
+                    </blockquote>
+                </blockquote>
+            </div>`,
+        model: "res.partner",
+        res_id: partnerId,
+    });
+    await start();
+    await openFormView("res.partner", partnerId);
+    await waitFor('.o-mail-Message-richBody p:text("New reply"):visible');
+    await waitFor(".o-mail-ellipsis", { count: 2 });
+    const ellipsisButtons = getFixture().querySelectorAll(".o-mail-ellipsis");
+    await waitFor(".o-mail-ellipsis:visible", { count: 1 });
+
+    await contains(ellipsisButtons[0]).click();
+    await waitFor('.o-mail-Message-richBody .gmail_attr:visible');
+    await waitFor('.o-mail-Message-richBody p:text("Previous reply"):visible');
+    await waitFor(".o-mail-ellipsis:visible", { count: 2 });
+    expect('.o-mail-Message-richBody p:text("Earlier reply")').not.toBeVisible();
+
+    await contains(ellipsisButtons[1]).click();
+    await waitFor('.o-mail-Message-richBody p:text("Earlier reply"):visible');
+
+    await contains(ellipsisButtons[0]).click();
+    await waitFor(".o-mail-ellipsis:visible", { count: 1 });
+    expect('.o-mail-Message-richBody p:text("Previous reply")').not.toBeVisible();
+    expect('.o-mail-Message-richBody p:text("Earlier reply")').not.toBeVisible();
+
+    await contains(ellipsisButtons[0]).click();
+    await waitFor(".o-mail-ellipsis:visible", { count: 2 });
+    await waitFor('.o-mail-Message-richBody p:text("Previous reply"):visible');
+    await waitFor('.o-mail-Message-richBody p:text("Earlier reply"):visible');
+});
+
+test("ellipsis button on message of type notification", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({});
+    pyEnv["mail.message"].create({
+        author_id: partnerId,
+        // "data-o-mail-quote" enables ellipsis block
+        body: `
+            <div>
+                Dear Joel Willis,<br>
+                Thank you for your enquiry.<br>
+                If you have any questions, please let us know.
+                <br><br>
+                Thank you,<br>
+                <span data-o-mail-quote="1">-- <br data-o-mail-quote="1">
+                    System
+                </span>
+            </div>`,
+        model: "res.partner",
+        res_id: partnerId,
+        message_type: "notification",
+    });
+    await start();
+    await openFormView("res.partner", partnerId, {
+        arch: `
+            <form string="Partners">
+                <sheet>
+                    <field name="name"/>
+                </sheet>
+                <chatter/>
+            </form>`,
+    });
+    await waitFor(".o-mail-ellipsis:count(1)");
+});
+
+test("read more/less should appear only once for the signature", async () => {
+    const pyEnv = await startServer();
+    const partnerId = pyEnv["res.partner"].create({});
+
+    mockService("action", {
+        doAction(action, { onClose }) {
+            if (action.name === "Compose Email") {
+                // Simulate message post of full composer
+                pyEnv["mail.message"].create({
+                    body: action.context.default_body.toString(),
+                    model: action.context.default_model,
+                    res_id: action.context.default_res_ids[0],
+                });
+                return onClose(undefined);
+            }
+            return super.doAction(...arguments);
+        },
+    });
+
+    // Yes you can get this kind of signature by playing with the html editor
+    pyEnv["res.users"].write(serverState.userId, {
+        signature: `
+            <div>
+                <span data-o-mail-quote="1">
+                    --
+                </span>
+            </div>
+            <div data-o-mail-quote="1">
+                Signature !
+            </div>
+            <div>
+                <br data-o-mail-quote="1">
+            </div>
+        `,
+    });
+
+    await start();
+    await openFormView("res.partner", partnerId);
+    await waitFor(".o-mail-Chatter:count(1)");
+    await click(".o-mail-Chatter-sendMessage");
+    await insertTextInComposer(".o-mail-Composer", "Example Body");
+    await click("[name='open-full-composer']");
+    await waitFor(".o-mail-Message-body:has(:text('Example Body')):count(1)");
+    expect(".o-mail-Message .o-signature-container button.o-mail-ellipsis").toHaveCount(1);
+});

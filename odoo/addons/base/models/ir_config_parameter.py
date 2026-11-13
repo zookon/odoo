@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 """
 Store database-specific configuration parameters
@@ -6,18 +5,24 @@ Store database-specific configuration parameters
 
 import uuid
 import logging
+from typing import Any, Literal
 
 from odoo import api, fields, models
-from odoo.tools import config, ormcache, mute_logger, pycompat
+from odoo.exceptions import ValidationError
+from odoo.tools import config, mute_logger, str2bool
 
 _logger = logging.getLogger(__name__)
+
+Type_ = Literal['bool', 'int', 'float', 'str']
+
+INVALID_VALUE = object()
 
 """
 A dictionary holding some configuration parameters to be initialized when the database is created.
 """
 _default_parameters = {
-    "database.secret": lambda: pycompat.text_type(uuid.uuid4()),
-    "database.uuid": lambda: pycompat.text_type(uuid.uuid1()),
+    "database.secret": lambda: str(uuid.uuid4()),
+    "database.uuid": lambda: str(uuid.uuid1()),
     "database.create_date": fields.Datetime.now,
     "web.base.url": lambda: "http://localhost:%s" % config.get('http_port'),
     "base.login_cooldown_after": lambda: 10,
@@ -25,83 +30,144 @@ _default_parameters = {
 }
 
 
-class IrConfigParameter(models.Model):
+class IrConfig_Parameter(models.Model):
     """Per-database storage of configuration key-value pairs."""
     _name = 'ir.config_parameter'
+    _description = 'System Parameter'
     _rec_name = 'key'
     _order = 'key'
+    _allow_sudo_commands = False
+    _clear_cache_name = 'stable'
 
-    key = fields.Char(required=True, index=True)
-    value = fields.Text(required=True)
+    key = fields.Char(required=True)
+    value = fields.Text(help="Stringified Python variable value. Supported types: str, bool, int, float. Blank means undefined.")
 
-    _sql_constraints = [
-        ('key_uniq', 'unique (key)', 'Key must be unique.')
-    ]
+    _key_uniq = models.Constraint(
+        'unique (key)',
+        "Key must be unique.",
+    )
 
-    @api.model_cr
     @mute_logger('odoo.addons.base.models.ir_config_parameter')
     def init(self, force=False):
         """
         Initializes the parameters listed in _default_parameters.
         It overrides existing parameters if force is ``True``.
         """
+        # avoid prefetching during module installation, as the res_users table
+        # may not have all prescribed columns
+        self = self.with_context(prefetch_fields=False)
         for key, func in _default_parameters.items():
             # force=True skips search and always performs the 'if' body (because ids=False)
             params = self.sudo().search([('key', '=', key)])
             if force or not params:
-                params.set_param(key, func())
+                params.set_str(key, str(func()))  # use set_str as a hack for all types
 
     @api.model
-    def get_param(self, key, default=False):
-        """Retrieve the value for a given key.
+    def set_bool(self, key: str, value):
+        return self._set(key, None if value is None else bool(value), 'bool')
 
-        :param string key: The key of the parameter value to retrieve.
-        :param string default: default value if parameter is missing.
-        :return: The value of the parameter, or ``default`` if it does not exist.
-        :rtype: string
+    @api.model
+    def set_int(self, key: str, value):
+        return self._set(key, None if value is None or value is False else int(value), 'int')
+
+    @api.model
+    def set_float(self, key: str, value):
+        return self._set(key, None if value is None or value is False else float(value), 'float')
+
+    @api.model
+    def set_str(self, key: str, value):
+        return self._set(key, None if value is None or value is False else str(value), 'str')
+
+    def _set(self, key: str, value: Any, type_: Type_) -> Any:
         """
-        return self._get_param(key) or default
-
-    @api.model
-    @ormcache('self._uid', 'key')
-    def _get_param(self, key):
-        params = self.search_read([('key', '=', key)], fields=['value'], limit=1)
-        return params[0]['value'] if params else None
-
-    @api.model
-    def set_param(self, key, value):
-        """Sets the value of a parameter.
-
-        :param string key: The key of the parameter value to set.
-        :param string value: The value to set.
-        :return: the previous value of the parameter or False if it did
-                 not exist.
-        :rtype: string
+        Set the given parameter to the given value, and return the parameter's old value.
         """
-        param = self.search([('key', '=', key)])
-        if param:
-            old = param.value
-            if value is not False and value is not None:
-                param.write({'value': value})
-            else:
-                param.unlink()
-            return old
-        else:
-            if value is not False and value is not None:
-                self.create({'key': key, 'value': value})
-            return False
+        old_value, id_ = self._get(key, type_)
+        value_ = False if value is None else str(value)
+        if not id_:
+            self.create({'key': key, 'value': value_})
+        elif old_value != value:
+            self.browse(id_).write({'value': value_})
+        if old_value is not None:
+            return old_value
+        return (
+            False if type_ == 'bool' else
+            0 if type_ in ('int', 'float') else
+            ''
+        )
 
-    @api.model_create_multi
-    def create(self, vals_list):
-        self.clear_caches()
-        return super(IrConfigParameter, self).create(vals_list)
+    @api.model
+    def get_bool[T](self, key: str, default: T = False) -> bool | T:
+        self.browse().check_access('read')
+        value = self._get(key, 'bool')[0]
+        if value is None or value is INVALID_VALUE:
+            return default
+        return value
 
-    @api.multi
+    @api.model
+    def get_int[T](self, key: str, default: T = 0) -> int | T:
+        self.browse().check_access('read')
+        value = self._get(key, 'int')[0]
+        if value is None or value is INVALID_VALUE:
+            return default
+        return value
+
+    @api.model
+    def get_float[T](self, key: str, default: T = 0.0) -> float | T:
+        self.browse().check_access('read')
+        value = self._get(key, 'float')[0]
+        if value is None or value is INVALID_VALUE:
+            return default
+        return value
+
+    @api.model
+    def get_str[T](self, key: str, default: T = '') -> str | T:
+        self.browse().check_access('read')
+        value = self._get(key, 'str')[0]
+        if value is None or value is INVALID_VALUE:
+            return default
+        return value
+
+    @api.ormcache('key', 'type_', cache='stable')
+    def _get(self, key: str, type_: Type_ = 'str') -> tuple[Any, int | None]:
+        """
+        Return a pair ``(value, id)`` with the value of the config parameter (or ``INVALID_VALUE`` if invalid) and
+        the id of the corresponding record (or ``None`` if nonexistent).
+        """
+        self.flush_model(['key', 'value'])
+        self.env.cr.execute("SELECT value, id FROM ir_config_parameter WHERE key = %s", [key])
+        result = self.env.cr.fetchone()
+        if not result:
+            return None, None
+        value, id_ = result
+        if value is None:
+            # ir_config_parameter.write({'value': False}) from UI can logically set the config to undefined
+            return value, id_
+        try:
+            return self._convert(value, type_), id_
+        except ValueError:
+            _logger.warning("ir.config_parameter with key %s has invalid value %r for type %s", key, value, type_)
+            return INVALID_VALUE, id_
+
+    def _convert(self, value: str, type_: Type_) -> bool | int | float | str:
+        if type_ == 'bool':
+            return str2bool(value)
+        if type_ == 'int':
+            return int(value)
+        if type_ == 'float':
+            return float(value)
+        if type_ == 'str':
+            return value
+        raise ValueError("Invalid type: %s" % type_)
+
     def write(self, vals):
-        self.clear_caches()
-        return super(IrConfigParameter, self).write(vals)
+        if 'key' in vals:
+            illegal = _default_parameters.keys() & self.mapped('key')
+            if illegal:
+                raise ValidationError(self.env._("You cannot rename config parameters with keys %s", ', '.join(illegal)))
+        return super().write(vals)
 
-    @api.multi
-    def unlink(self):
-        self.clear_caches()
-        return super(IrConfigParameter, self).unlink()
+    @api.ondelete(at_uninstall=False)
+    def unlink_default_parameters(self):
+        for record in self.filtered(lambda p: p.key in _default_parameters.keys()):
+            raise ValidationError(self.env._("You cannot delete the %s record.", record.key))

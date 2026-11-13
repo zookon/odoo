@@ -1,0 +1,53 @@
+.pac-container { /* Google Maps' Autocomplete */
+    z-index: var(--o-bs-zindex-modal-backdrop); /* > $o-we-zindex */
+    font-size: var(--o-we-sidebar-font-size);
+    padding-top: 0;
+    padding-bottom: 0;
+    border: var(--o-we-sidebar-content-field-border-width) solid var(--o-we-sidebar-content-field-dropdown-border-color);
+    border-top: none;
+    border-radius: var(--o-we-item-border-radius);
+    overflow: hidden;
+    background-color: var(--o-we-sidebar-content-field-dropdown-bg);
+    box-shadow: var(--o-we-sidebar-content-field-dropdown-shadow);
+    margin-top: var(--o-we-sidebar-content-field-dropdown-spacing);
+
+    &:after {
+        display: none;
+    }
+
+    .pac-item {
+        @include o-text-overflow(block);
+        line-height: var(--o-we-sidebar-content-field-dropdown-item-height);
+        border-top: var(--o-we-sidebar-content-field-border-width) solid lighten($o-we-sidebar-content-field-dropdown-border-color, 15%);
+        border-radius: var(--o-we-sidebar-content-field-border-radius);
+        background-color: var(--o-we-sidebar-content-field-clickable-bg);
+        color: var(--o-we-sidebar-content-field-clickable-color);
+        font-size: var(--o-we-sidebar-font-size);
+
+        &:hover, &:focus, &.pac-item-selected {
+            background-color: var(--o-we-sidebar-content-field-dropdown-item-bg-hover);
+            cursor: pointer;
+        }
+
+        /* Remove Google Maps' own icon. */
+        .pac-icon {
+            all: revert;
+        }
+
+        .pac-icon-marker {
+            position: absolute;
+            margin-left: -1em;
+
+            &::after {
+                content: 'location_on';
+                font-family: var(--icon-font-family, "Material Symbols Outlined");
+            }
+        }
+
+        .pac-item-query {
+            padding-inline-start: 0.4rem;
+            margin-right: 0.4em;
+            color: inherit;
+        }
+    }
+}

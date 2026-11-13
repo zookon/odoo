@@ -1,0 +1,23 @@
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
+
+
+{
+    'name': 'POS HR Restaurant',
+    'category': 'Sales/Point of Sale',
+    'summary': 'Link module between pos_hr and pos_restaurant',
+    'description': """
+This module adapts the behavior of the PoS when the pos_hr and pos_restaurant are installed.
+""",
+    'depends': ['pos_hr', 'pos_restaurant'],
+    'auto_install': True,
+    'assets': {
+        'web.assets_tests': [
+            'pos_hr_restaurant/static/tests/tours/**/*',
+        ],
+        'web.assets_unit_tests': [
+            'pos_hr_restaurant/static/tests/unit/**/*',
+        ],
+    },
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
+}

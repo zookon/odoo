@@ -1,0 +1,327 @@
+# -*- coding: utf-8 -*-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
+
+from collections import OrderedDict
+from itertools import chain
+from lxml import etree
+
+from odoo import Command
+from odoo.addons.hr.tests.common import TestHrCommon
+from odoo.tests import new_test_user, tagged, Form
+from odoo.exceptions import AccessError
+
+@tagged('post_install', '-at_install')
+class TestSelfAccessPreferences(TestHrCommon):
+
+    def test_access_preferences_view(self):
+        """ A simple user should be able to read all fields in the preferences form """
+        james = new_test_user(self.env, login='hel', groups='base.group_user', name='Simple employee', email='ric@example.com')
+        james = james.with_user(james)
+        james_bank_account = self.env['res.partner.bank'].create({'account_number': 'BE1234567890', 'partner_id': james.partner_id.id})
+        self.env['hr.employee'].create({
+            'name': 'James',
+            'user_id': james.id,
+            'bank_account_ids': [Command.link(james_bank_account.id)]
+        })
+        view = self.env.ref('hr.res_users_view_form_preferences')
+        view_infos = james.get_view(view.id)
+        fields = [el.get('name') for el in etree.fromstring(view_infos['arch']).xpath('//field[not(ancestor::field)]')]
+        james.read(fields)
+
+    def test_preferences_view_fields(self):
+        """ A simple user should see all fields in preferences view, even if they are protected by groups """
+        view = self.env.ref('hr.res_users_view_form_preferences')
+
+        # For reference, check the view with user with every groups protecting user fields
+        all_groups_xml_ids = chain(*[
+            field.groups.split(',')
+            for field in self.env['res.users']._fields.values()
+            if field.groups
+            if field.groups != '.' # "no-access" group on purpose
+        ])
+        all_groups = self.env['res.groups']
+        for xml_id in all_groups_xml_ids:
+            all_groups |= self.env.ref(xml_id)
+        user_all_groups = new_test_user(self.env, groups='base.group_user', login='hel', name='God')
+        user_all_groups.write({'group_ids': [(4, group.id, False) for group in all_groups]})
+        view_infos = self.env['res.users'].with_user(user_all_groups).get_view(view.id)
+        full_fields = [el.get('name') for el in etree.fromstring(view_infos['arch']).xpath('//field[not(ancestor::field)]')]
+
+        # Now check the view for a simple user
+        user = new_test_user(self.env, login='gro', name='Grouillot')
+        view_infos = self.env['res.users'].with_user(user).get_view(view.id)
+        fields = [el.get('name') for el in etree.fromstring(view_infos['arch']).xpath('//field[not(ancestor::field)]')]
+
+        # Compare both
+        self.assertEqual(full_fields, fields, "View fields should not depend on user's groups")
+
+    def test_access_preferences_view_toolbar(self):
+        """ A simple user shouldn't have the possibilities to see the 'Change Password' action"""
+        james = new_test_user(self.env, login='jam', groups='base.group_user', name='Simple employee', email='jam@example.com')
+        james = james.with_user(james)
+        self.env['hr.employee'].create({
+            'name': 'James',
+            'user_id': james.id,
+        })
+        view = self.env.ref('hr.res_users_view_form_preferences')
+        available_actions = james.get_views([(view.id, 'form')], {'toolbar': True})['views']['form']['toolbar'].get('action', {})
+        change_password_action = self.env.ref("base.ir_actions_server_change_password_wizard")
+
+        self.assertFalse(any(x['id'] == change_password_action.id for x in available_actions))
+
+        # An ERP manager should have the possibilities to see the 'Change Password'
+        john = new_test_user(self.env, login='joh', groups='base.group_erp_manager', name='ERP Manager', email='joh@example.com')
+        john = john.with_user(john)
+        self.env['hr.employee'].create({
+            'name': 'John',
+            'user_id': john.id,
+        })
+        view = self.env.ref('hr.res_users_view_form_preferences')
+        available_actions = john.get_views([(view.id, 'form')], {'toolbar': True})['views']['form']['toolbar']['action']
+        self.assertTrue(any(x['id'] == change_password_action.id for x in available_actions))
+
+    def test_employee_fields_groups(self):
+        # Note: If this tests is crashing, this is probably because the linked field on the error
+        # message is defined on hr.employee only (and not on hr.employee.public) and has no group
+        # defined on it (at least hr.group_hr_user).
+        internal_user = new_test_user(self.env, login='mireille', groups='base.group_user', name='Mireille', email='mireille@example.com')
+        self.env['hr.employee'].with_user(internal_user).search([]).read([])
+
+    def test_open_preferences_with_group_without_external_id(self):
+        """Test opening preferences when the user belongs to a group without an external ID."""
+        self.env['hr.employee'].create({
+            'name': 'John',
+            'user_id': self.env.user.id,
+        })
+        group = self.env['res.groups'].create({
+            'name': "Test Group",
+        })
+        self.env.user.group_ids = [Command.link(group.id)]
+        action = self.env.user.action_get()
+        self.assertEqual(action['type'], 'ir.actions.act_window')
+        self.assertEqual(action['display_name'], 'Change my Preferences')
+
+
+@tagged('at_install', '-post_install')  # LEGACY at_install, fails post install
+class TestSelfAccessRights(TestHrCommon):
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestSelfAccessRights, cls).setUpClass()
+        cls.richard = new_test_user(cls.env, login='ric', groups='base.group_user,base.group_user_regular', name='Simple employee', email='ric@example.com')
+        cls.richard_emp = cls.env['hr.employee'].create({
+            'name': 'Richard',
+            'user_id': cls.richard.id,
+            'private_phone': '21454',
+        })
+        cls.hubert = new_test_user(cls.env, login='hub', groups='base.group_user', name='Simple employee', email='hub@example.com')
+        cls.hubert_emp = cls.env['hr.employee'].create({
+            'name': 'Hubert',
+            'user_id': cls.hubert.id,
+        })
+
+        cls.protected_fields_emp = OrderedDict([(k, v) for k, v in cls.env['hr.employee']._fields.items() if v.groups == 'hr.group_hr_user'])
+        # Compute fields and id field are always readable by everyone
+        cls.read_protected_fields_emp = OrderedDict([(k, v) for k, v in cls.env['hr.employee']._fields.items() if not v.compute and k != 'id'])
+        cls.self_protected_fields_user = OrderedDict([
+            (k, field)
+            for k, field in cls.env['res.users']._fields.items()
+            # get fields built with `employee_field` function
+            if callable(field.compute) and hasattr(field.compute, 'employee_field_name')
+        ])
+
+        cls.user_regular = new_test_user(
+            cls.env,
+            login='user_regular',
+            groups='base.group_user',
+        )
+        cls.user_hr = new_test_user(
+            cls.env,
+            login='user_hr',
+            groups='base.group_user,hr.group_hr_user',
+        )
+
+        cls.employee_partner = cls.env['res.partner'].create({'name': 'Employee Partner'})
+        cls.employee = cls.env['hr.employee'].create({
+            'name': 'Employee Name',
+            'work_contact_id': cls.employee_partner.id,
+            'bank_account_ids': [Command.create({
+                'account_number': 'EM12 3456 7890 1234',
+                'partner_id': cls.employee_partner.id,
+            })],
+        })
+        cls.contact = cls.env['res.partner'].create({
+            'name': 'Contact Name',
+            'bank_ids': [Command.create({
+                'account_number': 'CO09 8765 4321 4321',
+            })],
+        })
+
+        cls.employee_bank = cls.employee.bank_account_ids[:1]
+        cls.contact_bank = cls.contact.bank_ids[:1]
+
+    # Read hr.employee #
+    def testReadSelfEmployee(self):
+        with self.assertRaises(AccessError):
+            self.hubert_emp.with_user(self.richard).read(self.protected_fields_emp.keys())
+
+    def testReadOtherEmployee(self):
+        with self.assertRaises(AccessError):
+            self.hubert_emp.with_user(self.richard).read(self.protected_fields_emp.keys())
+        # Check simple user can read all public fields of private employee
+        public_fields = [
+            field_name
+            for field_name in self.env['hr.employee.public']._fields
+            if field_name in self.env['hr.employee']._fields
+        ]
+        res = self.hubert_emp.with_user(self.richard).read(public_fields)
+        self.assertEqual(len(public_fields), len(res[0]))
+
+    # Write hr.employee #
+    def testWriteSelfEmployee(self):
+        for f in self.protected_fields_emp:
+            with self.assertRaises(AccessError):
+                self.richard_emp.with_user(self.richard).write({f: 'dummy'})
+
+    def testWriteOtherEmployee(self):
+        for f in self.protected_fields_emp:
+            with self.assertRaises(AccessError):
+                self.hubert_emp.with_user(self.richard).write({f: 'dummy'})
+
+    # Read res.users #
+    def testReadSelfUserEmployee(self):
+        for f in self.self_protected_fields_user:
+            self.richard.with_user(self.richard).read([f])  # should not raise
+
+    def testReadOtherUserEmployee(self):
+        with self.assertRaises(AccessError):
+            self.hubert.with_user(self.richard).read(self.self_protected_fields_user)
+
+    def testWriteSelfUserEmployee(self):
+        for f, v in self.self_protected_fields_user.items():
+            val = None
+            if v.type == 'char' or v.type == 'text':
+                val = '0000' if f in ['pin', 'barcode'] else 'dummy'
+            if val is not None:
+                self.richard.with_user(self.richard).write({f: val})
+
+    def testWriteOtherUserEmployee(self):
+        for f in self.self_protected_fields_user:
+            with self.assertRaises(AccessError):
+                self.hubert.with_user(self.richard).write({f: 'dummy'})
+
+    def testSearchUserEMployee(self):
+        # Searching user based on employee_id field should not raise bad query error
+        self.env['res.users'].with_user(self.richard).search([('employee_id', 'ilike', 'Hubert')])
+
+    def test_user_can_edit_department_they_manage(self):
+        dept = self.env['hr.department'].create({
+            'name': 'Managed Dept',
+            'manager_id': self.richard_emp.id,
+        })
+
+        dept.with_user(self.richard).write({
+            'name': 'Renamed Managed Dept'
+        })
+
+        self.assertEqual(dept.name, 'Renamed Managed Dept')
+
+    def test_user_can_edit_department_managed_by_subordinate(self):
+        # Subordinate user
+        alice = new_test_user(
+            self.env,
+            login='alice',
+            groups='base.group_user',
+            name='Alice User',
+            email='alice@example.com'
+        )
+
+        alice_emp = self.env['hr.employee'].create({
+            'name': 'Alice',
+            'user_id': alice.id,
+            'parent_id': self.richard_emp.id,
+        })
+        dept = self.env['hr.department'].create({
+            'name': 'Subordinate Dept',
+            'manager_id': alice_emp.id,
+        })
+
+        dept.with_user(self.richard).write({
+            'name': 'Renamed Subordinate Dept'
+        })
+
+        self.assertEqual(dept.name, 'Renamed Subordinate Dept')
+
+    def test_user_cannot_create_nor_edit_random_department(self):
+        with self.assertRaises(AccessError):
+            self.env['hr.department'].with_user(self.richard).create({'name': 'New Dept'})
+        dept = self.env['hr.department'].create({'name': 'New Dept'})
+        with self.assertRaises(AccessError):
+            dept.with_user(self.richard).write({'name': 'Renamed Dept'})
+
+    def test_onchange_readable_fields_with_no_access(self):
+        """
+            The purpose is to test that the onchange logic takes into account custom field access.
+
+            The view contains fields that are `field_employee` (example: `private_street`).
+            Even if the user does not have read access to the employee,
+            it should not cause an access error for these fields.
+        """
+        self.env['res.lang']._activate_lang("fr_FR")
+        with Form(self.richard.with_user(self.richard), view='hr.res_users_view_form_preferences') as form:
+            # triggering an onchange should not trigger some access error
+            form.lang = "fr_FR"
+            form.tz = "Europe/Brussels"
+
+    def test_res_partner_bank_account_access(self):
+        user_regular_employee_bank = self.employee_bank.with_user(self.user_regular)
+        self.assertEqual(
+            user_regular_employee_bank.display_name,
+            'EM**********1234',
+            "Regular user can't have access to employee's bank account",
+        )
+        self.employee_bank.invalidate_recordset(['display_name'])
+
+        user_hr_employee_bank = self.employee_bank.with_user(self.user_hr)
+        self.assertEqual(
+            user_hr_employee_bank.display_name,
+            'EM12 3456 7890 1234',
+            "HR officer should have access to employee's bank account",
+        )
+
+        user_regular_contact_bank = self.contact_bank.with_user(self.user_regular)
+        self.assertEqual(
+            user_regular_contact_bank.display_name,
+            'CO09 8765 4321 4321',
+            "Regular user should have access to contact's bank account",
+        )
+        self.contact_bank.invalidate_recordset(['display_name'])
+
+        user_hr_contact_bank = self.contact_bank.with_user(self.user_hr)
+        self.assertEqual(
+            user_hr_contact_bank.display_name,
+            'CO09 8765 4321 4321',
+            "HR officer should have access to contact's bank account",
+        )
+
+    def test_res_partner_bank_account_format(self):
+        test_cases = [
+            ('', ''),
+            ('BE12', '****'),
+            ('BE1234', '****'),
+            ('BE123456', 'BE**3456'),
+            ('BE12345678901234', 'BE**********1234'),
+            ('BE1234567890444 4 ', 'BE**********4444'),
+        ]
+
+        for input_number, expected_display in test_cases:
+            with self.subTest(input_number=input_number):
+                self.employee_bank.sudo().write({'account_number': input_number})
+                self.employee_bank.invalidate_recordset(['display_name', 'account_number'])
+
+                bank_as_regular = self.employee_bank.with_user(self.user_regular)
+                self.assertEqual(
+                    bank_as_regular.display_name,
+                    expected_display,
+                    f"Format failed for account length {len(input_number)}",
+                )

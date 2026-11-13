@@ -1,0 +1,24 @@
+.o_newsletter_modal {
+
+    .modal-header {
+        padding: 0;
+        border: none;
+    }
+    .modal-title {
+        display: none;
+    }
+    .close {
+        z-index: var(--o-bs-zindex-modal);
+        position: absolute;
+        top: 0;
+        inset-inline-end: 0;
+        width: calc(var(--o-bs-font-size-lg) * 2);
+        height: calc(var(--o-bs-font-size-lg) * 2);
+        line-height: calc(var(--o-bs-font-size-lg) * 2);
+        margin: 0;
+        padding: 0;
+        @include o-bg-color(color-contrast(o-color('primary')), o-color('primary'), $with-extras: false);
+        box-shadow: var(--box-shadow-sm);
+        opacity: 1;
+    }
+}

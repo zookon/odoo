@@ -1,15 +1,25 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from . import analytic
-from . import account_invoice
-from . import product_pricelist
-from . import product_product
-from . import product_template
-from . import res_company
-from . import res_partner
-from . import sale
-from . import res_config_settings
-from . import sales_team
-from . import res_users
-from . import payment
+from . import (
+    account_analytic_applicability,
+    account_analytic_line,
+    account_move,
+    account_move_line,
+    crm_team,
+    ir_actions_report,
+    ir_config_parameter,
+    payment_provider,
+    payment_transaction,
+    product_category,
+    product_document,
+    product_pricelist_item,
+    product_product,
+    product_template,
+    res_company,
+    res_partner,
+    sale_order,
+    sale_order_line,
+    utm_campaign,
+)
+
+from . import res_groups

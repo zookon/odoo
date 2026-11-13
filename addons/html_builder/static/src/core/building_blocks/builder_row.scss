@@ -1,0 +1,169 @@
+@mixin sublevel-line($_level-left: 0) {
+    position: absolute;
+    top: var(--o-hb-row-sublevel-top, 0);
+    bottom: 0;
+    left: $_level-left - $o-we-border-width;
+    border: var(--o-we-border-width) solid var(--o-hb-row-sublevel-color, color-mix(in srgb, var(--o-we-bg-lighter), var(--o-we-fg-light)));
+    border-width: 0 0 var(--o-we-border-width) var(--o-we-border-width);
+    pointer-events: none;
+    transform: translate(0, ($o-hb-row-min-height + $o-hb-row-spacing) * -0.5 + $o-we-border-width);
+    content: "";
+}
+
+.o_hb_row {
+    $_z-index: 4;
+
+    .popover & {
+        --o-hb-row-bg-color: var(--o-hb-row-bg-color-popover, var(--o-we-fg-lighter));
+        --o-hb-row-active-bg-color: var(--o-hb-row-active-bg-color-popover, color-mix(in srgb, var(--o-we-color-accent) 20%, var(--o-we-fg-lighter)));
+        --o-hb-row-color: var(--o-hb-row-color-popover, var(--o-we-bg-lightest));
+        --o-hb-row-color-active: var(--o-hb-row-color-active-popover, var(--o-we-bg-darkest));
+        --o-hb-row-sublevel-color: var(--o-hb-row-sublevel-color-popover, color-mix(in srgb, var(--o-we-bg-lighter), var(--o-we-fg-light)));
+        .o_hb_row_content:has(button[data-icon="delete"]) {
+            align-items: stretch;
+        }
+        .o_hb_row_label {
+            flex: 0 0 38%;
+            align-self: center;
+        }
+        .o_hb_row_content {
+            flex: 0 0 62%;
+        }
+    }
+
+    --o-hb-btn-minHeight: calc(var(--o-hb-row-min-height) - (var(--o-hb-row-spacing) * 0.5));
+
+    min-height: var(--o-hb-row-min-height);
+    padding-top: var(--o-hb-row-spacing);
+    box-sizing: content-box;
+    align-items: center;
+    color: var(--o-hb-row-color, var(--o-we-fg-dark));
+
+    &[data-disabled] {
+        .o_hb_row_label {
+            opacity: 0.5;
+        }
+        cursor: not-allowed;
+    }
+
+    .o_hb_container_subtitle {
+        padding: var(--o-hb-row-spacing) 0 var(--o-hb-row-spacing) var(--o-hb-row-padding-left);
+    }
+
+    .o_hb_row_label {
+        min-width: 0;
+        flex: 0 0 44%;
+        z-index: $_z-index;
+        background-color: var(--o-hb-row-bg-color, var(--o-we-bg-lighter));
+        padding: var(--o-hb-row-spacing) var(--o-hb-row-spacing) var(--o-hb-row-spacing) var(--o-hb-row-padding-left);
+        align-self: baseline;
+    }
+
+    .o_hb_row_content {
+        --hb-row-content-gap: 2%;
+
+        flex: 0 0 56%;
+        width: 56%;
+        align-items: center;
+        gap: var(--hb-row-content-gap);
+        z-index: $_z-index; /* Make sure outlines / shadows are not trimmed. */
+
+        /* to prevent overlapping of ul with builder options. */
+        &:has(ul) {
+            z-index: auto;
+        }
+    }
+
+    .o_hb_collapse_toggler {
+        position: absolute;
+        margin-left: -1px;
+        padding-left: 0;
+        z-index: $_z-index + 1;
+        box-shadow: none;
+        font-size: 1.25em;
+        color: inherit;
+
+        &:focus-visible {
+            box-shadow: var(--btn-active-shadow), var(--btn-focus-box-shadow);
+        }
+    }
+
+    .o_hb_icon_sup {
+        position: relative;
+        top: -0.4em;
+        margin-left: 0.25em;
+        font-size: 0.75em;
+    }
+
+    &:has(> div > .o_cc_preview_wrapper) > .o_hb_collapse_toggler {
+        align-self: center;
+    }
+
+    /* ==== States */
+    &:hover, &.active {
+        .o_hb_row_content {
+            color: var(--o-hb-row-color-active, var(--o-we-fg-lighter));
+        }
+    }
+
+    &:has(.o_hb_row_content:hover) {
+        color: var(--o-hb-row-color-active, var(--o-we-fg-lighter));
+    }
+
+    &:has(.o_hb_row_label_actionable:hover) .o_hb_collapse_toggler {
+        color: var(--o-hb-row-color-active, var(--o-we-fg-lighter));
+    }
+
+    &.active {
+        background-color: var(--o-hb-row-active-bg-color, color-mix(in srgb, var(--o-we-color-accent) 20%, var(--o-we-bg-dark)));
+
+        .o_hb_row_label {
+            background-color: inherit;
+        }
+    }
+
+    /* Actionable labels hover states are currently dependant on the
+       presence of a collapsable icon. Should be improved using states. */
+    .o_hb_collapse_toggler:where(:not(.d-none)) + .o_hb_row_label_actionable:hover {
+        cursor: pointer;
+        color: var(--o-hb-row-color-active, var(--o-we-fg-lighter));
+    }
+
+    /* ==== Sublevels */
+    &.o_hb_row_sublevel > .o_hb_row_label::after {
+        @include sublevel-line;
+    }
+
+    /* Sublevel specific rules */
+    @for $_level from 1 through 3 {
+        $_level-padding: $o-hb-row-padding-left + ($o-hb-row-indent-left * $_level);
+        $_level-width: $o-hb-row-spacing + $o-we-border-width;
+        $_level-left: $_level-padding - $_level-width - $o-we-border-width;
+
+        &.o_hb_row_sublevel_#{$_level} {
+            .o_hb_row_label, & > .o_hb_row_label::after {
+                z-index: $_z-index - $_level;
+            }
+
+            .o_hb_row_label {
+                padding-left: $_level-padding;
+            }
+
+            & > .o_hb_row_label::after {
+                width: $_level-width;
+                left: $_level-left - $o-we-border-width;
+            }
+        }
+
+        &[data-label=" "]:not(.o_hb_row_sublevel):has(+ .o_hb_row_sublevel_#{$_level})::after {
+            @include sublevel-line($_level-left);
+            z-index: $_z-index - $_level;
+        }
+    }
+
+    & + .o_hb_collapse_content {
+        overflow: hidden;
+        height: 0; /* default collapsed state */
+        transition: height 0.35s ease;
+    }
+}

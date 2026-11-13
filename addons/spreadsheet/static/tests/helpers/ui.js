@@ -1,0 +1,149 @@
+import { Model, Spreadsheet, hooks } from "@odoo/o-spreadsheet";
+import { loadBundle } from "@web/core/assets";
+
+import { getFixture } from "@odoo/hoot";
+import { animationFrame } from "@odoo/hoot-mock";
+import {
+    Component,
+    onMounted,
+    onWillUnmount,
+    signal,
+    t,
+    useProps,
+    xml,
+    providePlugins,
+} from "@odoo/owl";
+import { useSpreadsheetNotificationPlugin } from "@spreadsheet/hooks";
+import { mountWithCleanup } from "@web/../tests/web_test_helpers";
+import { MainComponentsContainer } from "@web/core/main_components_container";
+import { render } from "@web/owl2/utils";
+import { createModelWithDataSource } from "@spreadsheet/../tests/helpers/model";
+
+const { useSpreadsheetProviders } = hooks;
+
+class Parent extends Component {
+    static template = xml`<Spreadsheet model="this.props.model"/>`;
+    static components = { Spreadsheet, MainComponentsContainer };
+    props = useProps({
+        model: t.instanceOf(Model),
+        owlPlugins: t.array(),
+        owlPluginsConfig: t.object(),
+    });
+    setup() {
+        useSpreadsheetNotificationPlugin();
+        providePlugins(this.props.owlPlugins, {
+            model: this.props.model,
+            ...this.props.owlPluginsConfig,
+        });
+    }
+}
+
+/**
+ * Parent of an isolated component: the `.o-spreadsheet` element with exactly the same plugins and
+ * stores as the real Spreadsheet (see `useSpreadsheetProviders`), plus the given extra plugins.
+ */
+class ComponentWithStores extends Component {
+    static template = xml`
+        <div class="o-spreadsheet" t-ref="this.ref">
+            <t t-component="this.props.component" t-props="this.props.props"/>
+        </div>`;
+    props = useProps({
+        component: t.component(),
+        props: t.object(),
+        model: t.instanceOf(Model),
+        owlPlugins: t.array(),
+        owlPluginsConfig: t.object(),
+    });
+    ref = signal.ref();
+    setup() {
+        useSpreadsheetNotificationPlugin();
+        const { stores } = useSpreadsheetProviders({
+            model: this.props.model,
+            spreadsheetRef: this.ref,
+            getPopoverContainerRect: () => this.ref().getBoundingClientRect(),
+        });
+        providePlugins(this.props.owlPlugins, {
+            model: this.props.model,
+            ...this.props.owlPluginsConfig,
+        });
+        onMounted(() => {
+            this.props.model.on("update", this, () => render(this, true));
+            stores.on("store-updated", this, () => render(this, true));
+        });
+        onWillUnmount(() => {
+            this.props.model.off("update", this);
+            stores.off("store-updated", this);
+        });
+    }
+}
+
+export async function mountComponentWithStores(component, model, props = {}, params = {}) {
+    await mountWithCleanup(ComponentWithStores, {
+        props: {
+            component,
+            props,
+            model,
+            owlPlugins: params.owlPlugins || [],
+            owlPluginsConfig: params.owlPluginsConfig || {},
+        },
+        noMainContainer: false,
+    });
+    await animationFrame();
+    return getFixture();
+}
+
+/**
+ * Mount o-spreadsheet component with the given spreadsheet model
+ * @param {Model} model
+ * @returns {Promise<HTMLElement>}
+ */
+export async function mountSpreadsheet(model, params = {}) {
+    await loadBundle("web.chartjs_lib");
+    await mountWithCleanup(Parent, {
+        props: {
+            model,
+            owlPlugins: params.owlPlugins || [],
+            owlPluginsConfig: params.owlPluginsConfig || {},
+        },
+        noMainContainer: false,
+    });
+    await animationFrame();
+    return getFixture();
+}
+
+/**
+ * Create and mount a spreadsheet component.
+ *
+ * @param {Object} params
+ * @param {Object} [params.serverData]
+ * @returns {Promise<{ fixture: HTMLElement, model: Model }>}
+ */
+export async function createModelAndMountSpreadsheet(params = {}) {
+    const { model, env } = await createModelWithDataSource({
+        serverData: params.serverData,
+        createMockApp: false,
+    });
+    const fixture = await mountSpreadsheet(model);
+    return { fixture, env, model };
+}
+
+export async function doMenuAction(registry, path, env) {
+    await getActionMenu(registry, path, env).execute(env);
+}
+
+export function getActionMenu(registry, _path, env) {
+    const path = [..._path];
+    let items = registry.getMenuItems();
+    while (items.length && path.length) {
+        const id = path.shift();
+        const item = items.find((item) => item.id === id);
+        if (!item) {
+            throw new Error(`Menu item ${id} not found`);
+        }
+        if (path.length === 0) {
+            return item;
+        }
+        items = item.children(env);
+    }
+    throw new Error(`Menu item not found`);
+}

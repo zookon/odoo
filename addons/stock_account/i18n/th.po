@@ -3,737 +3,996 @@
 # * stock_account
 #
 # Translators:
-# Khwunchai Jaengsawang <khwunchai.j@ku.th>, 2016
+# Odoo Thaidev <odoothaidev@gmail.com>, 2022
+# Pornvibool Tippayawat <pornvibool.t@gmail.com>, 2022
+# Khwunchai Jaengsawang <khwunchai.j@ku.th>, 2022
+# Wichanon Jamwutthipreecha, 2022
+# Martin Trigaux, 2022
+# "Tiffany Chang (tic)" <tic@odoo.com>, 2025.
+# Weblate <noreply-mt-weblate@weblate.org>, 2025.
+# Odoo Translation Bot <c3p@odoo.com>, 2026.
+# Nusara Boonma <nuboo@odoo.com>, 2026.
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo 9.0\n"
+"Project-Id-Version: Odoo Server 16.0+e\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2016-08-18 14:06+0000\n"
-"PO-Revision-Date: 2016-07-05 04:27+0000\n"
-"Last-Translator: Khwunchai Jaengsawang <khwunchai.j@ku.th>\n"
-"Language-Team: Thai (http://www.transifex.com/odoo/odoo-9/language/th/)\n"
+"POT-Creation-Date: 2026-09-11 17:42+0000\n"
+"PO-Revision-Date: 2026-08-31 20:30+0000\n"
+"Last-Translator: Nusara Boonma <nuboo@odoo.com>\n"
+"Language-Team: Thai <https://translate.odoo.com/projects/odoo-s19-4/"
+"stock_account/th/>\n"
 "Language: th\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Weblate 2026.8.1\n"
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_tree
-msgid "# of Products"
-msgstr "# ของสินค้า"
-
-#. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_category_property_form
-msgid "Account Stock Properties"
+#: model:ir.module.module,description:base.module_stock_account
+msgid ""
+"\n"
+"WMS Accounting module\n"
+"======================\n"
+"This module makes the link between the 'stock' and 'account' modules and "
+"allows you to create accounting entries to value your stock movements\n"
+"\n"
+"Key Features\n"
+"------------\n"
+"* Stock Valuation (periodical or automatic)\n"
+"* Invoice from Picking\n"
+"\n"
+"Dashboard / Reports for Warehouse Management includes:\n"
+"------------------------------------------------------\n"
+"* Stock Inventory Value at given date (support dates in the past)\n"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_stock_config_settings_inherit
-msgid "Accounting"
-msgstr "การบัญชี"
+#. odoo-python
+#: code:addons/stock_account/models/stock_quant.py:0
+msgid " [Accounted on %s]"
+msgstr " [ลงบัญชีเมื่อวันที่ %s]"
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_location_form_inherit
+#. odoo-python
+#: code:addons/stock_account/models/stock_lot.py:0
+msgid "%(lot)s price update from %(old_price)s to %(new_price)s by %(user)s"
+msgstr "%(lot)s การปรับปรุงราคาจาก%(old_price)s เป็น%(new_price)s โดย%(user)s"
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid "%(quantity)s %(uom)s at product's cost"
+msgstr "%(quantity)s %(uom)s ที่ราคาต้นทุนของสินค้า"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_account_report_invoice_document
+msgid "<span>Product</span>"
+msgstr "<span>สินค้า</span>"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_account_report_invoice_document
+msgid "<span>Quantity</span>"
+msgstr "<span>จำนวน</span>"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_account_report_invoice_document
+msgid "<span>SN/LN</span>"
+msgstr "<span>SN/LN</span>"
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid ""
+"A lot/serial number is required for product '%s' as it has lot valuation "
+"enabled."
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__avco_value
+msgid "AVCO Value"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_res_groups
+msgid "Access Groups"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,help:stock_account.field_stock_move__cogs_aml_ids
+msgid "Account move lines using this move in order to compute their COGS"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_inventory_adjustment_name__accounting_date
+#: model:ir.model.fields,field_description:stock_account.field_stock_quant__accounting_date
+msgid "Accounting Date"
+msgstr "วันที่ลงบัญชี"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.view_location_form_inherit
 msgid "Accounting Information"
 msgstr "ข้อมูลทางบัญชี"
 
 #. module: stock_account
-#: code:addons/stock_account/wizard/stock_change_standard_price.py:62
-#, python-format
-msgid "Active ID is not set in Context."
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_stock_config_settings_group_stock_inventory_valuation
+#: model_terms:ir.ui.view,arch_db:stock_account.res_config_settings_view_form
 msgid ""
-"Allows to configure inventory valuations on products and product categories."
+"Add additional cost (transport, customs, ...) in the value of the product."
+msgstr "เพิ่มค่าใช้จ่ายเพิ่มเติม (ค่าขนส่ง ศุลกากร ...) ในมูลค่าของสินค้า"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__quantity
+msgid "Added Quantity"
 msgstr ""
 
 #. module: stock_account
-#: selection:product.category,property_cost_method:0
-#: selection:product.template,property_cost_method:0
-msgid "Average Price"
-msgstr "ราคาเฉลี่ย"
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__added_value
+msgid "Added Value"
+msgstr "เพิ่มมูลค่า"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_can_be_expensed
-msgid "Can be expensed"
+#: model:ir.actions.act_window,name:stock_account.product_value_action
+#: model:ir.actions.server,name:stock_account.stock_move_action_adjust_valuation
+#: model_terms:ir.ui.view,arch_db:stock_account.product_value_form_view
+msgid "Adjust Valuation"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_change_standard_price
-#: model:ir.ui.view,arch_db:stock_account.view_wizard_valuation_history
-msgid "Cancel"
-msgstr "ยกเลิก"
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid "Adjust Valuation: %(product)s"
+msgstr ""
 
 #. module: stock_account
-#: code:addons/stock_account/stock_account.py:278
-#, python-format
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid "Adjusted on %(date)s by %(user)s"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,help:stock_account.field_res_config_settings__module_stock_landed_costs
+#: model_terms:ir.ui.view,arch_db:stock_account.res_config_settings_view_form
 msgid ""
-"Cannot find a stock input account for the product %s. You must define one on "
-"the product category, or on the location, before processing this operation."
+"Affect landed costs on reception operations and split them among products to "
+"update their cost price."
+msgstr "ส่งผลกระทบต่อต้นทุนที่ดินในการดำเนินการต้อนรับ และแยกออกเป็นสินค้าเพื่ออัปเดตราคาต้นทุน"
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_account_analytic_account
+msgid "Analytic Account"
+msgstr "บัญชีวิเคราะห์"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__analytic_account_line_ids
+msgid "Analytic Account Line"
+msgstr "รายการบัญชีวิเคราะห์"
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_account_analytic_plan
+msgid "Analytic Plan"
 msgstr ""
 
 #. module: stock_account
-#: code:addons/stock_account/stock_account.py:280
-#, python-format
-msgid ""
-"Cannot find a stock output account for the product %s. You must define one "
-"on the product category, or on the location, before processing this "
-"operation."
+#: model:ir.model.fields,field_description:stock_account.field_product_product__avg_cost
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__avg_cost
+msgid "Average Cost"
+msgstr "ต้นทุนเฉลี่ย"
+
+#. module: stock_account
+#: model:ir.model.fields.selection,name:stock_account.selection__stock_quant__cost_method__average
+msgid "Average Cost (AVCO)"
+msgstr "Average Cost (AVCO)"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_account_report_invoice_document
+msgid "BC46282798"
+msgstr "BC46282798"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_account_report_invoice_document
+msgid "Bacon"
+msgstr "เบคอน"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__cogs_aml_ids
+msgid "COGS lines"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_change_standard_price
-msgid "Change Price"
-msgstr "เปลี่ยนราคา"
-
-#. module: stock_account
-#: model:ir.actions.act_window,name:stock_account.action_view_change_standard_price
-#: model:ir.model,name:stock_account.model_stock_change_standard_price
-#: model:ir.ui.view,arch_db:stock_account.view_change_standard_price
-msgid "Change Standard Price"
-msgstr "เปลี่ยนราคามาตรฐาน"
-
-#. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_wizard_valuation_history
-msgid "Choose a date in the past to get the inventory at that date."
+#: model:ir.model.fields,field_description:stock_account.field_account_move_line__cogs_move_ids
+msgid "COGS stock moves"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_stock_inventory_accounting_date
-msgid ""
-"Choose the accounting date at which you want to value the stock moves "
-"created by the inventory instead of the default one (the inventory end date)"
+#: model:ir.model.fields,field_description:stock_account.field_account_bank_statement_line__closing_datetime
+#: model:ir.model.fields,field_description:stock_account.field_account_move__closing_datetime
+msgid "Closing Date"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_wizard_valuation_history
-msgid "Choose your date"
+#. odoo-python
+#: code:addons/stock_account/models/res_company.py:0
+msgid "Closing: Location Reclassification - [%(account)s]"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_uos_coeff
-msgid ""
-"Coefficient to convert default Unit of Measure to Unit of Sale uos = uom * "
-"coeff"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_company_id
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
+#: model:ir.model,name:stock_account.model_res_company
+#: model:ir.model.fields,field_description:stock_account.field_product_value__company_id
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__company_id
 msgid "Company"
 msgstr "บริษัท"
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.product_variant_easy_edit_view_inherit
-#: model:ir.ui.view,arch_db:stock_account.view_template_property_form
-msgid "Compute from average price"
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__company_currency_id
+msgid "Company Currency"
+msgstr "สกุลเงินของบริษัท"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__computed_value_description
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__value_computed_justification
+msgid "Computed Value Description"
 msgstr ""
 
 #. module: stock_account
-#: code:addons/stock_account/stock_account.py:351
-#, python-format
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
 msgid ""
-"Configuration error. Please configure the price difference account on the "
-"product or its category to process this operation."
+"Computed value: %(value)s\n"
+"%(description)s"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_change_standard_price
+#: model:ir.model,name:stock_account.model_res_config_settings
+msgid "Config Settings"
+msgstr "ตั้งค่าการกำหนดค่า"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__standard_price
 msgid "Cost"
 msgstr "ต้นทุน"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_category_property_cost_method
-#: model:ir.model.fields,field_description:stock_account.field_product_product_property_cost_method
-#: model:ir.model.fields,field_description:stock_account.field_product_template_property_cost_method
+#: model:ir.model.fields,field_description:stock_account.field_product_product__cost_method
+#: model:ir.model.fields,field_description:stock_account.field_product_template__cost_method
+#: model:ir.model.fields,field_description:stock_account.field_res_company__cost_method
+#: model:ir.model.fields,field_description:stock_account.field_stock_quant__cost_method
+msgid "Cost Method"
+msgstr ""
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.view_location_form_inherit
+msgid "Cost of Production"
+msgstr "ต้นทุนการผลิต"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_category__property_cost_method
 msgid "Costing Method"
-msgstr ""
+msgstr "วิธีการคิดต้นทุน"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_counterpart_account_id
-msgid "Counter-Part Account"
-msgstr ""
+#: model:ir.model.fields,field_description:stock_account.field_stock_picking__country_code
+#: model:ir.model.fields,field_description:stock_account.field_stock_picking_type__country_code
+msgid "Country Code"
+msgstr "รหัสประเทศ"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_create_uid
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_create_uid
+#: model:ir.model.fields,field_description:stock_account.field_product_value__create_uid
 msgid "Created by"
 msgstr "สร้างโดย"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_create_date
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_create_date
+#: model:ir.model.fields,field_description:stock_account.field_product_value__create_date
 msgid "Created on"
 msgstr "สร้างเมื่อ"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_date
+#: model:ir.model.fields,field_description:stock_account.field_product_value__currency_id
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__currency_id
+#: model:ir.model.fields,field_description:stock_account.field_stock_quant__currency_id
+msgid "Currency"
+msgstr "สกุลเงิน"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__current_value
+msgid "Current Value"
+msgstr "ค่าปัจจุบัน"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__current_value_description
+msgid "Current Value Description"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__current_value_details
+msgid "Current Value Details"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__date
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__date
 msgid "Date"
 msgstr "วันที่"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_display_name
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_display_name
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_display_name
+#: model:ir.model.fields,help:stock_account.field_stock_inventory_adjustment_name__accounting_date
+#: model:ir.model.fields,help:stock_account.field_stock_quant__accounting_date
+msgid ""
+"Date at which the accounting entries will be created in case of automated "
+"inventory valuation. If empty, the inventory date will be used."
+msgstr ""
+"วันที่จะสร้างรายการบัญชีในกรณีการประเมินมูลค่าคลังสินค้าอัตโนมัติ หากว่างเปล่า "
+"ระบบจะใช้วันที่ของคลังสินค้า"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__description
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__description
+msgid "Description"
+msgstr "คำอธิบาย"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_res_config_settings__group_lot_on_invoice
+msgid "Display Lots & Serial Numbers on Invoices"
+msgstr "แสดงล็อตและหมายเลขซีเรียลในใบแจ้งหนี้"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_account_analytic_account__display_name
+#: model:ir.model.fields,field_description:stock_account.field_account_analytic_plan__display_name
+#: model:ir.model.fields,field_description:stock_account.field_account_move__display_name
+#: model:ir.model.fields,field_description:stock_account.field_account_move_line__display_name
+#: model:ir.model.fields,field_description:stock_account.field_account_stock_valuation_report__display_name
+#: model:ir.model.fields,field_description:stock_account.field_product_category__display_name
+#: model:ir.model.fields,field_description:stock_account.field_product_product__display_name
+#: model:ir.model.fields,field_description:stock_account.field_product_template__display_name
+#: model:ir.model.fields,field_description:stock_account.field_product_value__display_name
+#: model:ir.model.fields,field_description:stock_account.field_res_company__display_name
+#: model:ir.model.fields,field_description:stock_account.field_res_config_settings__display_name
+#: model:ir.model.fields,field_description:stock_account.field_res_groups__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_forecasted_product_product__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_inventory_adjustment_name__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_location__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_move_line__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_picking__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_picking_type__display_name
+#: model:ir.model.fields,field_description:stock_account.field_stock_quant__display_name
 msgid "Display Name"
-msgstr "ชื่อที่ใช้แสดง"
+msgstr "แสดงชื่อ"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_inventory_accounting_date
-msgid "Force Accounting Date"
+#: model:res.groups,name:stock_account.group_lot_on_invoice
+msgid "Display Serial & Lot Number on Invoices"
+msgstr "แสดงหมายเลขซีเรียลและหมายเลขล็อตบนใบแจ้งหนี้"
+
+#. module: stock_account
+#: model:ir.model.fields,help:stock_account.field_stock_location__valuation_account_id
+msgid ""
+"Expense account used to re-qualify products removed from stock and sent to "
+"this location"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-msgid "Group By"
-msgstr "จัดกลุ่มโดย"
+#: model:ir.model.fields.selection,name:stock_account.selection__product_category__property_cost_method__fifo
+#: model:ir.model.fields.selection,name:stock_account.selection__product_template__cost_method__fifo
+#: model:ir.model.fields.selection,name:stock_account.selection__res_company__cost_method__fifo
+#: model:ir.model.fields.selection,name:stock_account.selection__stock_quant__cost_method__fifo
+msgid "First In First Out (FIFO)"
+msgstr "First In First Out (FIFO)"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_id
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_id
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_id
+#. odoo-python
+#: code:addons/stock_account/models/product_value.py:0
+msgid "For %(quantity)s %(uom)s (%(price_unit)s per %(uom)s)"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_account_analytic_account__id
+#: model:ir.model.fields,field_description:stock_account.field_account_analytic_plan__id
+#: model:ir.model.fields,field_description:stock_account.field_account_move__id
+#: model:ir.model.fields,field_description:stock_account.field_account_move_line__id
+#: model:ir.model.fields,field_description:stock_account.field_account_stock_valuation_report__id
+#: model:ir.model.fields,field_description:stock_account.field_product_category__id
+#: model:ir.model.fields,field_description:stock_account.field_product_product__id
+#: model:ir.model.fields,field_description:stock_account.field_product_template__id
+#: model:ir.model.fields,field_description:stock_account.field_product_value__id
+#: model:ir.model.fields,field_description:stock_account.field_res_company__id
+#: model:ir.model.fields,field_description:stock_account.field_res_config_settings__id
+#: model:ir.model.fields,field_description:stock_account.field_res_groups__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_forecasted_product_product__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_inventory_adjustment_name__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_location__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_move_line__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_picking__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_picking_type__id
+#: model:ir.model.fields,field_description:stock_account.field_stock_quant__id
 msgid "ID"
-msgstr "รหัส"
+msgstr "ไอดี"
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_stock_change_standard_price_new_price
+#: model:ir.model.fields,help:stock_account.field_product_category__anglo_saxon_accounting
 msgid ""
-"If cost price is increased, stock variation account will be debited and "
-"stock output account will be credited with the value = (difference of amount "
-"* quantity available).\n"
-"If cost price is decreased, stock variation account will be creadited and "
-"stock input account will be debited."
+"If checked, the product will be valued using the Anglo-Saxon accounting "
+"method."
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_category_property_valuation
-msgid ""
-"If perpetual valuation is enabled for a product, the system will "
-"automatically create journal entries corresponding to stock moves, with "
-"product price as specified by the 'Costing Method'. The inventory variation "
-"account set on the product category will represent the current inventory "
-"value, and the stock input and stock output account will hold the "
-"counterpart moves for incoming and outgoing products."
+#: model:ir.model.fields,help:stock_account.field_product_product__lot_valuated
+#: model:ir.model.fields,help:stock_account.field_product_template__lot_valuated
+#: model:ir.model.fields,help:stock_account.field_stock_lot__lot_valuated
+msgid "If checked, the valuation will be specific by Lot/Serial number."
+msgstr "หากทำเครื่องหมายไว้ การประเมินราคาจะระบุเฉพาะตามหมายเลขล็อต/หมายเลขซีเรียล"
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_location.py:0
+msgid "Invalid search operator or value"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_property_valuation
-#: model:ir.model.fields,help:stock_account.field_product_template_property_valuation
-msgid ""
-"If perpetual valuation is enabled for a product, the system will "
-"automatically create journal entries corresponding to stock moves, with "
-"product price as specified by the 'Costing Method'The inventory variation "
-"account set on the product category will represent the current inventory "
-"value, and the stock input and stock output account will hold the "
-"counterpart moves for incoming and outgoing products."
-msgstr ""
-
-#. module: stock_account
-#: selection:stock.config.settings,module_stock_landed_costs:0
-msgid "Include landed costs in product costing computation"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_stock_config_settings_module_stock_landed_costs
-msgid ""
-"Install the module that allows to affect landed costs on pickings, and split "
-"them onto the different products."
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_stock_inventory
-msgid "Inventory"
-msgstr "สินค้าคงคลัง"
+#: model:ir.model,name:stock_account.model_stock_inventory_adjustment_name
+msgid "Inventory Adjustment Reference / Reason"
+msgstr "การอ้างอิงการปรับคลังสินค้า / เหตุผล"
 
 #. module: stock_account
 #: model:ir.model,name:stock_account.model_stock_location
-msgid "Inventory Locations"
-msgstr "ตำแหน่งสินค้าคงคลัง"
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_category_property_valuation
-#: model:ir.model.fields,field_description:stock_account.field_product_product_property_valuation
-#: model:ir.model.fields,field_description:stock_account.field_product_template_property_valuation
-#: model:ir.model.fields,field_description:stock_account.field_stock_config_settings_group_stock_inventory_valuation
-#: model:ir.ui.view,arch_db:stock_account.view_category_property_form
-msgid "Inventory Valuation"
+msgid "Inventory Location"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_inventory_value
-msgid "Inventory Value"
-msgstr "ค่าของสินค้าคงคลัง"
+#. odoo-javascript
+#. odoo-python
+#: code:addons/stock_account/report/account_stock_valuation_report.py:0
+#: code:addons/stock_account/static/src/stock_valuation/stock_valuation_report.js:0
+msgid "Inventory Loss"
+msgstr "คลังสินค้าที่สูญหาย"
 
 #. module: stock_account
-#: model:ir.actions.act_window,name:stock_account.action_wizard_stock_valuation_history
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_choose_date
-#: model:ir.ui.menu,name:stock_account.menu_action_wizard_valuation_history
-msgid "Inventory at Date"
+#: model:ir.model.fields,help:stock_account.field_account_move_line__cogs_move_ids
+msgid "Inventory moves used to compute COGS values."
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model,name:stock_account.model_account_invoice
-msgid "Invoice"
-msgstr "ใบกำกับสินค้า/ใบแจ้งหนี้"
+#: model:ir.module.module,summary:base.module_stock_account
+msgid "Inventory, Logistic, Valuation, Accounting"
+msgstr ""
 
 #. module: stock_account
-#: model:ir.model,name:stock_account.model_account_invoice_line
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__invoice_line_ids
 msgid "Invoice Line"
-msgstr "รายการในใบแจ้งหนี้"
+msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_config_settings_module_stock_landed_costs
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__is_dropship
+msgid "Is Dropship"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__is_in
+msgid "Is Incoming (valued)"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__is_out
+msgid "Is Outgoing (valued)"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__is_valued
+msgid "Is Valued"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_location__is_valued
+msgid "Is valued inside the company"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_account_move
+msgid "Journal Entry"
+msgstr "รายการบันทึกประจำวัน"
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_account_move_line
+msgid "Journal Item"
+msgstr "รายการบันทึก"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__justification
+msgid "Justification"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_res_config_settings__module_stock_landed_costs
 msgid "Landed Costs"
-msgstr ""
+msgstr "ต้นทุนแฝง"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price___last_update
-#: model:ir.model.fields,field_description:stock_account.field_stock_history___last_update
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history___last_update
-msgid "Last Modified on"
-msgstr "แก้ไขครั้งสุดท้ายเมื่อ"
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_write_uid
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_write_uid
+#: model:ir.model.fields,field_description:stock_account.field_product_value__write_uid
 msgid "Last Updated by"
-msgstr "อัพเดทครั้งสุดท้ายโดย"
+msgstr "อัปเดตครั้งล่าสุดโดย"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_write_date
-#: model:ir.model.fields,field_description:stock_account.field_wizard_valuation_history_write_date
+#: model:ir.model.fields,field_description:stock_account.field_product_value__write_date
 msgid "Last Updated on"
-msgstr "อัพเดทครั้งสุดท้ายเมื่อ"
+msgstr "อัปเดตครั้งล่าสุดเมื่อ"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_location_id
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-msgid "Location"
-msgstr "สถานที่"
+#: model_terms:ir.ui.view,arch_db:stock_account.view_location_form_inherit
+msgid "Loss Account"
+msgstr "บัญชีขาดทุน"
 
 #. module: stock_account
-#: model:res.groups,name:stock_account.group_inventory_valuation
-msgid "Manage Inventory Valuation and Costing Methods"
+#: model:ir.model.fields,field_description:stock_account.field_product_value__lot_id
+msgid "Lot"
+msgstr "ล็อต"
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_stock_lot
+msgid "Lot/Serial"
+msgstr "ล็อต/ซีเรียล"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.res_config_settings_view_form
+msgid "Lots & Serial numbers will appear on the invoice"
+msgstr "ล็อตและหมายเลขซีเรียลจะแสดงบนใบแจ้งหนี้"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__value_manual
+msgid "Manual Value"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
+#: model:ir.model.fields,field_description:stock_account.field_product_value__move_id
 msgid "Move"
-msgstr "ย้าย"
+msgstr "การเคลื่อนย้าย"
 
 #. module: stock_account
-#: code:addons/stock_account/product.py:125
-#: code:addons/stock_account/product.py:187
-#, python-format
-msgid "No difference between standard price and new price!"
-msgstr "ไม่มีความแตกต่างระหว่างราคามาตรฐานและราคาใหม่!"
-
-#. module: stock_account
-#: selection:stock.config.settings,module_stock_landed_costs:0
-msgid "No landed costs"
+#: model_terms:ir.ui.view,arch_db:stock_account.product_value_form_view
+msgid "New Value"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_date
-msgid "Operation Date"
-msgstr "วันที่ดำเนินการ"
-
-#. module: stock_account
-#: selection:product.category,property_valuation:0
-#: selection:product.template,property_valuation:0
-msgid "Periodic (manual)"
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid "Only is set (= True) is supported in search for remaining_qty."
 msgstr ""
 
 #. module: stock_account
-#: selection:stock.config.settings,group_stock_inventory_valuation:0
-msgid "Periodic inventory valuation (recommended)"
-msgstr ""
+#: model:ir.model,name:stock_account.model_stock_picking_type
+msgid "Picking Type"
+msgstr "ประเภทการรับ"
 
 #. module: stock_account
-#: selection:product.category,property_valuation:0
-#: selection:product.template,property_valuation:0
-msgid "Perpetual (automated)"
-msgstr ""
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__price_unit
+msgid "Price Unit"
+msgstr "ราคาต่อหน่วย"
 
 #. module: stock_account
-#: selection:stock.config.settings,group_stock_inventory_valuation:0
-msgid "Perpetual inventory valuation (stock move generates accounting entries)"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_change_standard_price_new_price
-msgid "Price"
-msgstr "ราคา"
-
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_product_product
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_product_id
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-msgid "Product"
-msgstr "สินค้า"
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_alert_time
-msgid "Product Alert Time"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_product_category
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_product_categ_id
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-msgid "Product Category"
-msgstr "หมวดสินค้า"
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_life_time
-msgid "Product Life Time"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_quantity
-msgid "Product Quantity"
-msgstr "ปริมาณสินค้า"
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_removal_time
-msgid "Product Removal Time"
+#. odoo-python
+#: code:addons/stock_account/models/product.py:0
+msgid "Price update from %(old_price)s to %(new_price)s by %(user)s"
 msgstr ""
 
 #. module: stock_account
 #: model:ir.model,name:stock_account.model_product_template
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_product_template_id
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-msgid "Product Template"
-msgstr "รูปแบบสินค้า"
+#: model:ir.model.fields,field_description:stock_account.field_product_value__product_id
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__product_id
+msgid "Product"
+msgstr "สินค้า"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_use_time
-msgid "Product Use Time"
+#: model:ir.model,name:stock_account.model_product_category
+msgid "Product Category"
+msgstr "หมวดหมู่สินค้า"
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_stock_move_line
+msgid "Product Moves (Stock Move Line)"
+msgstr "ย้ายสินค้า ( ไลน์เคลื่อนย้ายสต๊อก )"
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_quant.py:0
+msgid "Product Quantity Confirmed"
+msgstr "ยืนยันปริมาณสินค้าแล้ว"
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_quant.py:0
+msgid "Product Quantity Updated"
+msgstr "ปริมาณผลิตภัณฑ์ล่าสุด"
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_product_value
+#: model:ir.model.fields.selection,name:stock_account.selection__stock_avco_report__res_model_name__product_value
+msgid "Product Value"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model,name:stock_account.model_product_product
+msgid "Product Variant"
+msgstr "ตัวแปรสินค้า"
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid ""
+"Product should be passed as an argument in order to get the unit price for "
+"moves in a kit."
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_res_company__account_production_wip_account_id
+msgid "Production WIP Account"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_res_company__account_production_wip_overhead_account_id
+msgid "Production WIP Overhead Account"
 msgstr ""
 
 #. module: stock_account
 #: model:ir.model,name:stock_account.model_stock_quant
-msgid "Quants"
-msgstr "วิเคราะห์ปริมาณ"
-
-#. module: stock_account
-#: selection:product.category,property_cost_method:0
-#: selection:product.template,property_cost_method:0
-msgid "Real Price"
-msgstr "ราคาจริง"
-
-#. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_wizard_valuation_history
-msgid "Retrieve the Inventory Value"
+msgid "Quant"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_wizard_valuation_history
-msgid "Retrieve the curent stock valuation."
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__reference
+msgid "Reference"
+msgstr "การอ้างอิง"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.view_move_search
+msgid "Remaining"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_serial_number
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-msgid "Serial Number"
-msgstr "เลขซีเรียล"
-
-#. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.product_variant_easy_edit_view_inherit
-#: model:ir.ui.view,arch_db:stock_account.view_template_property_form
-#, fuzzy
-msgid "Set standard price"
-msgstr "ราคามาตรฐาน"
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_source
-msgid "Source"
-msgstr "ที่มา"
-
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_uos_id
-msgid ""
-"Specify a unit of measure here if invoicing is made in another unit of "
-"measure than inventory. Keep empty to use the default unit of measure."
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__remaining_qty
+msgid "Remaining Quantity"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_can_be_expensed
-msgid "Specify whether the product can be selected in an HR expense."
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__remaining_value
+msgid "Remaining Value"
+msgstr "มูลค่าคงเหลือ"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__res_model_name
+msgid "Resource Model Name"
 msgstr ""
 
 #. module: stock_account
-#: selection:product.category,property_cost_method:0
-#: selection:product.template,property_cost_method:0
+#: model:ir.model.fields,field_description:stock_account.field_stock_inventory_adjustment_name__should_show_accounting_date
+msgid "Should Show Accounting Date"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__standard_price
+#: model:ir.model.fields.selection,name:stock_account.selection__stock_quant__cost_method__standard
 msgid "Standard Price"
 msgstr "ราคามาตรฐาน"
 
 #. module: stock_account
-#: code:addons/stock_account/product.py:138
-#: code:addons/stock_account/product.py:145
-#: code:addons/stock_account/product.py:199
-#: code:addons/stock_account/product.py:205
-#, python-format
-msgid "Standard Price changed"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_property_cost_method
-#: model:ir.model.fields,help:stock_account.field_product_template_property_cost_method
+#: model:ir.model.fields,help:stock_account.field_product_category__property_cost_method
 msgid ""
-"Standard Price: The cost price is manually updated at the end of a specific "
-"period (usually once a year).\n"
-"                    Average Price: The cost price is recomputed at each "
-"incoming shipment and used for the product valuation.\n"
-"                    Real Price: The cost price displayed is the price of the "
-"last outgoing product (will be use in case of inventory loss for example)."
+"Standard Price: The products are valued at their standard cost defined on "
+"the product.\n"
+"        Average Cost (AVCO): The products are valued at weighted average "
+"cost.\n"
+"        "
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_category_property_cost_method
-msgid ""
-"Standard Price: The cost price is manually updated at the end of a specific "
-"period (usually once a year).\n"
-"Average Price: The cost price is recomputed at each incoming shipment and "
-"used for the product valuation.\n"
-"Real Price: The cost price displayed is the price of the last outgoing "
-"product (will be used in case of inventory loss for example)."
+#: model:ir.model,name:stock_account.model_stock_avco_report
+msgid "Stock AVCO Justifier"
 msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_category_property_stock_account_input_categ_id
-#: model:ir.model.fields,field_description:stock_account.field_product_product_property_stock_account_input
-#: model:ir.model.fields,field_description:stock_account.field_product_template_property_stock_account_input
-msgid "Stock Input Account"
-msgstr ""
-
-#. module: stock_account
-#: code:addons/stock_account/stock_account.py:464
-#: model:ir.model.fields,field_description:stock_account.field_product_category_property_stock_journal
-#, python-format
-msgid "Stock Journal"
-msgstr "สมุดรายวันสต็อก"
 
 #. module: stock_account
 #: model:ir.model,name:stock_account.model_stock_move
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_move_id
+#: model:ir.model.fields,field_description:stock_account.field_account_bank_statement_line__stock_move_ids
+#: model:ir.model.fields,field_description:stock_account.field_account_move__stock_move_ids
+#: model:ir.model.fields,field_description:stock_account.field_account_move_line__stock_move_id
+#: model:ir.model.fields.selection,name:stock_account.selection__stock_avco_report__res_model_name__stock_move
 msgid "Stock Move"
 msgstr "ย้ายสต็อก"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_category_property_stock_account_output_categ_id
-#: model:ir.model.fields,field_description:stock_account.field_product_product_property_stock_account_output
-#: model:ir.model.fields,field_description:stock_account.field_product_template_property_stock_account_output
-msgid "Stock Output Account"
-msgstr ""
+#: model:ir.model,name:stock_account.model_stock_forecasted_product_product
+msgid "Stock Replenishment Report"
+msgstr "รายงานการเติมสต็อก"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_category_property_stock_valuation_account_id
+#. odoo-javascript
+#: code:addons/stock_account/static/src/stock_account_forecasted/forecasted_header.js:0
+#: model:ir.model,name:stock_account.model_account_stock_valuation_report
+msgid "Stock Valuation"
+msgstr "การประเมินมูลค่าสต็อก"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_location__valuation_account_id
 msgid "Stock Valuation Account"
-msgstr ""
+msgstr "บัญชีประเมินมูลค่าสต็อก"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_location_valuation_in_account_id
-msgid "Stock Valuation Account (Incoming)"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_location_valuation_out_account_id
-msgid "Stock Valuation Account (Outgoing)"
-msgstr ""
-
-#. module: stock_account
-#: code:addons/stock_account/wizard/stock_valuation_history.py:31
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_graph
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_pivot
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_search
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_tree
-#, python-format
-msgid "Stock Value At Date"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_account_chart_template
-msgid "Templates for Account Chart"
-msgstr "แม่แบบสำหรับผังบัญชี"
-
-#. module: stock_account
-#: code:addons/stock_account/stock_account.py:306
-#, python-format
+#: model:ir.model.fields,help:stock_account.field_product_product__company_currency_id
 msgid ""
-"The found valuation amount for product %s is zero. Which means there is "
-"probably a configuration error. Check the costing method and the standard "
-"price"
+"Technical field to correctly show the currently selected company's currency "
+"that corresponds to the totaled value of the product's valuation layers"
+msgstr ""
+"ฟิลด์เทคนิคเพื่อแสดงสกุลเงินของบริษัทที่เลือกในปัจจุบันอย่างถูกต้อง "
+"ซึ่งสอดคล้องกับมูลค่ารวมของชั้นการประเมินมูลค่าของสินค้า"
+
+#. module: stock_account
+#: model:ir.model.fields,help:stock_account.field_stock_picking__country_code
+#: model:ir.model.fields,help:stock_account.field_stock_picking_type__country_code
+msgid ""
+"The ISO country code in two chars. \n"
+"You can use this field for quick search."
+msgstr ""
+"โค้ดประเทศ ISO ในสองตัวอักษร\n"
+"คุณสามารถใช้ช่องนี้เพื่อการค้นหาอย่างรวดเร็ว"
+
+#. module: stock_account
+#: model:ir.model.fields,help:stock_account.field_product_value__current_value
+#: model:ir.model.fields,help:stock_account.field_stock_move__value
+msgid "The current value of the move. It's zero if the move is not valued."
 msgstr ""
 
 #. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_stock_history_report_tree
+#. odoo-javascript
+#: code:addons/stock_account/static/src/fields/boolean_confirm.js:0
+msgid ""
+"This operation might lead in a loss of data. Valuation will be identical for "
+"all lots/SN. Do you want to proceed ? "
+msgstr ""
+"การดำเนินการนี้อาจนำไปสู่การสูญเสียข้อมูล การประเมินค่าจะเหมือนกันสำหรับล็อต/SN ทั้งหมด "
+"คุณต้องการดำเนินการต่อหรือไม่? "
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_move_view_list
+msgid "Total"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__total_quantity
+msgid "Total Quantity"
+msgstr "จำนวนรวม"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_move_view_list_valuation
+msgid "Total Remaining Qty"
+msgstr ""
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_move_view_list_valuation
+msgid "Total Remaining Value"
+msgstr "มูลค่าคงเหลือทั้งหมด"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_product__total_value
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__total_value
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__total_value
+#: model_terms:ir.ui.view,arch_db:stock_account.product_product_stock_tree_inherit_stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.view_stock_quant_tree_editable_inherit
 msgid "Total Value"
-msgstr ""
+msgstr "มูลค่ารวม"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_uos_coeff
-msgid "Unit of Measure -> UOS Coeff"
-msgstr ""
+#: model:ir.model,name:stock_account.model_stock_picking
+msgid "Transfer"
+msgstr "โอน"
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_uos_id
-msgid "Unit of Sale"
-msgstr ""
-
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_stock_location_valuation_in_account_id
+#: model:ir.model.fields,help:stock_account.field_stock_move__to_refund
 msgid ""
-"Used for real-time inventory valuation. When set on a virtual location (non "
-"internal type), this account will be used to hold the value of products "
-"being moved from an internal location into this location, instead of the "
-"generic Stock Output Account set on the product. This has no effect for "
-"internal locations."
+"Trigger a decrease of the delivered/received quantity in the associated Sale "
+"Order/Purchase Order"
+msgstr "กระตุ้นให้ปริมาณ การส่งมอบ/รับ ลดลงใน ใบสั่งขาย/ใบสั่งซื้อ ที่เกี่ยวข้อง"
+
+#. module: stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.product_product_stock_tree_inherit_stock_account
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_avco_report_view_list
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_move_view_list_valuation
+msgid "Unit Cost"
+msgstr "ต้นทุนต่อหน่วย"
+
+#. module: stock_account
+#: model:ir.actions.act_window,name:stock_account.stock_avco_report_action
+msgid "Unit Cost History"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_stock_location_valuation_out_account_id
-msgid ""
-"Used for real-time inventory valuation. When set on a virtual location (non "
-"internal type), this account will be used to hold the value of products "
-"being moved out of this location and into an internal location, instead of "
-"the generic Stock Output Account set on the product. This has no effect for "
-"internal locations."
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__to_refund
+msgid "Update quantities on SO/PO"
+msgstr "อัปเดตปริมาณใน SO/PO"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_category__anglo_saxon_accounting
+msgid "Use Anglo-Saxon Accounting"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_stock_history_price_unit_on_quant
+#: model:ir.model.fields,field_description:stock_account.field_product_value__user_id
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__user_id
+msgid "User"
+msgstr "ผู้ใช้"
+
+#. module: stock_account
+#: model:ir.actions.act_window,name:stock_account.stock_move_valuation_action
+#: model_terms:ir.ui.view,arch_db:stock_account.res_config_settings_view_form
+msgid "Valuation"
+msgstr "การประเมินมูลค่า"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_product__company_currency_id
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__company_currency_id
+msgid "Valuation Currency"
+msgstr "สกุลเงินของการประเมินมูลค่า"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_product__lot_valuated
+#: model:ir.model.fields,field_description:stock_account.field_product_template__lot_valuated
+#: model:ir.model.fields,field_description:stock_account.field_stock_lot__lot_valuated
+msgid "Valuation by Lot/Serial"
+msgstr "การประเมินราคาตามหมายเลขล็อต/หมายเลขซีเรียล"
+
+#. module: stock_account
+#: model:ir.model.fields,field_description:stock_account.field_product_value__value
+#: model:ir.model.fields,field_description:stock_account.field_stock_avco_report__value
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__value
+#: model:ir.model.fields,field_description:stock_account.field_stock_quant__value
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_move_view_list
 msgid "Value"
 msgstr "ค่า"
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_alert_time
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__value_justification
+msgid "Value Description"
+msgstr ""
+
+#. module: stock_account
+#. odoo-javascript
+#: code:addons/stock_account/static/src/stock_account_forecasted/forecasted_header.xml:0
+msgid "Value On Hand:"
+msgstr ""
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid "Value based on original move %(reference)s"
+msgstr ""
+
+#. module: stock_account
+#: model:ir.model.fields,help:stock_account.field_stock_lot__standard_price
 msgid ""
-"When a new a Serial Number is issued, this is the number of days before an "
-"alert should be notified."
+"Value of the lot (automatically computed in AVCO).\n"
+"        Used to value the product when the purchase cost is not known (e.g. "
+"inventory adjustment).\n"
+"        Used to compute margins on sale orders."
+msgstr ""
+"มูลค่าของล็อต (คำนวณอัตโนมัติใน AVCO)\n"
+"        ใช้ในการประเมินมูลค่าผลิตภัณฑ์เมื่อไม่ทราบต้นทุนการซื้อ (เช่น การปรับคลังสินค้า)\n"
+"        ใช้ในการคำนวณมาร์จิ้นในการสั่งซื้อสินค้า"
+
+#. module: stock_account
+#: model:ir.module.module,shortdesc:base.module_stock_account
+msgid "WMS Accounting"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_life_time
+#. odoo-python
+#: code:addons/stock_account/models/stock_move.py:0
+msgid "You can only adjust valuation for one move at a time."
+msgstr ""
+
+#. module: stock_account
+#. odoo-python
+#: code:addons/stock_account/models/product.py:0
 msgid ""
-"When a new a Serial Number is issued, this is the number of days before the "
-"goods may become dangerous and must not be consumed."
+"You cannot enable lot valuation because the following products have on-hand "
+"quantities without a lot/serial number:\n"
+"%s"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_removal_time
+#. odoo-python
+#: code:addons/stock_account/models/stock_picking.py:0
 msgid ""
-"When a new a Serial Number is issued, this is the number of days before the "
-"goods should be removed from the stock."
+"You cannot modify the scheduled date of operation %s because it falls within "
+"a locked fiscal period."
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_use_time
-msgid ""
-"When a new a Serial Number is issued, this is the number of days before the "
-"goods starts deteriorating, without being dangerous yet."
+#: model:ir.model.fields,field_description:stock_account.field_stock_move__account_move_id
+msgid "stock_move_id"
 msgstr ""
 
 #. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_category_property_stock_account_input_categ_id
-msgid ""
-"When doing real-time inventory valuation, counterpart journal items for all "
-"incoming stock moves will be posted in this account, unless there is a "
-"specific valuation account set on the source location. This is the default "
-"value for all products in this category. It can also directly be set on each "
-"product"
-msgstr ""
+#: model_terms:ir.ui.view,arch_db:stock_account.stock_account_report_invoice_document
+msgid "units"
+msgstr "หน่วย"
 
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_property_stock_account_input
-#: model:ir.model.fields,help:stock_account.field_product_template_property_stock_account_input
-msgid ""
-"When doing real-time inventory valuation, counterpart journal items for all "
-"incoming stock moves will be posted in this account, unless there is a "
-"specific valuation account set on the source location. When not set on the "
-"product, the one from the product category is used."
-msgstr ""
+#~ msgid "Account"
+#~ msgstr "บัญชี"
 
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_category_property_stock_account_output_categ_id
-msgid ""
-"When doing real-time inventory valuation, counterpart journal items for all "
-"outgoing stock moves will be posted in this account, unless there is a "
-"specific valuation account set on the destination location. This is the "
-"default value for all products in this category. It can also directly be set "
-"on each product"
-msgstr ""
+#~ msgid "Account Chart Template"
+#~ msgstr "เทมเพลตแผนภูมิบัญชี"
 
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_product_property_stock_account_output
-#: model:ir.model.fields,help:stock_account.field_product_template_property_stock_account_output
-msgid ""
-"When doing real-time inventory valuation, counterpart journal items for all "
-"outgoing stock moves will be posted in this account, unless there is a "
-"specific valuation account set on the destination location. When not set on "
-"the product, the one from the product category is used."
-msgstr ""
+#~ msgid "Cogs Origin"
+#~ msgstr "ต้นกำเนิดของฟันเฟือง"
 
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_category_property_stock_journal
-msgid ""
-"When doing real-time inventory valuation, this is the Accounting Journal in "
-"which entries will be automatically posted when stock moves are processed."
-msgstr ""
+#~ msgid "Credit"
+#~ msgstr "เครดิต"
 
-#. module: stock_account
-#: model:ir.model.fields,help:stock_account.field_product_category_property_stock_valuation_account_id
-msgid ""
-"When real-time inventory valuation is enabled on a product, this account "
-"will hold the current value of the products."
-msgstr ""
+#~ msgid "Daily"
+#~ msgstr "รายวัน"
 
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_wizard_valuation_history
-msgid "Wizard that opens the stock valuation history table"
-msgstr ""
+#~ msgid "Debit"
+#~ msgstr "เดบิต"
 
-#. module: stock_account
-#: code:addons/stock_account/stock_account.py:276
-#, python-format
-msgid ""
-"You don't have any stock journal defined on your product category, check if "
-"you have installed a chart of accounts"
-msgstr ""
+#~ msgid "Expense Account"
+#~ msgstr "บัญชีค่าใช้จ่าย"
 
-#. module: stock_account
-#: code:addons/stock_account/stock_account.py:282
-#, python-format
-msgid ""
-"You don't have any stock valuation account defined on your product category. "
-"You must define one before processing this operation."
-msgstr ""
+#~ msgid "Initial Balance"
+#~ msgstr "ยอดเริ่มต้น"
 
-#. module: stock_account
-#: model:ir.ui.view,arch_db:stock_account.view_change_standard_price
-msgid "_Apply"
-msgstr "_นำไปใช้"
+#~ msgid "Inventory Valuation"
+#~ msgstr "การประเมินมูลค่าคลังสินค้า"
 
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_stock_config_settings
-msgid "stock.config.settings"
-msgstr "stock.config.settings"
+#~ msgid "Journal Items"
+#~ msgstr "รายการสมุดรายวัน"
 
-#. module: stock_account
-#: model:ir.model,name:stock_account.model_stock_history
-msgid "stock.history"
-msgstr "stock.history"
+#~ msgid "Manual"
+#~ msgstr "ด้วยตัวเอง"
 
-#. module: stock_account
-#: model:ir.model.fields,field_description:stock_account.field_product_product_cost_method
-#: model:ir.model.fields,field_description:stock_account.field_product_product_valuation
-#: model:ir.model.fields,field_description:stock_account.field_product_template_cost_method
-#: model:ir.model.fields,field_description:stock_account.field_product_template_valuation
-msgid "unknown"
-msgstr "ไม่ทราบ"
+#~ msgid "Monthly"
+#~ msgstr "รายเดือน"
 
-#~ msgid "Asset Type"
-#~ msgstr "ประเภทสินทรัพย์"
+#~ msgid "Price Difference Account"
+#~ msgstr "บัญชีส่วนต่างราคา"
+
+#~ msgid ""
+#~ "Standard Price: The products are valued at their standard cost defined on "
+#~ "the product.\n"
+#~ "        Average Cost (AVCO): The products are valued at weighted average "
+#~ "cost.\n"
+#~ "        First In First Out (FIFO): The products are valued supposing "
+#~ "those that enter the company first will also leave it first.\n"
+#~ "        "
+#~ msgstr ""
+#~ "ราคามาตรฐาน: สินค้ามีมูลค่าตามต้นทุนมาตรฐานที่กำหนดไว้บนสินค้า\n"
+#~ "Average Cost (AVCO): สินค้ามีมูลค่าตามต้นทุนถัวเฉลี่ยถ่วงน้ำหนัก\n"
+#~ "First In First Out (FIFO): "
+#~ "สินค้ามีมูลค่าโดยสมมติว่าสินค้าที่เข้าบริษัทก่อนจะออกก่อนเช่นกัน\n"
+#~ "        "
+
+#~ msgid "Stock Journal"
+#~ msgstr "สมุดรายวันสต็อก"
+
+#~ msgid ""
+#~ "When automated inventory valuation is enabled on a product, this account "
+#~ "will hold the current value of the products."
+#~ msgstr ""
+#~ "เมื่อเปิดใช้งานการประเมินมูลค่าคลังสินค้าอัตโนมัติในสินค้า บัญชีนี้จะเก็บมูลค่าปัจจุบันของสินค้า"
+
+#~ msgid ""
+#~ "When doing automated inventory valuation, this is the Accounting Journal "
+#~ "in which entries will be automatically posted when stock moves are "
+#~ "processed."
+#~ msgstr ""
+#~ "เมื่อทำการประเมินมูลค่าคลังสินค้าแบบอัตโนมัติ นี่คือสมุดรายวันการบัญชี "
+#~ "ซึ่งรายการต่างๆจะถูกผ่านรายการโดยอัตโนมัติเมื่อมีการประมวลผลการย้ายสต็อก"
+
+#~ msgid ""
+#~ "Value of the product (automatically computed in AVCO).\n"
+#~ "        Used to value the product when the purchase cost is not known "
+#~ "(e.g. inventory adjustment).\n"
+#~ "        Used to compute margins on sale orders."
+#~ msgstr ""
+#~ "มูลค่าของสินค้า (คำนวณโดยอัตโนมัติใน AVCO)\n"
+#~ "       ใช้เพื่อประเมินมูลค่าสินค้าเมื่อไม่ทราบต้นทุนการซื้อ (เช่น การปรับปรุงสินค้าคงคลัง)\n"
+#~ "       ใช้เพื่อคำนวณอัตรากำไรจากคำสั่งซื้อขาย"

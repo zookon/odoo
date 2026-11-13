@@ -1,91 +1,195 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+from collections import defaultdict, OrderedDict
+from functools import partial
+
 from odoo import http, _
-from odoo.addons.http_routing.models.ir_http import slug
+from odoo.addons.website.controllers.form import WebsiteForm
+from odoo.fields import Command, Domain
 from odoo.http import request
+from odoo.tools.translate import LazyTranslate
+
+_lt = LazyTranslate(__name__)
 
 
-class WebsiteHrRecruitment(http.Controller):
+class WebsiteHrRecruitment(WebsiteForm):
+    _jobs_per_page = 12
+
     def sitemap_jobs(env, rule, qs):
         if not qs or qs.lower() in '/jobs':
             yield {'loc': '/jobs'}
 
     @http.route([
         '/jobs',
-        '/jobs/country/<model("res.country"):country>',
-        '/jobs/department/<model("hr.department"):department>',
-        '/jobs/country/<model("res.country"):country>/department/<model("hr.department"):department>',
-        '/jobs/office/<int:office_id>',
-        '/jobs/country/<model("res.country"):country>/office/<int:office_id>',
-        '/jobs/department/<model("hr.department"):department>/office/<int:office_id>',
-        '/jobs/country/<model("res.country"):country>/department/<model("hr.department"):department>/office/<int:office_id>',
-    ], type='http', auth="public", website=True, sitemap=sitemap_jobs)
-    def jobs(self, country=None, department=None, office_id=None, **kwargs):
+        '/jobs/page/<int:page>',
+    ], type='http', auth="public", website=True, sitemap=sitemap_jobs, list_as_website_content=_lt("Jobs"))
+    def jobs(self, country_id=None, all_countries=False, department_id=None, office_id=None, employee_type_id=None,
+             is_remote=False, is_other_department=False, is_untyped=None,  industry_id=None, is_industry_untyped=False,
+             noFuzzy=False, page=1, search=None, **kwargs):
+        """ This method is returning the job page.
+        It's filtering the jobs by the given parameters and compute the display values for the filters
+        by contaminating the jobs with the other filters.
+        """
+        def job_filtering_condition(job, filter_to_disable=False):
+            country_filter = country if (country and filter_to_disable != 'country_id') else None
+            field_filters = {
+                'department_id': department.id,
+                'address_id': office.id,
+                'industry_id': industry.id,
+                'employee_type_id': contract_type.id,
+            }
+
+            all_fields = all(
+                job[job_field].id == value
+                for job_field, value in field_filters.items()
+                if job_field != filter_to_disable and value
+            )
+            if not all_fields or (
+                country_filter and not (
+                    not job.address_id or
+                    (job.address_id and job.address_id.country_id == country)
+                )
+            ):
+                return False
+            not_exist_filter = {
+                'department_id': is_other_department,
+                'address_id': is_remote and filter_to_disable != 'country_id',
+                'industry_id': is_industry_untyped,
+                'employee_type_id': is_untyped,
+            }
+            return all(
+                not job[job_field]
+                for job_field, value in not_exist_filter.items()
+                if job_field != filter_to_disable and value
+            )
+
+        def compute_filter_selection_counters(filtered_jobs, grouping_field, key_getter):
+            jobs_grouped = filtered_jobs.grouped(grouping_field)
+            counter = defaultdict(int)
+            counter['all'] = len(filtered_jobs)
+
+            for field_value, jobs_in_group in jobs_grouped.items():
+                key = key_getter(field_value)
+                counter[key] += len(jobs_in_group)
+            counter = OrderedDict(counter)
+
+            if None in counter:
+                counter.move_to_end(None)
+            counter.move_to_end('all', last=False)
+            return counter
+
+        def get_filter_snippets_display_values(jobs):
+            """this function is used to compute the display values for the filters
+            by contaminating the jobs with the other filters.
+            """
+            counter_by_object_by_field = defaultdict(OrderedDict)
+            fields_and_filters = {
+                ('address_id', 'count_per_office'),
+                ('department_id', 'count_per_department'),
+                ('employee_type_id', 'count_per_employment_type'),
+                ('industry_id', 'count_per_industry'),
+            }
+            for field, alias in fields_and_filters:
+                filtered_jobs = jobs.filtered(partial(job_filtering_condition, filter_to_disable=field))
+                counter_by_object_by_field[alias] = compute_filter_selection_counters(
+                    filtered_jobs, field, lambda field_value: field_value or None)
+
+            filtered_jobs = jobs.filtered(partial(job_filtering_condition, filter_to_disable='country_id'))
+            counter_by_object_by_field['count_per_country'] = compute_filter_selection_counters(
+                filtered_jobs, 'address_id',
+                lambda address_id: address_id.country_id if address_id and address_id.country_id else None
+            )
+            return counter_by_object_by_field
+
+        def to_int(query_arg):
+            return int(query_arg) if query_arg and query_arg.isdigit() else False
+
         env = request.env(context=dict(request.env.context, show_address=True, no_tag_br=True))
+        department = env['hr.department'].browse(to_int(department_id)).exists().sudo()
+        country = env['res.country'].browse(to_int(country_id)).exists()
+        office = env['res.partner'].browse(to_int(office_id)).exists()
+        contract_type = env['hr.employee.type'].browse(to_int(employee_type_id)).exists().sudo()
+        industry = env['res.partner.industry'].browse(to_int(industry_id)).exists().sudo()
 
-        Country = env['res.country']
-        Jobs = env['hr.job']
+        if not (country or department or office or contract_type or all_countries) \
+            and (code := request.geoip.country_code) \
+                and (country := env['res.country'].search([('code', '=', code)], limit=1)):
+            country_count = env['hr.job'].sudo().search_count(
+                self.env.website.website_domain()
+                & Domain('address_id.country_id', '=', country.id)
+                & Domain('is_published', '=', True)
+            )
+            if not country_count:
+                country = False
 
-        # List jobs available to current UID
-        job_ids = Jobs.search([], order="website_published desc,no_of_recruitment desc").ids
-        # Browse jobs as superuser, because address is restricted
-        jobs = Jobs.sudo().browse(job_ids)
-
-        # Default search by user country
-        if not (country or department or office_id or kwargs.get('all_countries')):
-            country_code = request.session['geoip'].get('country_code')
-            if country_code:
-                countries_ = Country.search([('code', '=', country_code)])
-                country = countries_[0] if countries_ else None
-                if not any(j for j in jobs if j.address_id and j.address_id.country_id == country):
-                    country = False
-
-        # Filter job / office for country
-        if country and not kwargs.get('all_countries'):
-            jobs = [j for j in jobs if j.address_id is None or j.address_id.country_id and j.address_id.country_id.id == country.id]
-            offices = set(j.address_id for j in jobs if j.address_id is None or j.address_id.country_id and j.address_id.country_id.id == country.id)
-        else:
-            offices = set(j.address_id for j in jobs if j.address_id)
-
-        # Deduce departments and countries offices of those jobs
-        departments = set(j.department_id for j in jobs if j.department_id)
-        countries = set(o.country_id for o in offices if o.country_id)
-
-        if department:
-            jobs = [j for j in jobs if j.department_id and j.department_id.id == department.id]
-        if office_id and office_id in [x.id for x in offices]:
-            jobs = [j for j in jobs if j.address_id and j.address_id.id == office_id]
-        else:
-            office_id = False
-
-        # Render page
+        _total_not_used, details, fuzzy_search_term = self.env.website._search_with_fuzzy(
+            "jobs", search,
+            offset=0,
+            limit=self._jobs_per_page * 50,
+            order="is_published desc, sequence, no_of_recruitment desc",
+            options={
+                'allowFuzzy': not noFuzzy,
+            }
+        )
+        searched_jobs = details[0].get('results', env['hr.job']).sudo()
+        job_filter_values = get_filter_snippets_display_values(searched_jobs)
+        found_jobs = searched_jobs.filtered(job_filtering_condition)
+        total = len(found_jobs)
+        pager = self.env.website.pager(
+            url=request.httprequest.path.partition('/page/')[0],
+            url_args=request.httprequest.args,
+            total=total,
+            page=page,
+            step=self._jobs_per_page,
+        )
+        offset = pager['offset']
+        jobs_to_display = found_jobs[offset:offset + self._jobs_per_page]
         return request.render("website_hr_recruitment.index", {
-            'jobs': jobs,
-            'countries': countries,
-            'departments': departments,
-            'offices': offices,
+            'jobs': jobs_to_display,
+            'structured_data': jobs_to_display._render_jsonld(),
             'country_id': country,
             'department_id': department,
-            'office_id': office_id,
+            'office_id': office,
+            'employee_type_id': contract_type,
+            'industry_id': industry,
+            'is_remote': is_remote,
+            'is_other_department': is_other_department,
+            'is_untyped': is_untyped,
+            'is_industry_untyped': is_industry_untyped,
+            'pager': pager,
+            'search': fuzzy_search_term or search,
+            'search_count': total,
+            **job_filter_values,
         })
 
-    @http.route('/jobs/add', type='http', auth="user", website=True)
+    @http.route('/jobs/add', type='jsonrpc', auth="user", website=True)
     def jobs_add(self, **kwargs):
         # avoid branding of website_description by setting rendering_bundle in context
         job = request.env['hr.job'].with_context(rendering_bundle=True).create({
             'name': _('Job Title'),
         })
-        return request.redirect("/jobs/detail/%s?enable_editor=1" % slug(job))
+        return f"/jobs/{request.env['ir.http']._slug(job)}"
 
-    @http.route('/jobs/detail/<model("hr.job"):job>', type='http', auth="public", website=True)
+    def sitemap_jobs_detail(env, rule, qs):
+        slug = env['ir.http']._slug
+        for job in env['hr.job'].search([('is_published', '=', True)]):
+            if not qs or qs.lower() in f'/jobs/{slug(job)}':
+                yield {'loc': f'/jobs/{slug(job)}'}
+
+    @http.route('''/jobs/detail/<model("hr.job"):job>''', type='http', auth="public", website=True, sitemap=sitemap_jobs_detail)
     def jobs_detail(self, job, **kwargs):
+        redirect_url = f"/jobs/{request.env['ir.http']._slug(job)}"
+        return request.redirect(redirect_url, code=301)
+
+    @http.route('''/jobs/<model("hr.job"):job>''', type='http', auth="public", website=True, sitemap=True)
+    def job(self, job, **kwargs):
         return request.render("website_hr_recruitment.detail", {
+            'structured_data': job._render_jsonld(is_detail_page=True),
             'job': job,
             'main_object': job,
         })
 
-    @http.route('/jobs/apply/<model("hr.job"):job>', type='http', auth="public", website=True)
+    @http.route('''/jobs/apply/<model("hr.job"):job>''', type='http', auth="public", website=True, sitemap=True)
     def jobs_apply(self, job, **kwargs):
         error = {}
         default = {}
@@ -97,3 +201,60 @@ class WebsiteHrRecruitment(http.Controller):
             'error': error,
             'default': default,
         })
+
+    def extract_data(self, model_sudo, values):
+        short_introduction = values.get("short_introduction", None)
+        skills = request.env['hr.skill']
+        if model_sudo.model == "hr.applicant":
+            values = dict(values)
+            # `applicant_skill_ids` is reported as the `one2many_skill` pseudo-type, which has no input filter so it
+            # must never reach super(). The skills are submitted/created through the `skill_ids` value instead.
+            values.pop('applicant_skill_ids', None)
+            skills = self._get_submitted_skills(values.pop('skill_ids', ''))
+        data = super().extract_data(model_sudo, values)
+        if short_introduction:
+            introduction_label = self.env._("Short Introduction")
+            data["custom"] = data["custom"].replace("short_introduction", introduction_label)
+        if model_sudo.model == "hr.applicant":
+            if not request.cookies.get('odoo_utm_medium'):
+                website_medium = request.env['utm.mixin']._utm_ref('utm.utm_medium_website')
+                if website_medium:
+                    data['record']['medium_id'] = website_medium.id
+            if not request.cookies.get('odoo_utm_source'):
+                website_source = request.env.ref(
+                    'website_hr_recruitment.utm_source_website_page_generator',
+                    raise_if_not_found=False
+                )
+                if website_source:
+                    data['record']['source_id'] = website_source.id
+            if skills:
+                data['record']['applicant_skill_ids'] = [
+                    Command.create({
+                        'skill_id': skill.id,
+                        'skill_type_id': skill.skill_type_id.id,
+                        'skill_level_id': self._get_default_skill_level(skill).id,
+                    })
+                    for skill in skills
+                ]
+        return data
+
+    def _get_submitted_skills(self, skill_ids):
+        """ Return the existing skills of `skill_ids` (comma-separated ids), certifications excluded: those are proven
+        by a document, not self-declared. Invalid values are ignored. """
+        skill_ids = {int(s) for s in skill_ids.split(',') if s.strip().isdigit()} - {0}
+        if not skill_ids:
+            return request.env['hr.skill']
+        # sudo: public visitors cannot read skills; only the submitted ids are searched.
+        return request.env['hr.skill'].sudo().search([
+            ('id', 'in', list(skill_ids)),
+            ('skill_type_id.is_certification', '=', False),
+        ])
+
+    def _get_default_skill_level(self, skill):
+        levels = skill.skill_type_id.skill_level_ids
+        return levels.filtered('default_level')[:1] or levels[:1]
+
+    def _should_log_authenticate_message(self, record):
+        if record._name == "hr.applicant" and not request.session.uid:
+            return False
+        return super()._should_log_authenticate_message(record)

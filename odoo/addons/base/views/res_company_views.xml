@@ -5,20 +5,31 @@
             <field name="name">res.company.form</field>
             <field name="model">res.company</field>
             <field name="arch" type="xml">
-                <form string="Company">
+                <form string="Company" duplicate="0">
                   <sheet>
-                    <field name="logo" widget="image"  class="oe_avatar"/>
-                    <div class="oe_title">
-                        <label for="name" class="oe_edit_only"/>
-                        <h1>
-                            <field name="name"/>
-                        </h1>
+                    <div class="oe_button_box" name="button_box">
+                        <button class="oe_stat_button"
+                                name="action_all_company_branches"
+                                type="object"
+                                invisible="not all_child_ids"
+                                icon="account_tree"
+                                string="Branches"/>
+                    </div>
+                    <widget name="web_ribbon" title="Archived" bg_color="text-bg-danger" invisible="active"/>
+                    <div class="d-flex flex-column flex-md-row align-items-center gap-3">
+                        <field name="logo" widget="contact_image" class="oe_avatar text-start float-none" nolabel="1" options="{'size': [100,100], 'img_class': 'rounded-4'}"/>
+                        <div class="oe_title w-100">
+                            <label for="name"/>
+                            <h1 class="o_outlined">
+                                <field name="name" placeholder="e.g. My Company"/>
+                            </h1>
+                        </div>
                     </div>
                     <notebook colspan="4">
-                        <page string="General Information">
+                        <page string="General Information" name="general_info">
                             <group>
                                 <group>
-                                    <field name="partner_id" readonly="1" required="0" groups="base.group_no_one"/>
+                                    <field name="partner_id" string="Contact" readonly="1" required="0" groups="base.group_no_one"/>
                                     <label for="street" string="Address"/>
                                     <div class="o_address_format">
                                         <field name="street" placeholder="Street..." class="o_address_street"/>
@@ -26,21 +37,30 @@
                                         <field name="city" placeholder="City" class="o_address_city"/>
                                         <field name="state_id" class="o_address_state" placeholder="State" options='{"no_open": True}'/>
                                         <field name="zip" placeholder="ZIP" class="o_address_zip"/>
-                                        <field name="country_id" placeholder="Country" class="o_address_country" options='{"no_open": True}'/>
+                                        <field name="country_id" placeholder="Country" class="o_address_country" options='{"no_open": True, "no_create": True}'/>
                                     </div>
+                                    <div name="identifiers">
+                                        <label for="vat"/>
+                                        <div id="vat_div" class="o_outlined o_row d-flex">
+                                            <field name="vat" nolabel="1" placeholder="e.g. BE0477472701"/>
+                                            <field name="additional_identifiers" widget="additional_identifiers_button" nolabel="1"/>
+                                        </div>
+                                        <field name="additional_identifiers" widget="additional_identifiers_list" colspan="2" nolabel="1"/>
+                                    </div>
+                                    <field name="currency_id" options="{'no_create': True, 'no_open': True}" id="company_currency" context="{'active_test': False}"/>
                                 </group>
                                 <group>
-                                    <field name="website" widget="url" placeholder="e.g. www.odoo.com"/>
-                                    <field name="phone"/>
+                                    <field name="phone" class="o_force_ltr"/>
                                     <field name="email"/>
-                                    <field name="vat"/>
-                                    <field name="company_registry"/>
-                                    <field name="currency_id" options="{'no_create': True, 'no_open': True}" id="company_currency" context="{'active_test': False}"/>
-                                    <field name="parent_id"  groups="base.group_multi_company"/>
-                                    <field name="sequence" invisible="1"/>
+                                    <field name="website" string="Website" widget="url" placeholder="e.g. https://www.odoo.com"/>
+                                    <field name="parent_id" groups="base.group_no_one"/>
+                                    <field name="color" widget="color_picker"/>
                                 </group>
                                 <group name="social_media"/>
                             </group>
+                        </page>
+                        <page string="Branches" name="branches">
+                            <field name="child_ids" nolabel="1" context="{'default_parent_id': id}"/>
                         </page>
                     </notebook>
                     </sheet>
@@ -48,154 +68,56 @@
             </field>
         </record>
         <record id="view_company_tree" model="ir.ui.view">
-            <field name="name">res.company.tree</field>
+            <field name="name">res.company.list</field>
             <field name="model">res.company</field>
-            <field name="field_parent">child_ids</field>
             <field name="arch" type="xml">
-                <tree string="Companies">
+                <list string="Companies" decoration-muted="not active" duplicate="0">
                     <field name="sequence" widget="handle"/>
+                    <field name="logo" invisible="not logo" widget="image" options="{'size': [24, 24], 'img_class': 'o_avatar rounded'}" width="30" nolabel="1"/>
                     <field name="name"/>
-                    <field name="partner_id"/>
-                </tree>
+                    <field name="partner_id" required="0"/>
+                    <field name="child_ids" widget="many2many_tags" options="{'color_field': 'color', 'on_tag_click': 'edit_color'}"/>
+                </list>
             </field>
         </record>
         <record id="view_res_company_kanban" model="ir.ui.view">
             <field name="name">res.company.kanban</field>
             <field name="model">res.company</field>
             <field name="arch" type="xml">
-                <kanban>
-                    <field name="name"/>
-                    <field name="email"/>
-                    <field name="phone"/>
+                <kanban duplicate="0">
                     <templates>
-                        <t t-name="kanban-box">
-                            <div t-attf-class="oe_kanban_global_click">
-                                <div class="text-center">
-                                    <i class="fa fa-building" role="img" aria-label="Enterprise" title="Enterprise"></i> <strong><field name="name"/></strong>
+                        <t t-name="card" class="flex-row gap-2">
+                            <main>
+                                <field class="h5" name="name"/>
+                                <div t-if="record.email.value" class="text-truncate">
+                                    <i class="oi oi-fw oi-filled me-1" data-icon="mail" title="Email"/>
+                                    <field name="email"/>
                                 </div>
-                                <hr class="mt4 mb4"/>
-                                <div class="row">
-                                    <div t-if="record.email.value" class="col-6 text-center">
-                                        <strong>Email:</strong>
-                                    </div>
-                                    <div t-if="record.phone.value" class="col-6 text-center">
-                                        <strong>Phone</strong>
-                                    </div>
-                                    <div t-if="record.phone.value" class="col-6 text-center">
-                                        <field name="email"/>
-                                    </div>
-                                    <div t-if="record.phone.value" class="col-6 text-center">
-                                        <field name="phone"/>
-                                    </div>
+                                <div t-if="record.phone.value" class="text-truncate">
+                                    <i class="oi oi-fw oi-filled me-1" data-icon="phone" title="Phone"/>
+                                    <field name="phone"/>
                                 </div>
-                            </div>
+                            </main>
+                            <aside class="flex-basis-auto">
+                                <field name="logo" invisible="not logo" widget="image" options="{'size': [36, 36], 'img_class': 'border rounded object-fit-contain'}"/>
+                            </aside>
                         </t>
                     </templates>
                 </kanban>
             </field>
         </record>
-        <record id="company_normal_action_tree" model="ir.actions.act_window">
-            <field name="name">Companies</field>
-            <field name="type">ir.actions.act_window</field>
-            <field name="res_model">res.company</field>
-            <field name="view_type">form</field>
-            <field name="view_mode">tree,form</field>
-            <field name="domain">[('id','=',active_id)]</field>
-        </record>
         <record id="action_res_company_form" model="ir.actions.act_window">
             <field name="name">Companies</field>
-            <field name="type">ir.actions.act_window</field>
             <field name="res_model">res.company</field>
-            <field name="view_type">form</field>
-            <field name="view_mode">tree,kanban,form</field>
+            <field name="path">companies</field>
+            <field name="view_mode">list,kanban,form</field>
+            <field name="domain">[('parent_id', '=', False)]</field>
             <field name="help" type="html">
               <p class="o_view_nocontent_smiling_face">
                 Create a new company
               </p><p>
                 Create and manage the companies that will be managed by Odoo from here. Shops or subsidiaries can be created and maintained from here.
               </p>
-            </field>
-        </record>
-        <menuitem action="action_res_company_form" id="menu_action_res_company_form" parent="base.menu_users"/>
-
-        <record id="view_company_report_form" model="ir.ui.view">
-            <field name="name">res.company.report.form</field>
-            <field name="model">res.company</field>
-            <field name="inherit_id" ref="base.view_company_form" />
-            <field name="mode">primary</field>
-            <field name="priority">1024</field>
-            <field name="arch" type="xml">
-                <field name="logo" position="before">
-                    <div class="row">
-                        <div class="alert alert-warning ml8 mr8" role="status" attrs="{'invisible': [('logo','!=',False)]}">
-                            Update your company details and upload your logo to get a beautiful document.
-                        </div>
-                    </div>
-                </field>
-              <xpath expr="//h1" position="replace">
-                <h2>
-                    <field name="name"/>
-                </h2>
-              </xpath>
-                <field name="parent_id" groups="base.group_multi_company" position="replace" invisible="1"/>
-              <xpath expr="//sheet" position="inside">
-                    <hr />
-                    <div class="row mt16">
-                        <field style="margin-right: 40px;" name="external_report_layout_id" widget="report_layout" options="{
-                            'field_image': 'preview_image',
-                            'field_binary': 'preview_pdf'
-                        }"/>
-                    </div>
-                    <footer>
-                        <button string="Save" type="object" class="oe_highlight" name="write"/>
-                        <button string="Cancel" class="oe_link" special="cancel" />
-                    </footer>
-                </xpath>
-            </field>
-        </record>
-
-    <record id="view_company_report_form_with_print" model="ir.ui.view">
-            <field name="name">res.company.report.form.with.print</field>
-            <field name="model">res.company</field>
-            <field name="mode">primary</field>
-            <field name="inherit_id" ref="base.view_company_report_form" />
-            <field name="priority">1024</field>
-            <field name="arch" type="xml">
-                <xpath expr="//button[@name='write']" position="before" >
-                    <button string="Save and Print" type="object" class="oe_highlight" name="write_company_and_print_report"/>
-                </xpath>
-            </field>
-        </record>
-        <record id="view_company_document_template_form" model="ir.ui.view">
-            <field name="name">res.company.document.template.form</field>
-            <field name="model">res.company</field>
-            <field name="mode">primary</field>
-            <field name="priority">2048</field>
-            <field name="arch" type="xml">
-                <form class="o_company_document_layout">
-                    <group>
-                        <label for="external_report_layout_id" string="Template" colspan="2" />
-                        <field name="external_report_layout_id" colspan="2" nolabel="1"
-                                class="report_layout_container"
-                                widget="report_layout" options="{
-                                    'field_image': 'preview_image',
-                                    'field_binary': 'preview_pdf'
-                                }"/>
-                    </group>
-                    <group>
-                        <field name="logo" widget="image" />
-                        <field name="report_header"  widget="char"
-                            placeholder="e.g. Global Business Solutions" />
-                        <field name="report_footer" string="Footer"
-                            placeholder="e.g. Opening hours, bank accounts (one per line)" />
-                        <field name="paperformat_id" widget="selection" />
-                    </group>
-                    <footer>
-                        <button special="save" string="Save"
-                                class="btn btn-primary" type="object" />
-                        <button special="cancel" string="Cancel" />
-                    </footer>
-                </form>
             </field>
         </record>
     </data>

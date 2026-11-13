@@ -1,0 +1,1182 @@
+import { parseHTML } from "@html_editor/utils/html";
+import { animationFrame, describe, expect, test, waitFor } from "@odoo/hoot";
+import { tick } from "@odoo/hoot-mock";
+import { setupEditor, testEditor } from "../_helpers/editor";
+import { unformat } from "../_helpers/format";
+import { getContent } from "../_helpers/selection";
+import { cleanHints } from "../_helpers/dispatch";
+import { Plugin } from "@html_editor/plugin";
+import { isTextNode } from "@html_editor/utils/dom_info";
+
+function span(text) {
+    const span = document.createElement("span");
+    span.textContent = text;
+    span.classList.add("a");
+    return span;
+}
+
+const insertHTML = (content, editor) => {
+    const domContent = typeof content === "string" ? parseHTML(editor.document, content) : content;
+    return editor.shared.dom.insert(domContent);
+};
+const formatNodesForComparing = (nodes) =>
+    nodes.map((node) => (isTextNode(node) ? node.textContent : node.outerHTML));
+
+describe("collapsed selection", () => {
+    const icon = '<i class="oi" data-icon="pastafarianism"></i>';
+    const iconEdit = '<i class="oi" data-icon="pastafarianism" contenteditable="false">\u200b</i>';
+    test("should insert html in an empty paragraph / empty editable", async () => {
+        await testEditor({
+            contentBefore: "<p>[]<br></p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(icon, editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([iconEdit]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit: `<p>\ufeff${iconEdit}\ufeff[]</p>`,
+            contentAfter: `<p>${icon}[]</p>`,
+        });
+    });
+
+    test("should insert html after an empty paragraph", async () => {
+        await testEditor({
+            // This scenario is only possible with the allowInlineAtRoot option.
+            contentBefore: "<p><br></p>[]",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(icon, editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([iconEdit]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit: `<p><br></p>${iconEdit}[]`,
+            contentAfter: `<p><br></p>${icon}[]`,
+            config: { allowInlineAtRoot: true },
+        });
+    });
+
+    test("should insert html between two letters", async () => {
+        await testEditor({
+            contentBefore: "<p>a[]b</p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(icon, editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([iconEdit]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit: `<p>a\ufeff${iconEdit}\ufeff[]b</p>`,
+            contentAfter: `<p>a${icon}[]b</p>`,
+        });
+    });
+
+    test("should insert html in between naked text in the editable", async () => {
+        await testEditor({
+            contentBefore: "<p>a[]b</p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(icon, editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([iconEdit]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit: `<p>a\ufeff${iconEdit}\ufeff[]b</p>`,
+            contentAfter: `<p>a${icon}[]b</p>`,
+        });
+    });
+
+    test("should insert several html nodes in between naked text in the editable", async () => {
+        await testEditor({
+            contentBefore: "<p>a[]e<br></p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<p>b</p><p>c</p><p>d</p>", editor);
+                // The paragraph was split so "b" was inserted on one side and
+                // "d" on the other. Neither paragraph was fully inserted.
+                expect(formatNodesForComparing(insertedNodes)).toEqual(["b", "<p>c</p>", "d"]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<p>ab</p><p>c</p><p>d[]e</p>",
+        });
+    });
+
+    test("should wrap a div block in selection placeholders", async () => {
+        await testEditor({
+            contentBefore: "<p>[]<br></p>",
+            contentBeforeEdit: `<p o-we-hint-text='Type "/" for commands' class="o-we-hint">[]<br></p>`,
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<div><p>content</p></div>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    "<div><p>content</p></div>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit: `<p data-selection-placeholder=""><br></p><div><p>content</p></div><p data-selection-placeholder="" class="o-horizontal-caret o-we-hint" o-we-hint-text='Type "/" for commands'>[]<br></p>`,
+            contentAfter: "<div><p>content</p></div>[]",
+        });
+    });
+
+    test("should not split a pre to insert another pre but just insert the text", async () => {
+        await testEditor({
+            contentBefore: "<pre>abc[]<br>ghi</pre>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<pre>def</pre>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual(["def"]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<pre>abcdef[]<br>ghi</pre>",
+        });
+    });
+
+    test('should keep an "empty" block which contains fontawesome nodes when inserting multiple nodes', async () => {
+        await testEditor({
+            contentBefore: "<p>content[]</p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(
+                    '<p>unwrapped</p><div><i class="oi" data-icon="autorenew"></i></div><p>culprit</p><p>after</p>',
+                    editor
+                );
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    "unwrapped",
+                    '<div class="o-paragraph"><i class="oi" data-icon="autorenew" contenteditable="false">\u200B</i></div>',
+                    "<p>culprit</p>",
+                    "<p>after</p>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter:
+                '<p>contentunwrapped</p><div><i class="oi" data-icon="autorenew"></i></div><p>culprit</p><p>after[]</p>',
+        });
+    });
+
+    test("should not unwrap single node if the selection anchorNode is the editable", async () => {
+        await testEditor({
+            contentBefore: "<p>content</p>",
+            stepFunction: async (editor) => {
+                editor.shared.selection.setCursorEnd(editor.editable, false);
+                editor.shared.selection.focusEditable();
+                const insertedNodes = insertHTML("<p>def</p>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual(["def"]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<p>content</p><p>def[]</p>",
+        });
+    });
+
+    test("should not unwrap nodes if the selection anchorNode is the editable", async () => {
+        await testEditor({
+            contentBefore: "<p>content</p>",
+            stepFunction: async (editor) => {
+                editor.shared.selection.setCursorEnd(editor.editable);
+                editor.shared.selection.focusEditable();
+                await tick();
+                const insertedNodes = insertHTML("<div>abc</div><p>def</p>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<div class="o-paragraph">abc</div>',
+                    "<p>def</p>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<p>content</p><div>abc</div><p>def[]</p>",
+            config: { allowInlineAtRoot: true },
+        });
+    });
+
+    test('should insert an "empty" block', async () => {
+        await testEditor({
+            contentBefore: "<p>abcd[]</p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<p>efgh</p><p></p>", editor);
+                // The empty `<p>` was added and then filled in with a `<br>`.
+                expect(formatNodesForComparing(insertedNodes)).toEqual(["efgh", "<p><br></p>"]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<p>abcdefgh</p><p>[]<br></p>",
+        });
+    });
+
+    test("should fill last empty list item", async () => {
+        await testEditor({
+            contentBefore: "<p>[]<br></p>",
+            contentBeforeEdit: `<p o-we-hint-text='Type "/" for commands' class="o-we-hint">[]<br></p>`,
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<p>abc</p><ul><li></li></ul>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    "<p>abc</p>",
+                    "<ul><li><br></li></ul>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<p>abc</p><ul><li>[]<br></li></ul>",
+        });
+    });
+
+    test("should fill first empty list item", async () => {
+        await testEditor({
+            contentBefore: "<p>[]<br></p>",
+            contentBeforeEdit: `<p o-we-hint-text='Type "/" for commands' class="o-we-hint">[]<br></p>`,
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<ul><li></li></ul><p>abc</p>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    "<ul><li><br></li></ul>",
+                    "<p>abc</p>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<ul><li><br></li></ul><p>abc[]</p>",
+        });
+    });
+
+    test("should fill first empty heading element", async () => {
+        await testEditor({
+            contentBefore: "<p>[]<br></p>",
+            contentBeforeEdit: `<p o-we-hint-text='Type "/" for commands' class="o-we-hint">[]<br></p>`,
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML("<h1></h1><p>abc</p>", editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    "<h1><br></h1>",
+                    "<p>abc</p>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<h1><br></h1><p>abc[]</p>",
+        });
+    });
+
+    // The following are edge cases where we try to insert in impossible places.
+    describe("inserting in impossible places", () => {
+        const table = "<table><tbody><tr><td/></tr></tbody></table>";
+        const normalizedTable = table.replace("<td/>", "<td><br></td>");
+        const wrappedTable = `<div class="o_table_wrapper">${normalizedTable}</div>`;
+        test("never unwrap tables in breakable paragraph", async () => {
+            // P elements' content can only be "phrasing" content
+            // Adding a table within p is not possible
+            // We have split the p and insert the table unwrapped in between
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Element/p
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Content_categories#phrasing_content
+            const { editor } = await setupEditor(`<p>cont[]ent</p>`, {});
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(`<p>cont</p>${wrappedTable}<p>[]ent</p>`);
+        });
+
+        test("never unwrap tables in empty breakable paragraph", async () => {
+            // P elements' content can only be "phrasing" content
+            // Adding a table within p is not possible
+            // We have split the p and insert the table unwrapped in between
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Element/p
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Content_categories#phrasing_content
+            const { editor } = await setupEditor(`<p>[]<br></p>`, {});
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p>${wrappedTable}<p data-selection-placeholder="" class="o-horizontal-caret o-we-hint" style="margin: -9px 0px 8px;" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+            );
+        });
+
+        test("should not unwrap table in unsplittable paragraph (don't insert at all)", async () => {
+            // P elements' content can only be "phrasing" content.
+            // Adding a table within an unsplittable p is not possible.
+            // Since we can't insert it there, we just don't do anything.
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Element/p
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Content_categories#phrasing_content
+            const { editor } = await setupEditor(`<p class="oe_unbreakable">cont[]ent</p>`, {});
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p><p class="oe_unbreakable">cont[]ent</p><p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p>`
+            );
+        });
+
+        test("should not unwrap table in unsplittable paragraph: find a suitable spot to insert table element (at start)", async () => {
+            const { editor } = await setupEditor(`<p class="oe_unbreakable">[]content</p>`, {});
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p>${wrappedTable}<p data-selection-placeholder="" class="o-horizontal-caret o-we-hint" style="margin: -9px 0px 8px;" o-we-hint-text='Type "/" for commands'>[]<br></p><p class="oe_unbreakable">content</p><p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p>`
+            );
+        });
+
+        test("should not unwrap table in unsplittable paragraph: find a suitable spot to insert table element (at visible start but after invisible text)", async () => {
+            const { editor } = await setupEditor(
+                `<p class="oe_unbreakable">\u200B[]content</p>`,
+                {}
+            );
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p>${wrappedTable}<p data-selection-placeholder="" class="o-horizontal-caret o-we-hint" style="margin: -9px 0px 8px;" o-we-hint-text='Type "/" for commands'>[]<br></p><p class="oe_unbreakable">\u200bcontent</p><p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p>`
+            );
+        });
+
+        test("should not unwrap table in unsplittable paragraph: find a suitable spot to insert table element (at end)", async () => {
+            const { editor } = await setupEditor(`<p class="oe_unbreakable">content[]</p>`, {});
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p><p class="oe_unbreakable">content</p><p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p>${wrappedTable}<p data-selection-placeholder="" style="margin: -9px 0px 8px;" class="o-horizontal-caret o-we-hint" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+            );
+        });
+
+        test("should not unwrap table in unsplittable paragraph: find a suitable spot to insert table element (at visible end but before invisible text)", async () => {
+            const { editor } = await setupEditor(
+                `<p class="oe_unbreakable">content[]\u200B</p>`,
+                {}
+            );
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p><p class="oe_unbreakable">content\u200B</p><p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p>${wrappedTable}<p data-selection-placeholder="" style="margin: -9px 0px 8px;" class="o-horizontal-caret o-we-hint" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+            );
+        });
+
+        test("should not unwrap table in unsplittable empty paragraph: replace the paragraph", async () => {
+            const { editor } = await setupEditor(`<p class="oe_unbreakable">[]<br></p>`, {});
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([normalizedTable]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                `<p data-selection-placeholder=""><br></p>${wrappedTable}<p data-selection-placeholder="" style="margin: -9px 0px 8px;" class="o-horizontal-caret o-we-hint" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+            );
+        });
+
+        test("stops at boundary when inserting unfit content", async () => {
+            // P elements' content can only be "phrasing" content.
+            // Adding a table within an unsplittable p is not possible.
+            // Since we can't insert it there, we just don't do anything.
+            const { editor } = await setupEditor(
+                `<div><p class="oe_unbreakable" contenteditable="true"><b class="oe_unbreakable">cont[]ent</b></p></div>`,
+                {}
+            );
+
+            const insertedNodes = insertHTML(table, editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual([]);
+            editor.shared.history.commit();
+            expect(getContent(editor.editable)).toBe(
+                '<p data-selection-placeholder=""><br></p>' +
+                    `<div><p class="oe_unbreakable" contenteditable="true"><b class="oe_unbreakable">cont[]ent</b></p></div>` +
+                    '<p data-selection-placeholder=""><br></p>'
+            );
+        });
+    });
+
+    test("Should ensure a paragraph after an inserted unsplittable (add)", async () => {
+        const { editor } = await setupEditor(`<p>cont[]</p>`, {});
+        const insertedNodes = insertHTML(`<p class="oe_unbreakable">1</p>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([`<p class="oe_unbreakable">1</p>`]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(
+            `<p>cont</p><p class="oe_unbreakable">1</p>` +
+                `<p data-selection-placeholder="" style="margin: -9px 0px 8px;" class="o-horizontal-caret o-we-hint" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+        );
+    });
+
+    test("Should ensure a paragraph after an inserted unsplittable (keep)", async () => {
+        const { editor } = await setupEditor(`<p>cont[]</p><p>+</p>`, {});
+        const insertedNodes = insertHTML(`<p class="oe_unbreakable">1</p>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([`<p class="oe_unbreakable">1</p>`]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(
+            `<p>cont</p><p class="oe_unbreakable">1</p><p>[]+</p>`
+        );
+    });
+
+    test("Should ensure a paragraph after inserting multiple unsplittables (add)", async () => {
+        const { editor } = await setupEditor(`<p>cont[]</p>`, {});
+        const insertedNodes = insertHTML(
+            `<p class="oe_unbreakable">1</p><p class="oe_unbreakable">2</p>`,
+            editor
+        );
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<p class="oe_unbreakable">1</p>`,
+            `<p class="oe_unbreakable">2</p>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(
+            `<p>cont</p><p class="oe_unbreakable">1</p>` +
+                `<p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p>` +
+                `<p class="oe_unbreakable">2</p>` +
+                `<p data-selection-placeholder="" style="margin: -9px 0px 8px;" class="o-horizontal-caret o-we-hint" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+        );
+    });
+
+    test("Should ensure a paragraph after inserting multiple unsplittables (keep)", async () => {
+        const { editor } = await setupEditor(`<p>cont[]</p><p>+</p>`, {});
+        const insertedNodes = insertHTML(
+            `<p class="oe_unbreakable">1</p><p class="oe_unbreakable">2</p>`,
+            editor
+        );
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<p class="oe_unbreakable">1</p>`,
+            `<p class="oe_unbreakable">2</p>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(
+            `<p>cont</p><p class="oe_unbreakable">1</p><p data-selection-placeholder="" style="margin: -9px 0px 8px;"><br></p><p class="oe_unbreakable">2</p><p>[]+</p>`
+        );
+    });
+
+    test("should unwrap a paragraphRelated element inside another", async () => {
+        const { editor } = await setupEditor(`<p>cont[]ent</p>`, {});
+        const insertedNodes = insertHTML("<p>in</p>", editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(["in"]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(`<p>contin[]ent</p>`);
+    });
+
+    test("should unwrap a contenteditable='true' ancestor which is not descendant of a contenteditable='false'", async () => {
+        const { editor } = await setupEditor(`<p>cont[]ent</p>`, {});
+        const insertedNodes = insertHTML(`<p contenteditable="true">in</p>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(["in"]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(`<p>contin[]ent</p>`);
+    });
+
+    test("should not unwrap a contenteditable='false'", async () => {
+        const { editor } = await setupEditor(`<p>cont[]ent</p>`, {});
+        const insertedNodes = insertHTML(`<p contenteditable="false">in</p>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<p contenteditable="false">in</p>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(
+            `<p>cont</p><p contenteditable="false">in</p><p>[]ent</p>`
+        );
+    });
+
+    test("should not unwrap an unsplittable", async () => {
+        const { editor } = await setupEditor(`<p>cont[]ent</p>`, {});
+        const insertedNodes = insertHTML(`<p class="oe_unbreakable">in</p>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<p class="oe_unbreakable">in</p>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(editor.editable)).toBe(
+            `<p>cont</p><p class="oe_unbreakable">in</p><p>[]ent</p>`
+        );
+    });
+
+    test("should normalize the parent when inserting a single element", async () => {
+        const { editor } = await setupEditor(`<p>[]<br></p>`, {});
+        const insertedNodes = insertHTML(`<p data-oe-protected="true">in</p>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<p data-oe-protected="true" contenteditable="false">in</p>`,
+        ]);
+        editor.shared.history.commit();
+        // Insertion triggers `selectionchange` and `commit` creates a selection
+        // placeholder. `fixSelectionInsideEditableRoot` moves the selection
+        // into it and triggers another `selectionchange` that removes the
+        // selection placeholder. So we must wait for the `.o-we-hint`.
+        await waitFor(".o-we-hint");
+        await animationFrame();
+        cleanHints(editor);
+        expect(getContent(editor.editable, { sortAttrs: true })).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <p contenteditable="false" data-oe-protected="true">in</p>
+                <p>[]<br></p>`)
+        );
+    });
+
+    test("insert inline in empty paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>[]<br></p>`);
+        const insertedNodes = insertHTML(`<span class="a">a</span>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([`<span class="a">a</span>`]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(`<p><span class="a">a[]</span></p>`);
+    });
+
+    test("insert inline at the end of a paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>b[]</p>`);
+        const insertedNodes = insertHTML(`<span class="a">a</span>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([`<span class="a">a</span>`]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(`<p>b<span class="a">a[]</span></p>`);
+    });
+
+    test("insert inline at the start of a paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>[]b</p>`);
+        const insertedNodes = insertHTML(`<span class="a">a</span>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([`<span class="a">a</span>`]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(`<p><span class="a">a[]</span>b</p>`);
+    });
+
+    test("insert inline at the middle of a paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>b[]c</p>`);
+        const insertedNodes = insertHTML(`<span class="a">a</span>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([`<span class="a">a</span>`]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(`<p>b<span class="a">a[]</span>c</p>`);
+    });
+
+    test("insert block in empty paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>[]<br></p>`);
+        const insertedNodes = insertHTML(`<div class="oe_unbreakable">a</div>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<div class="oe_unbreakable">a</div>`,
+        ]);
+        editor.shared.history.commit();
+        cleanHints(editor);
+        expect(getContent(el)).toBe(
+            '<p data-selection-placeholder=""><br></p>' +
+                '<div class="oe_unbreakable">a</div>' +
+                '<p data-selection-placeholder="" class="o-horizontal-caret">[]<br></p>'
+        );
+    });
+
+    test("insert block at the end of a paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>b[]</p>`);
+        const insertedNodes = insertHTML(`<div class="oe_unbreakable">a</div>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<div class="oe_unbreakable">a</div>`,
+        ]);
+        editor.shared.history.commit();
+        cleanHints(editor);
+        expect(getContent(el)).toBe(
+            `<p>b</p><div class="oe_unbreakable">a</div><p data-selection-placeholder="" class="o-horizontal-caret">[]<br></p>`
+        );
+    });
+
+    test("insert block at the end of an inline element in a container block", async () => {
+        const { el, editor } = await setupEditor(
+            unformat(`
+                <div>
+                    <p>a</p>
+                    <span>b[]</span>
+                    <p>d</p>
+                </div>`)
+        );
+        const insertedNodes = insertHTML(`<div class="o-paragraph oe_unbreakable">c</div>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<div class="o-paragraph oe_unbreakable">c</div>`,
+        ]);
+        editor.shared.history.commit();
+        cleanHints(editor);
+        expect(getContent(el)).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <div>
+                    <p>a</p>
+                    <span>b</span>
+                    <div class="o-paragraph oe_unbreakable">c</div>
+                    <p>[]d</p>
+                </div>
+                <p data-selection-placeholder=""><br></p>`)
+        );
+    });
+
+    test("insert block and inline at the end of an inline element in a container block", async () => {
+        const { el, editor } = await setupEditor(
+            unformat(`
+                <div>
+                    <p>a</p>
+                    <span>b[]</span>
+                    <p>e</p>
+                </div>`)
+        );
+        const nodes = [`<div class="o-paragraph oe_unbreakable">c</div>`, "<i>d</i>"];
+        const insertedNodes = insertHTML(nodes.join(""), editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(nodes);
+        editor.shared.history.commit();
+        cleanHints(editor);
+        expect(getContent(el)).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <div>
+                    <p>a</p>
+                    <span>b</span>
+                    <div class="o-paragraph oe_unbreakable">c</div>
+                    <i>d[]</i>
+                    <p>e</p>
+                </div>
+                <p data-selection-placeholder=""><br></p>`)
+        );
+    });
+
+    test("insert block, inline and other block at the end of an inline element in a container block", async () => {
+        const { el, editor } = await setupEditor(
+            unformat(`
+                <div>
+                    <p>a</p>
+                    <span>b[]</span>
+                    <p>f</p>
+                </div>`)
+        );
+        const nodes = [
+            `<div class="o-paragraph oe_unbreakable">c</div>`,
+            "<i>d</i>",
+            `<p class="oe_unbreakable">e</p>`,
+        ];
+        const insertedNodes = insertHTML(nodes.join(""), editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(nodes);
+        editor.shared.history.commit();
+        cleanHints(editor);
+        expect(getContent(el)).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <div>
+                    <p>a</p>
+                    <span>b</span>
+                    <div class="o-paragraph oe_unbreakable">c</div>
+                    <i>d</i>
+                    <p class="oe_unbreakable">e</p>
+                    <p>[]f</p>
+                </div>
+                <p data-selection-placeholder=""><br></p>`)
+        );
+    });
+
+    test("insert block at the start of a paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>[]b</p>`);
+        const insertedNodes = insertHTML(`<div class="oe_unbreakable">a</div>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<div class="oe_unbreakable">a</div>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(
+            `<p data-selection-placeholder=""><br></p><div class="oe_unbreakable">a</div><p>[]b</p>`
+        );
+    });
+
+    test("insert block at the start of an inline element in a container block", async () => {
+        const { el, editor } = await setupEditor(
+            unformat(`
+                <div>
+                    <p>a</p>
+                    <span>[]c</span>
+                    <p>d</p>
+                </div>`)
+        );
+        const insertedNodes = insertHTML(`<div class="o-paragraph oe_unbreakable">b</div>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<div class="o-paragraph oe_unbreakable">b</div>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <div>
+                    <p>a</p>
+                    <div class="o-paragraph oe_unbreakable">b</div>
+                    <span>[]c</span>
+                    <p>d</p>
+                </div>
+                <p data-selection-placeholder=""><br></p>`)
+        );
+    });
+
+    test("insert block and inline at the start of an inline element in a container block", async () => {
+        const { el, editor } = await setupEditor(
+            unformat(`
+                <div>
+                    <p>a</p>
+                    <span>[]d</span>
+                    <p>e</p>
+                </div>`)
+        );
+        const nodes = [`<div class="o-paragraph oe_unbreakable">b</div>`, "<i>c</i>"];
+        const insertedNodes = insertHTML(nodes.join(""), editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(nodes);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <div>
+                    <p>a</p>
+                    <div class="o-paragraph oe_unbreakable">b</div>
+                    <i>c[]</i>
+                    <span>d</span>
+                    <p>e</p>
+                </div>
+                <p data-selection-placeholder=""><br></p>`)
+        );
+    });
+
+    test("insert block, inline and other block at the start of an inline element in a container block", async () => {
+        const { el, editor } = await setupEditor(
+            unformat(`
+                <div>
+                    <p>a</p>
+                    <span>[]e</span>
+                    <p>f</p>
+                </div>`)
+        );
+        const nodes = [
+            `<div class="o-paragraph oe_unbreakable">b</div>`,
+            "<i>c</i>",
+            `<p class="oe_unbreakable">d</p>`,
+        ];
+        const insertedNodes = insertHTML(nodes.join(""), editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(nodes);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(
+            unformat(`
+                <p data-selection-placeholder=""><br></p>
+                <div>
+                    <p>a</p>
+                    <div class="o-paragraph oe_unbreakable">b</div>
+                    <i>c</i>
+                    <p class="oe_unbreakable">d</p>
+                    <span>[]e</span>
+                    <p>f</p>
+                </div>
+                <p data-selection-placeholder=""><br></p>`)
+        );
+    });
+
+    test("insert block at the middle of a paragraph", async () => {
+        const { el, editor } = await setupEditor(`<p>b[]c</p>`);
+        const insertedNodes = insertHTML(`<div class="oe_unbreakable">a</div>`, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            `<div class="oe_unbreakable">a</div>`,
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(`<p>b</p><div class="oe_unbreakable">a</div><p>[]c</p>`);
+    });
+
+    test("insert content processed by a plugin", async () => {
+        class CustomPlugin extends Plugin {
+            static id = "customPlugin";
+            static dependencies = ["dom", "selection"];
+            resources = {
+                fragment_to_insert_processors: (fragment) => {
+                    fragment.replaceChildren(parseHTML(this.document, `<p>surprise</p>`));
+                    return fragment;
+                },
+                on_will_insert_handlers: () => {
+                    const second = this.editable.querySelector(".second");
+                    this.dependencies.selection.setCursorStart(second);
+                },
+            };
+        }
+        const { el, editor } = await setupEditor(
+            `<p class="first">[]?</p><p class="second">!</p>`,
+            {
+                config: {
+                    includePlugins: [CustomPlugin],
+                },
+            }
+        );
+        const insertedNodes = insertHTML("notasurprise", editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual(["surprise"]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(`<p class="first">?</p><p class="second">surprise[]!</p>`);
+    });
+
+    test("should add the cells missing from a ragged table with mixed rowspan/colspan", async () => {
+        const { el, editor } = await setupEditor(`<p>[]<br></p>`);
+        const table = `<table><tbody><tr><td rowspan="2" colspan="2">A</td><td>B</td></tr><tr><td>C</td></tr><tr><td>D</td></tr></tbody></table>`;
+        const completedTable = table.replace(
+            "</tr></tbody></table>",
+            "<td><p><br></p></td><td><p><br></p></td></tr></tbody></table>"
+        );
+        const insertedNodes = insertHTML(table, editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([completedTable]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(
+            `<p data-selection-placeholder=""><br></p><div class="o_table_wrapper">${completedTable}</div><p data-selection-placeholder="" class="o-horizontal-caret o-we-hint" style="margin: -9px 0px 8px;" o-we-hint-text='Type "/" for commands'>[]<br></p>`
+        );
+    });
+
+    test("should keep the BR at the end of an inline followed by text", async () => {
+        await testEditor({
+            contentBefore: `<p><strong>a[]<br></strong>c</p>`,
+            stepFunction: async (editor) => {
+                editor.shared.dom.insert("b");
+                editor.shared.history.commit();
+            },
+            contentAfter: `<p><strong>ab[]<br></strong>c</p>`,
+        });
+    });
+
+    test("should remove the BR at the end of an inline ending its block", async () => {
+        await testEditor({
+            contentBefore: `<p><strong>a[]<br></strong></p>`,
+            stepFunction: async (editor) => {
+                editor.shared.dom.insert("b");
+                editor.shared.history.commit();
+            },
+            contentAfter: `<p><strong>ab[]</strong></p>`,
+        });
+    });
+});
+
+describe("not collapsed selection", () => {
+    const icon = '<i class="oi" data-icon="pastafarianism"></i>';
+    const iconEdit = '<i class="oi" data-icon="pastafarianism" contenteditable="false">\u200b</i>';
+    test("should delete selection and insert html in its place", async () => {
+        await testEditor({
+            contentBefore: "<p>[a]</p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(icon, editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([iconEdit]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit:
+                '<p>\ufeff<i class="oi" data-icon="pastafarianism" contenteditable="false">\u200b</i>\ufeff[]</p>',
+            contentAfter: '<p><i class="oi" data-icon="pastafarianism"></i>[]</p>',
+        });
+    });
+
+    test("should delete selection and insert html in its place (2)", async () => {
+        await testEditor({
+            contentBefore: "<p>a[b]c</p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(icon, editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([iconEdit]);
+                editor.shared.history.commit();
+            },
+            contentAfterEdit:
+                '<p>a\ufeff<i class="oi" data-icon="pastafarianism" contenteditable="false">\u200b</i>\ufeff[]c</p>',
+            contentAfter: '<p>a<i class="oi" data-icon="pastafarianism"></i>[]c</p>',
+        });
+    });
+
+    test("should delete selection and insert html in its place (3)", async () => {
+        await testEditor({
+            contentBefore: "<h1>[abc</h1><p>def]</p>",
+            stepFunction: async (editor) => {
+                // There's an empty text node after the paragraph:
+                editor.editable.lastChild.after(editor.document.createTextNode(""));
+                const insertedNodes = insertHTML("<p>ghi</p><p>jkl</p>", editor);
+                // The new paragraphs replace the empty heading.
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    "<p>ghi</p>",
+                    "<p>jkl</p>",
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: "<p>ghi</p><p>jkl[]</p>",
+        });
+    });
+
+    test("should remove a fully selected table then insert a span before it", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<p>a[b</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>k]l</p>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: '<p>a<span class="a">TEST[]</span>l</p>',
+        });
+    });
+
+    test("should only remove the text content of cells in a partly selected table", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<table><tbody>
+                        <tr><td>cd</td><td class="o_selected_td">e[f</td><td>gh</td></tr>
+                        <tr><td>ij</td><td class="o_selected_td">k]l</td><td>mn</td></tr>
+                        <tr><td>op</td><td>qr</td><td>st</td></tr>
+                    </tbody></table>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: unformat(
+                `<table><tbody>
+                        <tr><td>cd</td><td><p><span class="a">TEST[]</span></p></td><td>gh</td></tr>
+                        <tr><td>ij</td><td><p><br></p></td><td>mn</td></tr>
+                        <tr><td>op</td><td>qr</td><td>st</td></tr>
+                    </tbody></table>`
+            ),
+        });
+    });
+
+    test("should remove some text and a table (even if the table is partly selected)", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<p>a[b</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>g]h</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>kl</p>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: unformat(
+                `<p>a<span class="a">TEST[]</span></p>
+                    <p>kl</p>`
+            ),
+        });
+    });
+
+    test("should remove a table and some text (even if the table is partly selected)", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<p>ab</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>i[j</td></tr>
+                    </tbody></table>
+                    <p>k]l</p>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: unformat(
+                `<p>ab</p>
+                    <p><span class="a">TEST[]</span>l</p>`
+            ),
+        });
+    });
+
+    test("should remove some text, a table and some more text", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<p>a[b</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>k]l</p>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: `<p>a<span class="a">TEST[]</span>l</p>`,
+        });
+    });
+
+    test("should remove a selection of several tables", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<table><tbody>
+                        <tr><td>cd</td><td>e[f</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <table><tbody>
+                        <tr><td>cd</td><td>e]f</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>`
+            ),
+            stepFunction: async (editor) => {
+                // Table selection happens on selectionchange event which is
+                // fired in the next tick.
+                await tick();
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: `<p><span class="a">TEST[]</span></p>`,
+        });
+    });
+
+    test("should remove a selection including several tables", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<p>0[1</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>23</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>45</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>67]</p>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: `<p>0<span class="a">TEST[]</span></p>`,
+        });
+    });
+
+    test("should remove everything, including several tables", async () => {
+        await testEditor({
+            contentBefore: unformat(
+                `<p>[01</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>23</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>45</p>
+                    <table><tbody>
+                        <tr><td>cd</td><td>ef</td></tr>
+                        <tr><td>gh</td><td>ij</td></tr>
+                    </tbody></table>
+                    <p>67]</p>`
+            ),
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(span("TEST"), editor);
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<span class="a">TEST</span>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: `<p><span class="a">TEST[]</span></p>`,
+        });
+    });
+
+    test("should insert html containing ZWNBSP", async () => {
+        await testEditor({
+            contentBefore: "<p>[]<br></p>",
+            stepFunction: (editor) => {
+                const insertedNodes = insertHTML(
+                    '<p>\uFEFF<a href="#">\uFEFFlink\uFEFF</a>\uFEFF</p><p>\uFEFF<a href="#">\uFEFFlink\uFEFF</a>\uFEFF</p>',
+                    editor
+                );
+                expect(formatNodesForComparing(insertedNodes)).toEqual([
+                    '<p>\uFEFF<a href="#">\uFEFFlink\uFEFF</a>\uFEFF</p>',
+                    '<p>\uFEFF<a href="#">\uFEFFlink\uFEFF</a>\uFEFF</p>',
+                ]);
+                editor.shared.history.commit();
+            },
+            contentAfter: '<p><a href="#">link</a></p><p><a href="#">link</a>[]</p>',
+        });
+    });
+
+    test("should insert content without creating a new line at the start", async () => {
+        const { el, editor } = await setupEditor(
+            `<p>
+                <span>[abc</span>
+                <br>
+                <span>def]</span>
+            </p>`,
+            {}
+        );
+        const insertedNodes = insertHTML("<div>123</div><div><br></div><div>456</div>", editor);
+        expect(formatNodesForComparing(insertedNodes)).toEqual([
+            '<div class="o-paragraph">123</div>',
+            '<div class="o-paragraph"><br></div>',
+            '<div class="o-paragraph">456</div>',
+        ]);
+        editor.shared.history.commit();
+        expect(getContent(el)).toBe(
+            `<div class="o-paragraph">123</div><div class="o-paragraph"><br></div><div class="o-paragraph">456[]</div>`
+        );
+    });
+});
+
+test("Should create a list element around `li`", async () => {
+    await testEditor({
+        contentBefore: unformat(`
+            <div id="wrapwrap">
+                <header>
+                    <nav>
+                        <ul>
+                            <li>
+                                <div style="display: flex;">
+                                    <small>[abc]</small>
+                                </div>
+                            </li>
+                        </ul>
+                    </nav>
+                </header>
+                <main>I will escape wrapwrap</main>
+            </div>
+        `),
+        stepFunction: async (editor) => {
+            const insertedNodes = insertHTML("<ul><li>abc</li></ul>", editor);
+            expect(formatNodesForComparing(insertedNodes)).toEqual(["<ul><li>abc</li></ul>"]);
+            editor.shared.history.commit();
+        },
+        contentAfter: unformat(`
+            <div id="wrapwrap">
+                <header>
+                    <nav>
+                        <ul>
+                            <li>
+                                <div style="display: flex;">
+                                    <small><ul><li>abc[]</li></ul></small>
+                                </div>
+                            </li>
+                        </ul>
+                    </nav>
+                </header>
+                <main>I will escape wrapwrap</main>
+            </div>
+        `),
+    });
+});
+
+test("Should return converted elements (1)", async () => {
+    const { editor } = await setupEditor(`<ul><li>[]</li></ul>`);
+    const insertedNodes = insertHTML("<span>first</span><p>second</p>", editor);
+    expect(formatNodesForComparing(insertedNodes)).toEqual([
+        "<span>first</span>",
+        "<li>second</li>",
+    ]);
+    editor.shared.history.commit();
+    cleanHints(editor);
+    expect(getContent(editor.editable)).toBe(
+        "<ul><li><span>first</span></li><li>second[]</li></ul>"
+    );
+});
+
+test("Should return converted elements (2)", async () => {
+    const { editor } = await setupEditor(`<ul><li>ab[]cd</li></ul>`);
+    const insertedNodes = insertHTML("<span>first</span><p>second</p>", editor);
+    expect(formatNodesForComparing(insertedNodes)).toEqual(["<span>first</span>", "second"]);
+    editor.shared.history.commit();
+    cleanHints(editor);
+    expect(getContent(editor.editable)).toBe(
+        "<ul><li>ab<span>first</span></li><li>second[]cd</li></ul>"
+    );
+});
+
+test("Should return converted elements (3)", async () => {
+    const { editor } = await setupEditor(`<ul><li>[]</li></ul>`);
+    const insertedNodes = insertHTML("<span>first</span><p><br></p><p>second</p>", editor);
+    expect(formatNodesForComparing(insertedNodes)).toEqual([
+        "<span>first</span>",
+        "<li><br></li>",
+        "<li>second</li>",
+    ]);
+    editor.shared.history.commit();
+    cleanHints(editor);
+    expect(getContent(editor.editable)).toBe(
+        "<ul><li><span>first</span></li><li><br></li><li>second[]</li></ul>"
+    );
+});

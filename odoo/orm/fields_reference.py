@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import typing
+from collections import defaultdict
+from operator import attrgetter
+
+from odoo.tools import OrderedSet, unique
+
+from .fields import Field
+from .fields_numeric import Integer
+from .fields_selection import Selection
+from .models import BaseModel
+
+if typing.TYPE_CHECKING:
+    from .fields_relational import OnDelete
+    from collections.abc import Callable
+
+    OnDeleteRef = OnDelete | typing.Literal['ignore']
+
+
+class Reference(Selection):
+    """ Pseudo-relational field (no FK in database).
+
+    The field value is stored as a :class:`string <str>` following the pattern
+    ``"res_model,res_id"`` in database.
+    """
+    type = 'reference'
+
+    _column_type = ('varchar', 'varchar')
+
+    def convert_to_column(self, value, record, values=None, validate=True):
+        return Field.convert_to_column(self, value, record, values, validate)
+
+    def convert_to_cache(self, value, records, validate=True):
+        # cache format: str ("model,id") or None
+        if isinstance(value, BaseModel):
+            if not validate or (value._name in self.get_values(records.env) and len(value) <= 1):
+                return "%s,%s" % (value._name, value.id) if value else None
+        elif isinstance(value, str):
+            res_model, res_id = value.split(',')
+            if not validate or res_model in self.get_values(records.env):
+                if records.env[res_model].browse(int(res_id)).exists():
+                    return value
+                else:
+                    return None
+        elif not value:
+            return None
+        raise ValueError("Wrong value for %s: %r" % (self, value))
+
+    def convert_to_record(self, value, record):
+        if value:
+            res_model, res_id = value.split(',')
+            return record.env[res_model].browse(int(res_id))
+        return None
+
+    def convert_to_read(self, value, record, use_display_name=True):
+        return "%s,%s" % (value._name, value.id) if value else False
+
+    def convert_to_export(self, value, record):
+        return value.display_name if value else ''
+
+    def convert_to_display_name(self, value, record):
+        return value.display_name if value else False
+
+
+class Many2oneReference(Integer):
+    """ Pseudo-relational field (no FK in database).
+
+    The field value is stored as an :class:`integer <int>` id in database.
+
+    Contrary to :class:`Reference` fields, the model has to be specified
+    in a :class:`Char` field, whose name has to be specified in the
+    `model_field` attribute for the current :class:`Many2oneReference` field.
+
+    :param str model_field: name of the :class:`Char` where the model name is stored.
+
+    :param str|callable ondelete: what to do when the referred record is deleted
+
+        Possible values are like in a ``Many2one`` field and "ignore".
+        By default, the value is "set null" (if the field is not required) or
+        "restrict" (if the field is required).
+
+        This may also be a callable, which then makes the behavior depend on the
+        model of deleted records. This also enables to optimize the process when
+        most models should be ignored. The API of the callable is suggested by
+        this example::
+
+            ondelete=lambda self, model: 'cascade' if model._name in MODELS else 'ignore'
+
+        Note that such an optimization is automatic when the model field is a
+        selection field, and the value is a literal. The given policy is applied
+        only for the possible models in the selection. On other models, the
+        behavior is "ignore".
+
+    """
+    type = 'many2one_reference'
+
+    model_field = None
+    aggregator = None
+    ondelete: OnDeleteRef | Callable[[BaseModel, BaseModel], OnDeleteRef] | None = None
+
+    _related_model_field = property(attrgetter('model_field'))
+
+    _description_model_field = property(attrgetter('model_field'))
+
+    def _setup(self, model):
+        super()._setup(model)
+        model_field = model._fields.get(self.model_field)
+        if model_field is None:
+            raise Exception(f"Field {self} with unknown model_field {self.model_field!r}")
+        if not self.store:
+            if self.ondelete:
+                self._setup_warning("unexpected ondelete on non-stored field")
+            return
+        if not self.ondelete:
+            self.ondelete = 'restrict' if self.required else 'set null'
+        if self.ondelete not in ('restrict', 'set null', 'cascade', 'ignore') and not callable(self.ondelete):
+            raise ValueError(f'Field {self}.ondelete value is invalid: {self.ondelete!r}')
+        if self.ondelete in ('restrict', 'set null', 'cascade') and model_field.type == 'selection':
+            # if the model_field is a selection, apply the ondelete only on selectable models
+            ondelete_action = self.ondelete
+            self.ondelete = lambda self, model: ondelete_action if model._name in model_field.get_values(self.env) else 'ignore'
+
+    def convert_to_cache(self, value, records, validate=True):
+        # cache format: id or None
+        if isinstance(value, BaseModel):
+            value = value._ids[0] if value._ids else None
+        return super().convert_to_cache(value, records, validate)
+
+    def _update_inverse(self, records: BaseModel, value: BaseModel):
+        self._update_cache(records, self.convert_to_cache(value, records))
+
+    def _update_inverses(self, records: BaseModel, value):
+        """ Add `records` to the cached values of the inverse fields of `self`. """
+        if not value:
+            return
+        model_ids = self._record_ids_per_res_model(records)
+
+        for invf in records.pool.field_inverses[self]:
+            records = records.browse(model_ids[invf.model_name])
+            if not records:
+                continue
+            corecord = records.env[invf.model_name].browse(value)
+            records = records.filtered_domain(invf.get_comodel_domain(corecord))
+            if not records:
+                continue
+            ids0 = invf._get_cache(corecord.env).get(corecord.id)
+            # if the value for the corecord is not in cache, but this is a new
+            # record, assign it anyway, as you won't be able to fetch it from
+            # database (see `test_sale_order`)
+            if ids0 is not None or not corecord.id:
+                ids1 = tuple(unique((ids0 or ()) + records._ids))
+                invf._update_cache(corecord, ids1)
+
+    def _record_ids_per_res_model(self, records: BaseModel) -> dict[str, OrderedSet]:
+        model_ids = defaultdict(OrderedSet)
+        for record in records:
+            model = record[self.model_field]
+            if not model and record._fields[self.model_field].compute:
+                # fallback when the model field is computed :-/
+                record._fields[self.model_field].compute_value(record)
+                model = record[self.model_field]
+                if not model:
+                    continue
+            model_ids[model].add(record.id)
+        return model_ids

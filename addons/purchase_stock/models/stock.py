@@ -1,147 +1,151 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import api, fields, models, _
-from odoo.exceptions import UserError
+from collections import defaultdict
+from dateutil import relativedelta
+
+from odoo import api, Command, fields, models, _
+from odoo.fields import Domain
 
 
 class StockPicking(models.Model):
     _inherit = 'stock.picking'
 
-    purchase_id = fields.Many2one('purchase.order', related='move_lines.purchase_line_id.order_id',
+    purchase_id = fields.Many2one(
+        'purchase.order', related='move_ids.purchase_line_id.order_id',
         string="Purchase Orders", readonly=True)
 
+    days_to_arrive = fields.Datetime(compute='_compute_effective_date', search="_search_days_to_arrive", copy=False)
+    delay_pass = fields.Datetime(compute='_compute_date_order', search="_search_delay_pass", index=True, copy=False)
 
-class StockMove(models.Model):
-    _inherit = 'stock.move'
+    @api.depends('state', 'location_dest_id.usage', 'date_done')
+    def _compute_effective_date(self):
+        for picking in self:
+            if picking.state == 'done' and picking.location_dest_id.usage != 'supplier' and picking.date_done:
+                picking.days_to_arrive = picking.date_done
+            else:
+                picking.days_to_arrive = False
 
-    purchase_line_id = fields.Many2one('purchase.order.line',
-        'Purchase Order Line', ondelete='set null', index=True, readonly=True)
-    created_purchase_line_id = fields.Many2one('purchase.order.line',
-        'Created Purchase Order Line', ondelete='set null', readonly=True, copy=False)
+    def _compute_date_order(self):
+        for picking in self:
+            picking.delay_pass = picking.purchase_id.date_order if picking.purchase_id else fields.Datetime.now()
 
     @api.model
-    def _prepare_merge_moves_distinct_fields(self):
-        distinct_fields = super(StockMove, self)._prepare_merge_moves_distinct_fields()
-        distinct_fields += ['purchase_line_id', 'created_purchase_line_id']
-        return distinct_fields
+    def _search_days_to_arrive(self, operator, value):
+        return [('date_done', operator, value)]
 
     @api.model
-    def _prepare_merge_move_sort_method(self, move):
-        move.ensure_one()
-        keys_sorted = super(StockMove, self)._prepare_merge_move_sort_method(move)
-        keys_sorted += [move.purchase_line_id.id, move.created_purchase_line_id.id]
-        return keys_sorted
+    def _search_delay_pass(self, operator, value):
+        if operator in Domain.NEGATIVE_OPERATORS:
+            return NotImplemented
+        return [('purchase_id.date_order', operator, value)]
 
-    @api.multi
-    def _get_price_unit(self):
-        """ Returns the unit price for the move"""
-        self.ensure_one()
-        if self.purchase_line_id and self.product_id.id == self.purchase_line_id.product_id.id:
-            line = self.purchase_line_id
-            order = line.order_id
-            price_unit = line.price_unit
-            if line.taxes_id:
-                price_unit = line.taxes_id.with_context(round=False).compute_all(price_unit, currency=line.order_id.currency_id, quantity=1.0)['total_excluded']
-            if line.product_uom.id != line.product_id.uom_id.id:
-                price_unit *= line.product_uom.factor / line.product_id.uom_id.factor
-            if order.currency_id != order.company_id.currency_id:
-                price_unit = order.currency_id._convert(
-                    price_unit, order.company_id.currency_id, order.company_id, self.date, round=False)
-            return price_unit
-        return super(StockMove, self)._get_price_unit()
+    def _get_related_account_moves(self):
+        return self.move_ids.purchase_line_id.invoice_lines.move_id or super()._get_related_account_moves()
 
-    def _generate_valuation_lines_data(self, partner_id, qty, debit_value, credit_value, debit_account_id, credit_account_id):
-        """ Overridden from stock_account to support amount_currency on valuation lines generated from po
-        """
-        self.ensure_one()
+    def _create_return(self):
+        picking = super()._create_return()
+        if len(picking.move_ids.partner_id) == 1 and picking.partner_id != picking.move_ids.partner_id:
+            picking.partner_id = picking.move_ids.partner_id
+        return picking
 
-        rslt = super(StockMove, self)._generate_valuation_lines_data(partner_id, qty, debit_value, credit_value, debit_account_id, credit_account_id)
-        if self.purchase_line_id:
-            purchase_currency = self.purchase_line_id.currency_id
-            if purchase_currency != self.company_id.currency_id:
-                purchase_price_unit = self.purchase_line_id.price_unit
-                currency_move_valuation = purchase_currency.round(purchase_price_unit * abs(qty))
-                rslt['credit_line_vals']['amount_currency'] = rslt['credit_line_vals']['credit'] and -currency_move_valuation or currency_move_valuation
-                rslt['credit_line_vals']['currency_id'] = purchase_currency.id
-                rslt['debit_line_vals']['amount_currency'] = rslt['debit_line_vals']['credit'] and -currency_move_valuation or currency_move_valuation
-                rslt['debit_line_vals']['currency_id'] = purchase_currency.id
-        return rslt
-
-    def _prepare_extra_move_vals(self, qty):
-        vals = super(StockMove, self)._prepare_extra_move_vals(qty)
-        vals['purchase_line_id'] = self.purchase_line_id.id
+    def _prepare_return_move_default_values(self, move_id):
+        vals = super()._prepare_return_move_default_values(move_id)
+        if self.location_id.usage == "supplier":
+            vals['purchase_line_id'], vals['partner_id'] = move_id._get_purchase_line_and_partner_from_chain()
         return vals
-
-    def _prepare_move_split_vals(self, uom_qty):
-        vals = super(StockMove, self)._prepare_move_split_vals(uom_qty)
-        vals['purchase_line_id'] = self.purchase_line_id.id
-        return vals
-
-    def _clean_merged(self):
-        super(StockMove, self)._clean_merged()
-        self.write({'created_purchase_line_id': False})
 
     def _action_done(self):
-        res = super(StockMove, self)._action_done()
-        self.mapped('purchase_line_id').sudo()._update_received_qty()
-        return res
+        self.purchase_id.sudo().action_acknowledge()
+        return super()._action_done()
 
-    def write(self, vals):
-        res = super(StockMove, self).write(vals)
-        if 'product_uom_qty' in vals:
-            self.filtered(lambda m: m.state == 'done' and m.purchase_line_id).mapped(
-                'purchase_line_id').sudo()._update_received_qty()
-        return res
-
-    def _get_upstream_documents_and_responsibles(self, visited):
-        if self.created_purchase_line_id and self.created_purchase_line_id.state not in ('done', 'cancel'):
-            return [(self.created_purchase_line_id.order_id, self.created_purchase_line_id.order_id.user_id, visited)]
-        else:
-            return super(StockMove, self)._get_upstream_documents_and_responsibles(visited)
-
-    def _get_related_invoices(self):
-        """ Overridden to return the vendor bills related to this stock move.
-        """
-        rslt = super(StockMove, self)._get_related_invoices()
-        rslt += self.mapped('picking_id.purchase_id.invoice_ids').filtered(lambda x: x.state not in ('draft', 'cancel'))
-        return rslt
+    def _log_less_quantities_than_expected(self, moves):
+        moves_information = [(k, v) for k, v in moves.items()]
+        purchase_order = self.move_ids.purchase_line_id.order_id
+        if purchase_order:
+            purchase_order.sudo().activity_schedule(
+                'mail.mail_activity_data_warning',
+                summary=_('Missing products in receipt'),
+                note=self.env['ir.qweb']._render('purchase_stock.exception_on_picking', {
+                    'origin_picking': self,
+                    'moves_information': moves_information,
+                }),
+                user_id=purchase_order.user_id.id,
+            )
+        return super()._log_less_quantities_than_expected(moves)
 
 
 class StockWarehouse(models.Model):
     _inherit = 'stock.warehouse'
 
-    buy_to_resupply = fields.Boolean('Buy to Resupply', default=True,
-                                     help="When products are bought, they can be delivered to this warehouse")
-    buy_pull_id = fields.Many2one('stock.rule', 'Buy rule')
+    buy_to_resupply = fields.Boolean(
+        'Buy to Resupply', compute='_compute_buy_to_resupply',
+        inverse="_inverse_buy_to_resupply", default=True,
+        help="When products are bought, they can be delivered to this warehouse")
+    buy_pull_id = fields.Many2one('stock.rule', 'Buy rule', copy=False)
 
-    def _get_global_route_rules_values(self):
-        rules = super(StockWarehouse, self)._get_global_route_rules_values()
-        location_id = self.in_type_id.default_location_dest_id
+    def _compute_buy_to_resupply(self):
+        for warehouse in self:
+            buy_route = warehouse.buy_pull_id.route_id
+            warehouse.buy_to_resupply = warehouse.id in buy_route.warehouse_ids.ids or (buy_route.warehouse_selectable and not buy_route.warehouse_ids)
+
+    def _inverse_buy_to_resupply(self):
+        for warehouse in self:
+            buy_route = warehouse.buy_pull_id.route_id
+            if not buy_route:
+                buy_route = self.env['stock.rule'].search([
+                    ('action', '=', 'buy'), ('warehouse_id', '=', warehouse.id)]).route_id
+            buy_route = buy_route.sudo()
+            if warehouse.buy_to_resupply:
+                buy_route.warehouse_ids = [Command.link(warehouse.id)]
+            else:
+                buy_route.warehouse_ids = [Command.unlink(warehouse.id)]
+
+    def _create_or_update_route(self):
+        purchase_route = self._find_or_create_global_route('purchase_stock.route_warehouse0_buy', _('Buy'))
+        for warehouse in self:
+            if warehouse.buy_to_resupply:
+                purchase_route.sudo().warehouse_ids = [Command.link(warehouse.id)]
+        return super()._create_or_update_route()
+
+    def _generate_global_route_rules_values(self):
+        rules = super()._generate_global_route_rules_values()
+        location_id = self.lot_stock_id
         rules.update({
             'buy_pull_id': {
                 'depends': ['reception_steps', 'buy_to_resupply'],
                 'create_values': {
                     'action': 'buy',
                     'picking_type_id': self.in_type_id.id,
-                    'route_id': self._find_global_route('purchase.route_warehouse0_buy', 'Buy').id
+                    'company_id': self.company_id.id,
+                    'route_id': self._find_or_create_global_route('purchase_stock.route_warehouse0_buy', _('Buy')).id,
+                    'propagate_cancel': self.reception_steps != 'one_step',
                 },
                 'update_values': {
                     'active': self.buy_to_resupply,
                     'name': self._format_rulename(location_id, False, 'Buy'),
-                    'location_id': location_id.id,
+                    'location_dest_id': location_id.id,
+                    'propagate_cancel': self.reception_steps != 'one_step',
                 }
             }
         })
         return rules
 
-    @api.multi
     def _get_all_routes(self):
-        routes = super(StockWarehouse, self).get_all_routes_for_wh()
+        routes = super(StockWarehouse, self)._get_all_routes()
         routes |= self.filtered(lambda self: self.buy_to_resupply and self.buy_pull_id and self.buy_pull_id.route_id).mapped('buy_pull_id').mapped('route_id')
         return routes
 
-    @api.multi
+    def get_rules_dict(self):
+        result = super(StockWarehouse, self).get_rules_dict()
+        for warehouse in self:
+            result[warehouse.id].update(warehouse._get_receive_rules_dict())
+        return result
+
+    def _get_routes_values(self):
+        routes = super(StockWarehouse, self)._get_routes_values()
+        routes.update(self._get_receive_routes_values('buy_to_resupply'))
+        return routes
+
     def _update_name_and_code(self, name=False, code=False):
         res = super(StockWarehouse, self)._update_name_and_code(name, code)
         warehouse = self[0]
@@ -151,30 +155,123 @@ class StockWarehouse(models.Model):
         return res
 
 
-class ReturnPicking(models.TransientModel):
-    _inherit = "stock.return.picking"
-
-    def _prepare_move_default_values(self, return_line, new_picking):
-        vals = super(ReturnPicking, self)._prepare_move_default_values(return_line, new_picking)
-        vals['purchase_line_id'] = return_line.move_id.purchase_line_id.id
-        return vals
-
-
-class Orderpoint(models.Model):
+class StockWarehouseOrderpoint(models.Model):
     _inherit = "stock.warehouse.orderpoint"
 
-    def _quantity_in_progress(self):
-        res = super(Orderpoint, self)._quantity_in_progress()
-        for poline in self.env['purchase.order.line'].search([('state','in',('draft','sent','to approve')),('orderpoint_id','in',self.ids)]):
-            res[poline.orderpoint_id.id] += poline.product_uom._compute_quantity(poline.product_qty, poline.orderpoint_id.product_uom, round=False)
+    show_supplier = fields.Boolean('Show supplier column', compute='_compute_show_supplier')
+    supplier_id = fields.Many2one(
+        'product.supplierinfo', string='Vendor Pricelist', check_company=True,
+        ui_domain="['|', ('product_id', '=', product_id), '&', ('product_id', '=', False), ('product_tmpl_id', '=', product_tmpl_id)]",
+        inverse='_inverse_supplier_id',
+    )
+    supplier_id_placeholder = fields.Char(compute='_compute_supplier_id_placeholder')
+    vendor_ids = fields.One2many(related='product_id.seller_ids', string="Vendors")
+    effective_vendor_id = fields.Many2one(
+        'res.partner', search='_search_effective_vendor_id', compute='_compute_effective_vendor_id',
+        store=False, help='Either the vendor set directly or the one computed to be used by this replenishment'
+    )
+    available_vendor = fields.Many2one('res.partner', string='Available Vendor', search='_search_available_vendor', store=False, help="Any vendor on the product's pricelist")
+
+    def _inverse_route_id(self):
+        for orderpoint in self:
+            if not orderpoint.route_id:
+                orderpoint.supplier_id = False
+        super()._inverse_route_id()
+
+    @api.depends('supplier_id')
+    def _compute_deadline_date(self):
+        """ Extend to add more depends values """
+        super()._compute_deadline_date()
+
+    @api.depends('product_id.purchase_order_line_ids.product_qty', 'product_id.purchase_order_line_ids.state', 'supplier_id', 'supplier_id.uom_id', 'product_id.seller_ids', 'product_id.seller_ids.uom_id')
+    def _compute_qty_to_order_computed(self):
+        """ Extend to add more depends values
+        TODO: Probably performance costly due to x2many in depends
+        """
+        return super()._compute_qty_to_order_computed()
+
+    @api.depends('supplier_id')
+    def _compute_lead_days(self):
+        return super()._compute_lead_days()
+
+    def _compute_days_to_order(self):
+        res = super()._compute_days_to_order()
+        # Avoid computing rule_ids if no stock.rules with the buy action
+        if not self.env['stock.rule'].search([('action', '=', 'buy')]):
+            return res
+        # Compute rule_ids only for orderpoint whose compnay_id.days_to_purchase != orderpoint.days_to_order
+        orderpoints_to_compute = self.filtered(lambda orderpoint: orderpoint.days_to_order != orderpoint.company_id.days_to_purchase)
+        for orderpoint in orderpoints_to_compute:
+            if 'buy' in orderpoint.rule_ids.mapped('action'):
+                orderpoint.days_to_order = orderpoint.company_id.days_to_purchase
         return res
+
+    @api.depends('effective_route_id')
+    def _compute_show_supplier(self):
+        buy_route = []
+        for res in self.env['stock.rule'].search_fetch([('action', '=', 'buy')], ['route_id']):
+            buy_route.append(res.route_id.id)
+        for orderpoint in self:
+            orderpoint.show_supplier = orderpoint.effective_route_id.id in buy_route
+
+    def _inverse_supplier_id(self):
+        for orderpoint in self:
+            if not orderpoint.route_id and orderpoint.supplier_id:
+                orderpoint.route_id = orderpoint._get_default_route(force_action="buy")
+
+    @api.depends('effective_route_id', 'supplier_id', 'rule_ids', 'product_id.seller_ids', 'product_id.seller_ids.delay')
+    def _compute_supplier_id_placeholder(self):
+        for orderpoint in self:
+            orderpoint.supplier_id_placeholder = self.env['product.supplierinfo']._get_seller_info_display_name(
+                orderpoint._get_default_supplier())
+
+    @api.depends('effective_route_id', 'supplier_id', 'rule_ids', 'product_id.seller_ids', 'product_id.seller_ids.delay')
+    def _compute_effective_vendor_id(self):
+        for orderpoint in self:
+            orderpoint.effective_vendor_id = orderpoint.supplier_id.partner_id or orderpoint._get_default_supplier().get('partner_id')
+
+    def _search_effective_vendor_id(self, operator, value):
+        target_partners = self.env['res.partner'].search([('id', operator, value)])
+        po_product_ids = self._get_po_history_product_ids(target_partners)
+        orderpoints = self.env['stock.warehouse.orderpoint'].search([
+            '|',
+            ('vendor_ids.partner_id', 'in', target_partners.ids),
+            ('product_id', 'in', list(po_product_ids)),
+        ]).filtered(
+            lambda op: op.effective_vendor_id in target_partners
+        )
+
+        return [('id', 'in', orderpoints.ids)]
+
+    def _search_available_vendor(self, operator, value):
+        vendors = self.env['res.partner'].search([('id', operator, value)])
+        orderpoints = self.env['stock.warehouse.orderpoint'].search([]).filtered(
+            lambda orderpoint: orderpoint.product_id._prepare_sellers().mapped('partner_id') & vendors
+                or orderpoint.effective_vendor_id in vendors
+        )
+        return [('id', 'in', orderpoints.ids)]
+
+    def _get_po_history_product_ids(self, partners):
+        return set(self.env['purchase.order.line'].sudo().search([
+            ('order_id.partner_id', 'child_of', partners.ids),
+            ('order_id.state', '=', 'purchase'),
+            ('order_id.date_approve', '!=', False),
+            ('order_id.company_id', 'in', self.env.companies.ids),
+        ]).product_id.ids)
+
+    def _compute_show_supply_warning(self):
+        for orderpoint in self:
+            if 'buy' in orderpoint.rule_ids.mapped('action') and not orderpoint.show_supply_warning:
+                orderpoint.show_supply_warning = not orderpoint.vendor_ids \
+                    and not orderpoint.product_id._has_confirmed_purchase(orderpoint.company_id)
+                continue
+            super(StockWarehouseOrderpoint, orderpoint)._compute_show_supply_warning()
 
     def action_view_purchase(self):
         """ This function returns an action that display existing
         purchase orders of given orderpoint.
         """
-        action = self.env.ref('purchase.purchase_rfq')
-        result = action.read()[0]
+        result = self.env['ir.actions.act_window']._for_xml_id('purchase.purchase_rfq')
 
         # Remvove the context since the action basically display RFQ and not PO.
         result['context'] = {}
@@ -185,18 +282,119 @@ class Orderpoint(models.Model):
 
         return result
 
+    def _get_default_route(self, force_action=False):
+        self.ensure_one()
+        if not force_action or force_action == 'buy':
+            if self.product_id.seller_ids or self.product_id._has_confirmed_purchase(self.company_id):
+                route_id = self.rule_ids.filtered(lambda r: r.action == 'buy').route_id
+                if route_id:
+                    return route_id[0]
+            if force_action:
+                return self.env['stock.route']
+        return super()._get_default_route(force_action=force_action)
 
-class ProductionLot(models.Model):
-    _inherit = 'stock.production.lot'
+    def _get_default_supplier(self):
+        self.ensure_one()
+        if self.show_supplier and self.product_id:
+            return self.env['stock.rule']._pick_supplier(
+                self.company_id, self.product_id, qty=self.qty_to_order, uom=self.uom_id
+            )
+        else:
+            return {}
+
+    def _get_lead_days_values(self):
+        values = super()._get_lead_days_values()
+        if self.supplier_id:
+            values['supplierinfo'] = self.supplier_id
+        return values
+
+    def _get_replenishment_order_notification(self, written_after=None):
+        self.ensure_one()
+        domain = Domain('orderpoint_id', 'in', self.ids)
+        if written_after:
+            domain &= Domain('write_date', '>=', written_after)
+        order = self.env['purchase.order.line'].search(domain, limit=1).order_id
+        if order:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': _('The following replenishment order has been generated'),
+                    'message': '%s',
+                    'links': [{
+                        'label': order.display_name,
+                        'url': f'/odoo/action-purchase.action_rfq_form/{order.id}',
+                    }],
+                    'sticky': False,
+                    'next': {'type': 'ir.actions.act_window_close'},
+                }
+            }
+        return super()._get_replenishment_order_notification(written_after=written_after)
+
+    def _prepare_procurement_values(self, date=False):
+        values = super()._prepare_procurement_values(date=date)
+        values['supplierinfo_id'] = self.supplier_id
+        return values
+
+    def _get_replenishment_multiple_alternative(self, qty_to_order):
+        self.ensure_one()
+        routes = self.effective_route_id or self.product_id.route_ids
+        if not (self.product_id and any(r.action == 'buy' for r in routes.rule_ids)):
+            return super()._get_replenishment_multiple_alternative(qty_to_order)
+        planned_date = self._get_orderpoint_procurement_date()
+        global_horizon_days = self.company_id.get_horizon_days()
+        if global_horizon_days:
+            planned_date -= relativedelta.relativedelta(days=int(global_horizon_days))
+        date_deadline = planned_date or fields.Date.today()
+        dates_info = self.product_id._get_dates_info(date_deadline, self.location_id, route_ids=self.route_id)
+        seller_info = self.supplier_id._get_seller_info() or self.product_id.with_company(self.company_id)._select_seller(
+            quantity=qty_to_order,
+            date=max(dates_info['date_order'].date(), fields.Date.today()),
+            uom_id=self.uom_id
+        )
+        return seller_info.get('uom_id')
+
+    def _quantity_in_progress(self):
+        res = super()._quantity_in_progress()
+        qty_by_product_location, dummy = self.product_id._get_quantity_in_progress(self.location_id.ids)
+        for orderpoint in self:
+            product_qty = qty_by_product_location.get((orderpoint.product_id.id, orderpoint.location_id.id), 0.0)
+            product_uom_qty = orderpoint.product_id.uom_id._compute_quantity(product_qty, orderpoint.uom_id, round=False)
+            res[orderpoint.id] += product_uom_qty
+        return res
+
+    def _order_field_to_sql(self, table, field_expr, direction, nulls):
+        # Override the order by logic for 'supplier_id' to sort by vendor name
+        if field_expr == 'supplier_id':
+            # get partner_id from supplierinfo
+            supplier_table = table._join('supplier_id')
+            # sort by vendor name using 'partner_id'
+            return self.env['product.supplierinfo']._order_field_to_sql(
+                supplier_table, 'partner_id', direction, nulls,
+            )
+        return super()._order_field_to_sql(table, field_expr, direction, nulls)
+
+
+class StockLot(models.Model):
+    _inherit = 'stock.lot'
 
     purchase_order_ids = fields.Many2many('purchase.order', string="Purchase Orders", compute='_compute_purchase_order_ids', readonly=True, store=False)
+    purchase_order_count = fields.Integer('Purchase order count', compute='_compute_purchase_order_ids')
 
     @api.depends('name')
     def _compute_purchase_order_ids(self):
+        purchase_orders = defaultdict(lambda: self.env['purchase.order'])
+        for move_line in self.env['stock.move.line'].search([('lot_id', 'in', self.ids), ('state', '=', 'done')]):
+            move = move_line.move_id
+            if move.picking_id.location_id.usage in ('supplier', 'transit') and move.purchase_line_id.order_id:
+                purchase_orders[move_line.lot_id.id] |= move.purchase_line_id.order_id
         for lot in self:
-            stock_moves = self.env['stock.move.line'].search([
-                ('lot_id', '=', lot.id),
-                ('state', '=', 'done')
-            ]).mapped('move_id').filtered(
-                lambda move: move.picking_id.location_id.usage == 'supplier' and move.state == 'done')
-            lot.purchase_order_ids = stock_moves.mapped('purchase_line_id.order_id')
+            lot.purchase_order_ids = purchase_orders[lot.id]
+            lot.purchase_order_count = len(lot.purchase_order_ids)
+
+    def action_view_po(self):
+        self.ensure_one()
+        action = self.env["ir.actions.actions"]._for_xml_id("purchase.purchase_form_action")
+        action['domain'] = [('id', 'in', self.mapped('purchase_order_ids.id'))]
+        action['context'] = dict(self.env.context, create=False)
+        return action

@@ -1,0 +1,467 @@
+$o-discuss-talkingColor: lighten($success, 10%);
+
+.o-mail-emoji {
+    font-size: 121%;
+    line-height: var(--o-bs-display-line-height);
+}
+
+.o-bg-black {
+    background-color: rgba(0, 0, 0, var(--bg-opacity, 1));
+}
+
+.o-bg-body {
+    background-color: var(--body-bg) !important;
+}
+
+.o-border-opacity-7_5 {
+    --border-opacity: 0.075;
+}
+
+.o-discuss-badge {
+    &, & .o-innerBadge {
+        --o-discuss-badge-bg: var(--o-success); /* sync with --o-navbar-badge-bg */
+        color: white !important;
+        background-color: var(--o-discuss-badge-bg) !important;
+        align-items: center;
+        justify-content: center;
+        padding: 3px 4px;
+
+        &.o-muted {
+            --o-discuss-badge-bg: var(--mail-discuss-badge-mutedBg, color-mix(in srgb, var(--gray-500), var(--gray-600)));
+        }
+    }
+
+    & .o-innerBadge {
+        min-width: var(--o-badge-min-width); /* same as .badge, without using .badge to keep semantics of a single .badge */
+    }
+}
+
+.o-discuss-warningBadge {
+    background-color: var(--warning) !important;
+}
+
+@function o-rounded-bubble() {
+    @return calc((#{$border-radius} + #{$border-radius-lg}) * 7 / 8);
+}
+
+/* Tint of the messages and thread previews with a bubble color */
+.o-mail-Message-bubble.o-blue,
+.o-mail-Message-bubbleTail.o-blue,
+.o-mail-ThreadPreview-popover:has(.o-mail-ThreadPreview.o-blue) {
+    --o-bubble-bg: var(--o-mail-bubble-blue-bg);
+    --o-bubble-bg-muted: var(--o-mail-bubble-blue-bg-muted);
+    --o-bubble-border-color: var(--o-mail-bubble-blue-border-color);
+    --o-bubble-color-base: var(--o-mail-bubble-blue-color-base);
+}
+.o-mail-Message-bubble.o-green,
+.o-mail-Message-bubbleTail.o-green,
+.o-mail-ThreadPreview-popover:has(.o-mail-ThreadPreview.o-green) {
+    --o-bubble-bg: var(--o-mail-bubble-green-bg);
+    --o-bubble-bg-muted: var(--o-mail-bubble-green-bg-muted);
+    --o-bubble-border-color: var(--o-mail-bubble-green-border-color);
+    --o-bubble-color-base: var(--o-mail-bubble-green-color-base);
+}
+.o-mail-Message-bubble.o-orange,
+.o-mail-Message-bubbleTail.o-orange,
+.o-mail-ThreadPreview-popover:has(.o-mail-ThreadPreview.o-orange) {
+    --o-bubble-bg: var(--o-mail-bubble-orange-bg);
+    --o-bubble-bg-muted: var(--o-mail-bubble-orange-bg-muted);
+    --o-bubble-border-color: var(--o-mail-bubble-orange-border-color);
+    --o-bubble-color-base: var(--o-mail-bubble-orange-color-base);
+}
+
+.o-discuss-dropdownMenu {
+    --Dropdown_menu-margin-y: 0;
+
+    padding: var(--o-bs-dropdown-padding-y) var(--o-bs-dropdown-padding-x);
+
+    @if $o-webclient-color-scheme != dark {
+        &.o-discussCallTheme {
+            background-color: var(--gray-800);
+            border-color: var(--gray-700) !important;
+
+            * {
+                color: white;
+            }
+
+            .btn, .o-dropdown-item {
+                --gradient: transparent;
+            }
+
+            .form-switch .form-check-input {
+                &:checked {
+                    --#{$prefix}form-switch-bg: #{escape-svg($form-switch-bg-image-dark)};
+                }
+            }
+
+            select option {
+                background-color: var(--gray-700);
+            }
+        }
+    }
+
+    .popover-arrow {
+        --position-max: calc(100% - var(--o-bs-spacer-4));
+    }
+
+    .dropdown-item {
+        --#{$prefix}dropdown-item-padding-y: var(--o-bs-dropdown-item-padding-y);
+        --#{$prefix}dropdown-item-padding-x: var(--o-bs-dropdown-item-padding-x);
+        --#{$prefix}dropdown-item-border-radius: calc((var(--o-bs-dropdown-border-radius) - var(--o-bs-dropdown-padding-x)));
+        --#{$prefix}gradient: 0;
+
+        font-size: var(--o-bs-dropdown-font-size);
+
+        &:hover {
+            background-color: var(--o-bs-dropdown-link-hover-bg);
+        }
+    }
+}
+
+.o-discuss-ellipsisButton {
+    @include material-icon-base;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 1;
+    padding: 0;
+    border-radius: 50%;
+    --btn-border-color: #{rgba($dark, var(--o-discuss-ellipsisButton-mutedBorderOpacity, .5))};
+    --btn-hover-border-color: var(--dark);
+    --btn-active-border-color: var(--o-action);
+    --btn-hover-color: #{color-contrast($light)};
+    --btn-active-color: #{color-contrast($light)};
+
+    &::before {
+        content: "more_horiz" / ""; /* empty alt text: keeps the ligature out of the accessible name */
+        font-size: map-get($icon-sizes, 'lg'); /* .oi-lg */
+        width: #{$oi-fw-ratio}em; /* .oi-fw */
+        text-align: center;
+    }
+}
+
+.o-discuss-mobileContextMenu {
+    top: auto !important;
+}
+
+.o-discuss-separator {
+    opacity: calc(var(--o-bs-hr-opacity) / 2);
+}
+
+.o-discuss-text-body {
+    color: var(--gray-700) !important;
+}
+
+.o-discuss-badge, .o-discuss-badgeShape {
+    &, & .o-innerBadge {
+        display: flex;
+        transform: translate(0, 0) !important; /* cancel systray style on badge */
+        font-size: calc(.78572 * var(--o-bs-font-size-base)) !important; /* roughly 11px, small but readable */
+        user-select: none;
+    }
+}
+
+.o-dvh-100 {
+    height: 100dvh;
+}
+
+.o-inset-0 {
+    inset: 0;
+}
+
+.o-min-dvh-100 {
+    min-height: 100dvh;
+}
+
+.o-min-height-0 {
+    min-height: 0;
+}
+
+.o-opacity-35 {
+    opacity: 35%;
+}
+
+.o-opacity-65 {
+    opacity: 65%;
+}
+
+.o-hover-text-underline:hover {
+    text-decoration: underline;
+}
+
+$o-mail-spacers-sizes: () !default;
+$o-mail-spacers-sizes: map-merge(
+    $o-mail-spacers-sizes,
+    (
+        "0_5": calc(var(--o-bs-spacer-1) / 2),
+        "1_5": calc((var(--o-bs-spacer-1) + var(--o-bs-spacer-2)) / 2),
+        "2_5": calc((var(--o-bs-spacer-2) + var(--o-bs-spacer-3)) / 2),
+        "3_5": calc((var(--o-bs-spacer-3) + var(--o-bs-spacer-4)) / 2),
+        "4_5": calc((var(--o-bs-spacer-4) + var(--o-bs-spacer-5)) / 2),
+    )
+);
+
+$o-mail-rounded-sizes: () !default;
+$o-mail-rounded-sizes: map-merge(
+    $o-mail-rounded-sizes,
+    (
+        "2_5": calc((#{$border-radius} + #{$border-radius-lg}) / 2),
+        "bubble": o-rounded-bubble(),
+    )
+);
+
+$o-mail-utilities: () !default;
+$o-mail-utilities: map-merge(
+    $o-mail-utilities,
+    (
+        "o-gap": (
+            property: gap,
+            class: o-gap,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-m": (
+            property: margin,
+            class: o-m,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-mx": (
+            property: margin-left margin-right,
+            class: o-mx,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-my": (
+            property: margin-top margin-bottom,
+            class: o-my,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-mt": (
+            property: margin-top,
+            class: o-mt,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-me": (
+            property: margin-right,
+            class: o-me,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-mb": (
+            property: margin-bottom,
+            class: o-mb,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-ms": (
+            property: margin-left,
+            class: o-ms,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-p": (
+            property: padding,
+            class: o-p,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-px": (
+            property: padding-left padding-right,
+            class: o-px,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-py": (
+            property: padding-top padding-bottom,
+            class: o-py,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-pt": (
+            property: padding-top,
+            class: o-pt,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-pe": (
+            property: padding-right,
+            class: o-pe,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-pb": (
+            property: padding-bottom,
+            class: o-pb,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-ps": (
+            property: padding-left,
+            class: o-ps,
+            values: $o-mail-spacers-sizes,
+        ),
+        "o-rounded": (
+            property: border-radius,
+            class: o-rounded,
+            values: $o-mail-rounded-sizes,
+        ),
+        "o-rounded-top": (
+            property: border-top-left-radius border-top-right-radius,
+            class: o-rounded-top,
+            values: $o-mail-rounded-sizes,
+        ),
+        "o-rounded-end": (
+            property: border-top-right-radius border-bottom-right-radius,
+            class: o-rounded-end,
+            values: $o-mail-rounded-sizes,
+        ),
+        "o-rounded-bottom": (
+            property: border-bottom-right-radius border-bottom-left-radius,
+            class: o-rounded-bottom,
+            values: $o-mail-rounded-sizes,
+        ),
+        "o-rounded-start": (
+            property: border-bottom-left-radius border-top-left-radius,
+            class: o-rounded-start,
+            values: $o-mail-rounded-sizes,
+        ),
+    ),
+);
+
+@each $key, $utility in $o-mail-utilities {
+    @include generate-utility($utility)
+}
+
+.o-fs-small {
+    font-size: var(--o-font-size-base-small) !important;
+}
+
+.o-scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--gray-400) transparent;
+}
+
+.o-text-white {
+    color: #FFF !important;
+}
+
+.o-text-wrap-balance {
+    text-wrap: balance;
+}
+
+.o-xsmaller {
+    font-size: $o-mail-FontSize-xs;
+}
+
+.o-xxsmaller {
+    font-size: 0.5rem;
+}
+
+.o-yellow {
+    color: var(--yellow);
+}
+
+.o-mail-callBordered {
+    border: 1px solid color-mix(in srgb, var(--o-action) calc(var(--o-mail-callBordered-opacity, .35) * 100%), transparent) !important;
+    background-color: color-mix(in srgb, color-mix(in srgb, var(--white) 15%, var(--gray-100)) 97.5%, var(--o-action)) !important;
+}
+
+/* see `@mixin button-variant`, this is the implementation without requiring `.btn` classname */
+@mixin o-mention-variant(
+    $background,
+    $outline,
+    $color: color-contrast($background),
+    $hover-background: if($color == $color-contrast-light, shade-color($background, $btn-hover-bg-shade-amount), tint-color($background, $btn-hover-bg-tint-amount)),
+    $hover-outline: if($color == $color-contrast-light, shade-color($outline, $btn-hover-border-shade-amount), tint-color($outline, $btn-hover-border-tint-amount)),
+    $hover-color: color-contrast($hover-background),
+    $active-background: if($color == $color-contrast-light, shade-color($background, $btn-active-bg-shade-amount), tint-color($background, $btn-active-bg-tint-amount)),
+    $active-outline: if($color == $color-contrast-light, shade-color($outline, $btn-active-border-shade-amount), tint-color($outline, $btn-active-border-tint-amount)),
+    $active-color: color-contrast($active-background),
+    $disabled-background: $background,
+    $disabled-outline: $outline,
+    $disabled-color: color-contrast($disabled-background)
+) {
+    color: #{$color} !important;
+    background-color: #{$background};
+    outline-color: #{$outline};
+    &:hover {
+        color: #{$hover-color};
+        background-color: #{$hover-background};
+        outline-color: #{$hover-outline};
+    }
+    &:focus {
+        box-shadow: #{to-rgb(mix($color, $outline, 15%))};
+    }
+    &:active {
+        color: #{$active-color};
+        background-color: #{$active-background};
+        outline-color: #{$active-outline};
+    }
+    &:disabled {
+        color: #{$disabled-color};
+        background-color: #{$disabled-background};
+        outline-color: #{$disabled-outline};
+    }
+}
+
+a.o_mail_redirect, a.o_channel_redirect, a.o-discuss-mention, a.o_message_redirect_transformed, a.o_record_redirect_transformed {
+    user-select: none;
+    border-radius: var(--o-bs-btn-border-radius-lg);
+    padding: 0rem 0.25rem;
+    margin: 0rem;
+    outline: 1px solid;
+    outline-offset: -1px;
+    font-weight: var(--o-bs-font-weight-bold);
+    display: inline-block;
+}
+
+a.o_mail_redirect, a.o_channel_redirect, a.o_message_redirect_transformed, a.o_record_redirect_transformed {
+    @include o-mention-variant(rgba($primary, .15), rgba($primary, .25), darken($primary, 10%), rgba($primary, .2), rgba($primary, .5), darken($primary, 15%));
+}
+
+a.o-discuss-mention {
+    @include o-mention-variant(rgba($primary, .15), rgba($primary, .25), darken($primary, 10%), rgba($primary, .15), rgba($primary, .25), darken($primary, 10%));
+    cursor: default !important;
+}
+
+.o-discuss-inCallIcon {
+    --o-mail-callBordered-opacity: .35; /* not inherited from a bordered parent */
+    color: var(--o-action);
+    aspect-ratio: 1;
+
+    &.o-muted {
+        border-color: var(--gray-400) !important;
+        color: var(--gray-700);
+    }
+}
+
+.o-mail-DiscussSystray {
+    --border-color: var(--o-gray-300) !important; /* cancel custom border color of dropdown */
+}
+
+.o-mail-systrayFullscreenDropdownMenu {
+    top: var(--o-navbar-height) !important;
+    height: calc(100% - var(--o-navbar-height)); /* no bottom-0 otherwise performance issue */
+    border-radius: 0 !important;
+}
+
+.o-disable-safari-native-long-press {
+    /* Prevent user selection so that this isn't accidentally triggered with long-press. */
+    -webkit-touch-callout: none; /* disable iOS Safari native selection UI */
+    -webkit-user-select: none; /* disable iOS Safari native selection UI */
+    user-select: none;
+}
+
+.o-visible-short-delay {
+    animation: o-visible-short-delay-animation 0s ease-in 0.25s forwards;
+    display: none;
+}
+
+@keyframes o-visible-short-delay-animation {
+    to {
+        display: inline-flex;
+    }
+}
+
+/* .o-opacity-hoberable class disable the opacity effect (see opacity-100-hover) on
+   device that dont support the hover effect (mainly touch device). */
+@media (hover: none) {
+    .o-opacity-hoverable {
+        opacity: 100 !important;
+    }
+}
+
+.o-mail-favorite {
+    color: var(--o-main-favorite-color);
+    filter: drop-shadow(1px 1px 0px #000000b0);
+}

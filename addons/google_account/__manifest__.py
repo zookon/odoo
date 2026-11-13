@@ -1,15 +1,13 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 {
     'name': 'Google Users',
-    'category': 'Extra Tools',
+    'category': 'Hidden/Tools',
     'description': """
-The module adds google user in res user.
+The module adds a Google user in res.users.
 ========================================
 """,
     'depends': ['base_setup'],
-    'data': [
-        'data/google_account_data.xml',
-    ],
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }

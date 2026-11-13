@@ -1,54 +1,88 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import models, api, fields
-from odoo.tools.translate import _
+import json
+
+from odoo import fields, models
 
 
 class SaleOrder(models.Model):
-    _inherit = 'sale.order'
+    _inherit = "sale.order"
 
-    warning_stock = fields.Char('Warning')
+    is_pickup_required = fields.Boolean(related="carrier_id.support_pickup_locations")
 
-    def _cart_update(self, product_id=None, line_id=None, add_qty=0, set_qty=0, **kwargs):
-        values = super(SaleOrder, self)._cart_update(product_id, line_id, add_qty, set_qty, **kwargs)
-        line_id = values.get('line_id')
+    def _compute_warehouse_id(self):
+        website_orders = self.filtered(
+            lambda so: so.website_id and (so.state in ("draft", "sent") or not so.ids)
+        )
+        super(SaleOrder, self - website_orders)._compute_warehouse_id()
+        for order in website_orders:
+            if order.website_id.warehouse_id:
+                order.warehouse_id = order.website_id.warehouse_id
+            else:
+                super(SaleOrder, order)._compute_warehouse_id()
+            if not order.warehouse_id:
+                order.warehouse_id = self.env.user._get_default_warehouse_id()
 
-        for line in self.order_line:
-            if line.product_id.type == 'product' and line.product_id.inventory_availability in ['always', 'threshold']:
-                cart_qty = sum(self.order_line.filtered(lambda p: p.product_id.id == line.product_id.id).mapped('product_uom_qty'))
-                if cart_qty > line.product_id.virtual_available and (line_id == line.id):
-                    qty = line.product_id.virtual_available - cart_qty
-                    new_val = super(SaleOrder, self)._cart_update(line.product_id.id, line.id, qty, 0, **kwargs)
-                    values.update(new_val)
+    def write(self, vals):
+        """Override to adapt pickup location-related data on delivery method change."""
+        if "carrier_id" in vals and not self.env.context.get("keep_pickup_location"):
+            for order in self:
+                # Reset the shipping partner if it is a pickup location.
+                partner_shipping_dm_id = order.partner_shipping_id.pickup_delivery_method_id
+                if partner_shipping_dm_id and partner_shipping_dm_id.id != vals["carrier_id"]:
+                    order.partner_shipping_id = order.partner_id
+        return super().write(vals)
 
-                    # Make sure line still exists, it may have been deleted in super()_cartupdate because qty can be <= 0
-                    if line.exists() and new_val['quantity']:
-                        line.warning_stock = _('You ask for %s products but only %s is available') % (cart_qty, new_val['quantity'])
-                        values['warning'] = line.warning_stock
-                    else:
-                        self.warning_stock = _("Some products became unavailable and your cart has been updated. We're sorry for the inconvenience.")
-                        values['warning'] = self.warning_stock
-        return values
+    def _set_delivery_method(self, delivery_method, rate=None):
+        """Restore the customer address before rating a different delivery method.
 
-    @api.multi
-    def _get_stock_warning(self, clear=True):
+        Pickup methods replace `partner_shipping_id` with the pickup location. That address must
+        not be used to fetch rates for another method.
+        """
+        pickup_dm = self.partner_shipping_id.pickup_delivery_method_id
+        if pickup_dm and delivery_method and pickup_dm != delivery_method:
+            self.partner_shipping_id = self.partner_shipping_id.parent_id
+        return super()._set_delivery_method(delivery_method, rate=rate)
+
+    def action_open_delivery_wizard(self):
+        """Override of `delivery` to include default values for pickup delivery methods."""
+        res = super().action_open_delivery_wizard()
+        res["context"]["default_partner_shipping_id"] = self.partner_shipping_id.id
+        return res
+
+    def set_pickup_location(self, pickup_location_data):
+        """Set the pickup location on the current sale order.
+
+        :param str pickup_location_data: The pickup location data in JSON format.
+        """
         self.ensure_one()
-        warn = self.warning_stock
-        if clear:
-            self.warning_stock = ''
-        return warn
+        if self.is_pickup_required:
+            pickup_location_data_json = json.loads(pickup_location_data)
+            address = self.env["res.partner"]._address_from_json(
+                pickup_location_data_json,
+                self.partner_id,
+                pickup_delivery_method_id=self.carrier_id.id,
+            )
+            if address:
+                self.partner_shipping_id = address
 
+    def _get_checkout_delivery_address(self):
+        """Override of `website_sale` to select the customer address instead of the pickup
+        location, which is not listed among the delivery addresses."""
+        if self.partner_shipping_id.pickup_delivery_method_id:
+            return self.partner_shipping_id.parent_id
+        return super()._get_checkout_delivery_address()
 
-class SaleOrderLine(models.Model):
-    _inherit = 'sale.order.line'
+    def _get_shop_warehouse_id(self):
+        """Return the warehouse to use for shop availability checks.
 
-    warning_stock = fields.Char('Warning')
+        If no warehouse is specified on the website, all warehouses are considered,
+        regardless of the warehouse automatically assigned to the order.
 
-    @api.multi
-    def _get_stock_warning(self, clear=True):
+        Note: self.ensure_one()
+
+        :returns: `stock.warehouse` id
+        :rtype: int or False
+        """
         self.ensure_one()
-        warn = self.warning_stock
-        if clear:
-            self.warning_stock = ''
-        return warn
+        return self.website_id.warehouse_id.id

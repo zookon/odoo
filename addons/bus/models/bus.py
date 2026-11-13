@@ -1,205 +1,184 @@
-# -*- coding: utf-8 -*-
 import datetime
-import json
 import logging
-import random
-import select
-import threading
-import time
+import math
+import os
 
 import odoo
-from odoo import api, fields, models, SUPERUSER_ID
-from odoo.tools.misc import DEFAULT_SERVER_DATETIME_FORMAT
-from odoo.tools import date_utils
+from odoo import api, fields, models
+from odoo.tools import SQL, config
+from odoo.tools.misc import OrderedSet
+
+from ..tools.notifications import fetch_bus_notifications, json_dump
 
 _logger = logging.getLogger(__name__)
 
-# longpolling timeout connection
-TIMEOUT = 50
+DEFAULT_GC_RETENTION_SECONDS = 60 * 60 * 24  # 24 hours
 
-#----------------------------------------------------------
+# custom function to call instead of default PostgreSQL's `pg_notify`
+ODOO_NOTIFY_FUNCTION = os.getenv('ODOO_NOTIFY_FUNCTION', 'pg_notify')
+
+
+def get_notify_payload_max_length(default=8000):
+    try:
+        length = int(os.environ.get('ODOO_NOTIFY_PAYLOAD_MAX_LENGTH', default))
+    except ValueError:
+        _logger.warning("ODOO_NOTIFY_PAYLOAD_MAX_LENGTH has to be an integer, "
+                        "defaulting to %d bytes", default)
+        length = default
+    return length
+
+
+# max length in bytes for the NOTIFY query payload
+NOTIFY_PAYLOAD_MAX_LENGTH = get_notify_payload_max_length()
+# Sentinel used by `_prepare_payload` to indicate the notification
+# creation should be aborted.
+SKIP_NOTIFICATION = object()
+
+
+# ---------------------------------------------------------
 # Bus
-#----------------------------------------------------------
-def json_dump(v):
-    return json.dumps(v, separators=(',', ':'), default=date_utils.json_default)
+# ---------------------------------------------------------
+def channel_with_db(dbname, channel):
+    if isinstance(channel, models.Model):
+        return (dbname, channel._name, channel.id)
+    if isinstance(channel, tuple) and len(channel) == 2 and isinstance(channel[0], models.Model):
+        return (dbname, channel[0]._name, channel[0].id, channel[1])
+    if isinstance(channel, str):
+        return (dbname, channel)
+    return channel
 
-def hashable(key):
-    if isinstance(key, list):
-        key = tuple(key)
-    return key
+
+def get_notify_payloads(channels):
+    """
+    Generates the json payloads for the imbus NOTIFY.
+    Splits recursively payloads that are too large.
+
+    :param list channels:
+    :return: list of payloads of json dumps
+    :rtype: list[str]
+    """
+    if not channels:
+        return []
+    payload = json_dump(channels)
+    if len(channels) == 1 or len(payload.encode()) < NOTIFY_PAYLOAD_MAX_LENGTH:
+        return [payload]
+    else:
+        pivot = math.ceil(len(channels) / 2)
+        return (get_notify_payloads(channels[:pivot]) +
+                get_notify_payloads(channels[pivot:]))
 
 
-class ImBus(models.Model):
-
+class BusBus(models.Model):
     _name = 'bus.bus'
 
-    create_date = fields.Datetime('Create date')
+    _description = 'Communication Bus'
+
     channel = fields.Char('Channel')
     message = fields.Char('Message')
+    create_date = fields.Datetime(index=True)
+
+    @api.autovacuum
+    def _gc_messages(self):
+        gc_retention_seconds = self.env["ir.config_parameter"].sudo().get_int(
+            "bus.gc_retention_seconds", DEFAULT_GC_RETENTION_SECONDS
+        )
+        timeout_ago = fields.Datetime.now() - datetime.timedelta(seconds=gc_retention_seconds)
+        # Direct SQL to avoid ORM overhead; this way we can delete millions of rows quickly.
+        # This is a low-level table with no expected references, and doing this avoids
+        # the need to split or reschedule this GC job.
+        self.env.cr.execute("DELETE FROM bus_bus WHERE create_date < %s", (timeout_ago,))
 
     @api.model
-    def gc(self):
-        timeout_ago = datetime.datetime.utcnow()-datetime.timedelta(seconds=TIMEOUT*2)
-        domain = [('create_date', '<', timeout_ago.strftime(DEFAULT_SERVER_DATETIME_FORMAT))]
-        return self.sudo().search(domain).unlink()
+    def _sendone(self, target, notification_type, message):
+        """Low-level method to send ``notification_type`` and ``message`` to ``target``.
 
-    @api.model
-    def sendmany(self, notifications):
-        channels = set()
-        for channel, message in notifications:
-            channels.add(channel)
-            values = {
-                "channel": json_dump(channel),
-                "message": json_dump(message)
-            }
-            self.sudo().create(values)
-            if random.random() < 0.01:
-                self.gc()
-        if channels:
-            # We have to wait until the notifications are commited in database.
-            # When calling `NOTIFY imbus`, some concurrent threads will be
-            # awakened and will fetch the notification in the bus table. If the
-            # transaction is not commited yet, there will be nothing to fetch,
-            # and the longpolling will return no notification.
-            def notify():
-                with odoo.sql_db.db_connect('postgres').cursor() as cr:
-                    cr.execute("notify imbus, %s", (json_dump(list(channels)),))
-            self._cr.after('commit', notify)
+        Using ``_bus_send()`` from ``bus.listener.mixin`` is recommended for simplicity and
+        security.
 
-    @api.model
-    def sendone(self, channel, message):
-        self.sendmany([[channel, message]])
+        When using ``_sendone`` directly, ``target`` (if str) should not be guessable by an
+        attacker.
+        """
+        self._ensure_hooks()
+        channel = channel_with_db(self.env.cr.dbname, target)
+        if isinstance(channel, tuple) and len(channel) == 3 and channel[1] == "res.partner":
+            _logger.warning(
+                "Sending bus notifications on res.partner records is deprecated."
+                " Partners do not receive notifications unless they have dedicated user(s)."
+                " So please send on the expected res.users instead.",
+            )
+        self.env.cr.precommit.data["bus.bus.values"].append((channel, notification_type, message))
 
-    @api.model
-    def poll(self, channels, last=0, options=None, force_status=False):
-        if options is None:
-            options = {}
-        # first poll return the notification in the 'buffer'
-        if last == 0:
-            timeout_ago = datetime.datetime.utcnow()-datetime.timedelta(seconds=TIMEOUT)
-            domain = [('create_date', '>', timeout_ago.strftime(DEFAULT_SERVER_DATETIME_FORMAT))]
-        else:  # else returns the unread notifications
-            domain = [('id', '>', last)]
-        channels = [json_dump(c) for c in channels]
-        domain.append(('channel', 'in', channels))
-        notifications = self.sudo().search_read(domain)
-        # list of notification to return
-        result = []
-        for notif in notifications:
-            result.append({
-                'id': notif['id'],
-                'channel': json.loads(notif['channel']),
-                'message': json.loads(notif['message']),
-            })
+    def _prepare_payload(self, payload):
+        """Compute and return the final payload for a bus notification. This method is
+        called **just before sending the notification**, allowing deferred computation.
+        Return the `SKIP_NOTIFICATION` sentinel to cancel the creation of the notification.
+        """
+        return payload
 
-        if result or force_status:
-            partner_ids = options.get('bus_presence_partner_ids')
-            if partner_ids:
-                partners = self.env['res.partner'].browse(partner_ids)
-                result += [{
-                    'id': -1,
-                    'channel': (self._cr.dbname, 'bus.presence'),
-                    'message': {'id': r.id, 'im_status': r.im_status}} for r in partners]
-        return result
+    def _ensure_hooks(self):
+        if "bus.bus.values" not in self.env.cr.precommit.data:
+            self.env.cr.precommit.data["bus.bus.values"] = []
 
+            @self.env.cr.precommit.add
+            def create_bus():
+                values = []
+                channels = OrderedSet()
+                for channel, type_, payload in self.env.cr.precommit.data.pop("bus.bus.values"):
+                    formatted_payload = self._prepare_payload(payload)
+                    if formatted_payload is SKIP_NOTIFICATION:
+                        continue
+                    values.append({
+                        "channel": json_dump(channel),
+                        "message": json_dump({"type": type_, "payload": formatted_payload}),
+                    })
+                    channels.add(channel)
+                if values:
+                    self.sudo().create(values)
+                    self._ensure_notify_hook(channels)
 
-#----------------------------------------------------------
-# Dispatcher
-#----------------------------------------------------------
-class ImDispatch(object):
-    def __init__(self):
-        self.channels = {}
-        self.started = False
-
-    def poll(self, dbname, channels, last, options=None, timeout=TIMEOUT):
-        if options is None:
-            options = {}
-        # Dont hang ctrl-c for a poll request, we need to bypass private
-        # attribute access because we dont know before starting the thread that
-        # it will handle a longpolling request
-        if not odoo.evented:
-            current = threading.current_thread()
-            current._Thread__daemonic = True # PY2
-            current._daemonic = True         # PY3
-            # rename the thread to avoid tests waiting for a longpolling
-            current.setName("openerp.longpolling.request.%s" % current.ident)
-
-        registry = odoo.registry(dbname)
-
-        # immediatly returns if past notifications exist
-        with registry.cursor() as cr:
-            env = api.Environment(cr, SUPERUSER_ID, {})
-            notifications = env['bus.bus'].poll(channels, last, options)
-
-        # immediatly returns in peek mode
-        if options.get('peek'):
-            return dict(notifications=notifications, channels=channels)
-
-        # or wait for future ones
-        if not notifications:
-            if not self.started:
-                # Lazy start of events listener
-                self.start()
-
-            event = self.Event()
-            for channel in channels:
-                self.channels.setdefault(hashable(channel), []).append(event)
-            try:
-                event.wait(timeout=timeout)
-                with registry.cursor() as cr:
-                    env = api.Environment(cr, SUPERUSER_ID, {})
-                    notifications = env['bus.bus'].poll(channels, last, options, force_status=True)
-            except Exception:
-                # timeout
-                pass
-        return notifications
-
-    def loop(self):
-        """ Dispatch postgres notifications to the relevant polling threads/greenlets """
-        _logger.info("Bus.loop listen imbus on db postgres")
-        with odoo.sql_db.db_connect('postgres').cursor() as cr:
-            conn = cr._cnx
-            cr.execute("listen imbus")
-            cr.commit();
-            while True:
-                if select.select([conn], [], [], TIMEOUT) == ([], [], []):
-                    pass
-                else:
-                    conn.poll()
-                    channels = []
-                    while conn.notifies:
-                        channels.extend(json.loads(conn.notifies.pop().payload))
-                    # dispatch to local threads/greenlets
-                    events = set()
-                    for channel in channels:
-                        events.update(self.channels.pop(hashable(channel), []))
-                    for event in events:
-                        event.set()
-
-    def run(self):
-        while True:
-            try:
-                self.loop()
-            except Exception as e:
-                _logger.exception("Bus.loop error, sleep and retry")
-                time.sleep(TIMEOUT)
-
-    def start(self):
-        if odoo.evented:
-            # gevent mode
-            import gevent
-            self.Event = gevent.event.Event
-            gevent.spawn(self.run)
+    def _ensure_notify_hook(self, channels):
+        """Notify the given channels once the rows are committed. Called from the precommit
+        hook, so that a payload skipped at that point does not notify a channel that has
+        nothing to fetch."""
+        if "bus.bus.channels" in self.env.cr.postcommit.data:
+            self.env.cr.postcommit.data["bus.bus.channels"].update(channels)
         else:
-            # threaded mode
-            self.Event = threading.Event
-            t = threading.Thread(name="%s.Bus" % __name__, target=self.run)
-            t.daemon = True
-            t.start()
-        self.started = True
-        return self
+            self.env.cr.postcommit.data["bus.bus.channels"] = OrderedSet(channels)
 
-dispatch = None
-if not odoo.multi_process or odoo.evented:
-    # We only use the event dispatcher in threaded and gevent mode
-    dispatch = ImDispatch()
+            # We have to wait until the notifications are commited in database.
+            # When calling `NOTIFY imbus`, notifications will be fetched in the
+            # bus table. If the transaction is not commited yet, there will be
+            # nothing to fetch, and the websocket will return no notification.
+            @self.env.cr.postcommit.add
+            def notify():
+                payloads = get_notify_payloads(
+                    list(self.env.cr.postcommit.data.pop("bus.bus.channels"))
+                )
+                if len(payloads) > 1:
+                    _logger.info(
+                        "The imbus notification payload was too large, it's been split into %d payloads.",
+                        len(payloads),
+                    )
+                with odoo.sql_db.db_connect(config['db_system']).cursor() as cr:
+                    for payload in payloads:
+                        cr.execute(
+                            SQL(
+                                "SELECT %s('imbus', %s)",
+                                SQL.identifier(ODOO_NOTIFY_FUNCTION),
+                                payload,
+                            )
+                        )
+
+    @api.model
+    def _poll(self, channels, last=0, ignore_ids=None):
+        notifications_by_channel = fetch_bus_notifications(
+            self.env.cr, {last: list(channels)}, ignore_ids
+        )
+        return sorted(
+            (notif for notifs in notifications_by_channel.values() for notif in notifs),
+            key=lambda notif: notif["id"],
+        )
+
+    def _bus_last_id(self):
+        last = self.env['bus.bus'].search([], order='id desc', limit=1)
+        return last.id if last else 0

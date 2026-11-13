@@ -1,109 +1,117 @@
-# -*- coding: utf-8 -*-
-# Part of Odoo. See LICENSE file for full copyright and licensing details.
+"""The Odoo Exceptions module defines a few core exception types.
 
-""" OpenERP core exceptions.
-
-This module defines a few exception types. Those types are understood by the
-RPC layer. Any other exception type bubbling until the RPC layer will be
+Those types are understood by the RPC layer.
+Any other exception type bubbling until the RPC layer will be
 treated as a 'Server error'.
-
-If you consider introducing new exceptions, check out the test_exceptions addon.
 """
 
-import logging
-from inspect import currentframe
-from .tools.func import frame_codeinfo
 
-_logger = logging.getLogger(__name__)
+class UserError(Exception):
+    """Generic error managed by the client.
 
+    Typically when the user tries to do something that has no sense given the current
+    state of a record.
+    """
+    http_status = 422  # Unprocessable Entity
 
-# kept for backward compatibility
-class except_orm(Exception):
-    def __init__(self, name, value=None):
-        if type(self) == except_orm:
-            caller = frame_codeinfo(currentframe(), 1)
-            _logger.warn('except_orm is deprecated. Please use specific exceptions like UserError or AccessError. Caller: %s:%s', *caller)
-        self.name = name
-        self.value = value
-        self.args = (name, value)
-
-
-class UserError(except_orm):
-    def __init__(self, msg):
-        super(UserError, self).__init__(msg, value='')
-
-
-# deprecated due to collision with builtins, kept for compatibility
-Warning = UserError
+    def __init__(self, message):
+        """
+        :param message: exception message and frontend modal content
+        """
+        super().__init__(message)
 
 
 class RedirectWarning(Exception):
     """ Warning with a possibility to redirect the user instead of simply
-    diplaying the warning message.
+    displaying the warning message.
 
-    Should receive as parameters:
-      :param int action_id: id of the action where to perform the redirection
-      :param string button_text: text to put on the button that will trigger
-          the redirection.
+    :param str message: exception message and frontend modal content
+    :param int action_id: id of the action where to perform the redirection
+    :param str button_text: text to put on the button that will trigger
+        the redirection.
+    :param dict additional_context: parameter passed to action_id.
+           Can be used to limit a view to active_ids for example.
     """
-    # using this RedirectWarning won't crash if used as an except_orm
-    @property
-    def name(self):
-        return self.args[0]
+    def __init__(self, message, action, button_text, additional_context=None):
+        super().__init__(message, action, button_text, additional_context)
 
 
-class AccessDenied(Exception):
-    """ Login/password error. no traceback.
-    Example: When you try to log with a wrong password."""
-    def __init__(self, message='Access denied'):
-        super(AccessDenied, self).__init__(message)
-        self.with_traceback(None)
-        self.__cause__ = None
-        self.traceback = ('', '', '')
+class AccessDenied(UserError):
+    """Login/password error.
+
+    .. note::
+
+        Traceback only visible in the logs.
+
+    .. admonition:: Example
+
+        When you try to log with a wrong password.
+    """
+    http_status = 403  # Forbidden
+    conceal_debug_traceback = True
+
+    def __init__(self, message="Access Denied"):
+        super().__init__(message)
 
 
-class AccessError(except_orm):
-    """ Access rights error.
-    Example: When you try to read a record that you are not allowed to."""
-    def __init__(self, msg):
-        super(AccessError, self).__init__(msg)
+class AccessError(UserError):
+    """Access rights error.
+
+    .. admonition:: Example
+
+        When you try to read a record that you are not allowed to.
+    """
+    http_status = 403  # Forbidden
 
 
-class CacheMiss(except_orm, KeyError):
-    """ Missing value(s) in cache.
-    Example: When you try to read a value in a flushed cache."""
+class CacheMiss(KeyError):
+    """Missing value(s) in cache.
+
+    .. admonition:: Example
+
+        When you try to read a value in a flushed cache.
+    """
+
     def __init__(self, record, field):
-        super(CacheMiss, self).__init__("%s.%s" % (str(record), field.name))
+        super().__init__("%r.%s" % (record, field.name))
 
 
-class MissingError(except_orm):
-    """ Missing record(s).
-    Example: When you try to write on a deleted record."""
-    def __init__(self, msg):
-        super(MissingError, self).__init__(msg)
+class MissingError(UserError):
+    """Missing record(s).
 
+    .. admonition:: Example
 
-class ValidationError(except_orm):
-    """ Violation of python constraints
-    Example: When you try to create a new user with a login which already exist in the db."""
-    def __init__(self, msg):
-        super(ValidationError, self).__init__(msg)
-
-
-class DeferredException(Exception):
-    """ Exception object holding a traceback for asynchronous reporting.
-
-    Some RPC calls (database creation and report generation) happen with
-    an initial request followed by multiple, polling requests. This class
-    is used to store the possible exception occuring in the thread serving
-    the first request, and is then sent to a polling request.
-
-    ('Traceback' is misleading, this is really a exc_info() triple.)
+        When you try to write on a deleted record.
     """
-    def __init__(self, msg, tb):
-        self.message = msg
-        self.traceback = tb
+    http_status = 404  # Not Found
 
 
-class QWebException(Exception):
-    pass
+class LockError(UserError):
+    """Record(s) could not be locked.
+
+    .. admonition:: Example
+
+        Code tried to lock records, but could not succeed.
+    """
+    http_status = 409  # Conflict
+
+
+class ValidationError(UserError):
+    """Violation of python constraints.
+
+    .. admonition:: Example
+
+        When you try to create a new user with a login which already exist in the db.
+    """
+
+
+class ConcurrencyError(Exception):
+    """
+    Signal that two concurrent transactions tried to commit something
+    that violates some constraint. Signal that the transaction that
+    failed should be retried after a short delay, see
+    :func:`~odoo.service.model.retrying`.
+
+    This exception is low-level and has very few use cases, it should
+    only be used if all alternatives are deemed worse.
+    """

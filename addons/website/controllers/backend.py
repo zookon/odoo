@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import http
 from odoo.http import request
+from odoo.addons.web.controllers.home import Home
 
 
 class WebsiteBackend(http.Controller):
 
-    @http.route('/website/fetch_dashboard_data', type="json", auth='user')
-    def fetch_dashboard_data(self, website_id, date_from, date_to):
+    @http.route('/website/fetch_dashboard_data', type="jsonrpc", auth='user', replica=True)
+    def fetch_dashboard_data(self, website_id=None):
         Website = request.env['website']
         has_group_system = request.env.user.has_group('base.group_system')
         has_group_designer = request.env.user.has_group('website.group_website_designer')
@@ -17,52 +17,47 @@ class WebsiteBackend(http.Controller):
                 'system': has_group_system,
                 'website_designer': has_group_designer
             },
-            'currency': request.env.user.company_id.currency_id.id,
-            'dashboards': {
-                'visits': {},
-            }
+            'dashboards': {}
         }
 
-        current_website = website_id and Website.browse(website_id) or Website.get_current_website()
-        dashboard_data['websites'] = request.env['website'].search_read([], ['id', 'name'])
+        current_website = website_id and Website.browse(website_id) or self.env.ref('base.default_website')
+        multi_website = request.env.user.has_group('website.group_multi_website')
+        websites = multi_website and request.env['website'].search([]) or current_website
+        dashboard_data['websites'] = websites.read(['id', 'name'])
         for website in dashboard_data['websites']:
             if website['id'] == current_website.id:
                 website['selected'] = True
 
         if has_group_designer:
-            config = request.env['res.config.settings'].sudo().create({})
-            config.website_id = current_website
-            if config.has_google_analytics_dashboard:
-                dashboard_data['dashboards']['visits'] = dict(
-                    ga_client_id=config.google_management_client_id or '',  # void string instead of stringified False
-                    ga_analytics_key=config.google_analytics_key or '',  # void string instead of stringified False
-                )
+            dashboard_data['dashboards']['plausible_share_url'] = current_website._get_plausible_share_url()
         return dashboard_data
 
-    @http.route('/website/dashboard/set_ga_data', type='json', auth='user')
-    def website_set_ga_data(self, website_id, ga_client_id, ga_analytics_key):
-        if not request.env.user.has_group('base.group_system'):
-            return {
-                'error': {
-                    'title': 'Access Error',
-                    'message': 'You do not have sufficient rights to perform that action.',
-                }
-            }
-        if not ga_analytics_key or not ga_client_id.endswith('.apps.googleusercontent.com'):
-            return {
-                'error': {
-                    'title': 'Incorrect Client ID / Key',
-                    'message': 'The Google Analytics Client ID or Key you entered seems incorrect.',
-                }
-            }
-        Website = request.env['website']
-        current_website = website_id and Website.browse(website_id) or Website.get_current_website()
+    @http.route('/website/iframefallback', type="http", auth='user', website=True, replica=True)
+    def get_iframe_fallback(self):
+        return request.render('website.iframefallback')
 
-        request.env['res.config.settings'].create({
-            'has_google_analytics': True,
-            'has_google_analytics_dashboard': True,
-            'google_management_client_id': ga_client_id,
-            'google_analytics_key': ga_analytics_key,
-            'website_id': current_website,
-        }).execute()
-        return True
+    @http.route('/website/theme_colors_preview', type="http", auth='user', website=True, replica=True)
+    def get_theme_colors_preview(self):
+        return request.render('website.theme_colors_preview')
+
+
+class WebsiteBackendHome(Home):
+
+    @http.route()
+    def web_client(self, s_action=None, **kw):
+        website_actions = ('website.website_configurator', 'website.website_preview', 'website.action_website_configuration')
+        subpath = kw.get('subpath', '')
+        is_website_action = False
+        if subpath.startswith('action-'):
+            action = subpath[7:]
+            is_website_action = action in website_actions
+            for website_action in website_actions:
+                is_website_action = is_website_action or action == str(self.env['ir.model.data']._xmlid_to_res_id(website_action))
+
+        if (is_website_action
+            and not self.env.context.get('website_id')
+            and (website_id := request.session.get('force_website_id') or self.env.context.get('host_id'))
+            and website_id in self.env['website'].get_all().ids):
+            request.update_context(website_id=website_id)
+
+        return super().web_client(s_action, **kw)

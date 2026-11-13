@@ -1,23 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-<data>
+    <template id="location_barcode_4x7_label">
+        <td t-att-style="label['invisible'] and 'visibility:hidden;'">
+            <div class="o_label_full o_label_4x7">
+                <t t-if="not label.get('invisible')">
+                    <t t-call="product.report_label_contour_marks"/>
+                    <div class="o_label_centering_table">
+                        <div class="o_label_centered_content">
+                            <div class="o_label_name" t-out="label['name']"/>
+                            <div class="o_label_content">
+                                <div class="o_label_barcode_block">
+                                    <t t-call="product.report_label_barcode"
+                                       barcode_size="'width:100%;height:8mm'"/>
+                                    <div class="o_label_barcode_text" t-out="label['barcode_text']"/>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </t>
+            </div>
+        </td>
+    </template>
 
-<template id="assets_common" name="stock_location_barcodes pdf assets" inherit_id="web.report_assets_common">
-    <xpath expr="." position="inside">
-        <link rel="stylesheet" type="text/scss" href="/stock/static/src/scss/report_location_barcode.scss"/>
-    </xpath>
-</template>
-
-<template id="report_location_barcode">
-    <t t-call="web.html_container">
-        <div t-foreach="[docs[x:x+4] for x in xrange(0, len(docs), 4)]" t-as="page_docs" class="page article page_stock_location_barcodes">
-            <t t-foreach="page_docs" t-as="o">
-                <t t-if="o.barcode"><t t-set="content" t-value="o.barcode"/></t>
-                <t t-if="not o.barcode"><t t-set="content" t-value="o.name"/></t>
-                <img class="barcode" t-att-src="'/report/barcode/?type=%s&amp;value=%s&amp;width=%s&amp;height=%s&amp;humanreadable=1' % ('Code128', content, 600, 100)" alt="Barcode"/>
+    <template id="location_barcode_zpl_label">
+^PW376
+^LL297
+^FO5,60^A0N,30,24^FB366,1,0,C^FH^FD<t t-out="name"/>^FS
+        <t t-if="barcode_value">
+^FO5,100^BY3^BCN,110,N,N,N^FH^FD<t t-out="barcode_value"/>^FS
+            <t t-if="label['barcode_text']">
+^FO5,215^A0N,22,17^FB366,1,0,C^FH^FD<t t-out="label['barcode_text']"/>^FS
             </t>
-        </div>
-    </t>
-</template>
-</data>
+        </t>
+    </template>
 </odoo>

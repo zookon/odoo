@@ -3,68 +3,15 @@
 ///
 
 // ------------------------------------------------------------------
-// Caret
-// ------------------------------------------------------------------
-@mixin utils-caret-boilerplate {
-    content: "";
-    display: inline-block;
-    width: 0;
-    height: 0;
-    vertical-align: middle;
-}
-
-// ------------------------------------------------------------------
-// Position absolute
-// ------------------------------------------------------------------
-@mixin o-position-absolute($top: auto, $right: auto, $bottom: auto, $left: auto) {
-    position: absolute;
-    top: $top;
-    left: $left;
-    bottom: $bottom;
-    right: $right;
-}
-
-// ------------------------------------------------------------------
-// Position sticky
-// ------------------------------------------------------------------
-@mixin o-position-sticky($top: auto, $right: auto, $bottom: auto, $left: auto) {
-    position: -webkit-sticky;
-    position: sticky;
-    top: $top;
-    left: $left;
-    bottom: $bottom;
-    right: $right;
-}
-
-// ------------------------------------------------------------------
 // Text overflow
 // ------------------------------------------------------------------
-@mixin o-text-overflow($display: inline-block, $max-width: 100%) {
+@mixin o-text-overflow($display: inline-block, $max-width: 100%, $vertical-align: top) {
     display: $display;
     max-width: $max-width;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    vertical-align: top; // To update display context changed by overflow:hidden
-}
-
-// ------------------------------------------------------------------
-// Transparent background color
-// ------------------------------------------------------------------
-@mixin o-transparent-background-color($alpha: 1, $color: white) {
-    // convert hex to rgba for applying opacity
-    background-color: rgba(red($color), green($color), blue($color), $alpha);
-}
-
-// ------------------------------------------------------------------
-// Hovering effects
-// ------------------------------------------------------------------
-@mixin o-hover-opacity($default-opacity: 0.5, $hover-opacity: 1) {
-    opacity: $default-opacity;
-
-    &:hover, &:focus, &.focus {
-        opacity: $hover-opacity;
-    }
+    vertical-align: $vertical-align; // To update display context changed by overflow:hidden
 }
 
 //------------------------------------------------------------------------------
@@ -74,9 +21,80 @@
 @function luma($color) {
     @return ((red($color) * .299) + (green($color) * .587) + (blue($color) * .114)) / 255 * 100%;
 }
-@function o-get-most-contrast($color, $c1, $c2) {
-    $luma: luma($color);
-    @return if(abs($luma - luma($c1)) > abs($luma - luma($c2)), $c1, $c2);
+
+// Function which returns if a color has contrast enough in comparaison to
+// another given color.
+@function has-enough-contrast($color1, $color2, $threshold: 500) {
+    $r: (max(red($color1), red($color2))) - (min(red($color1), red($color2)));
+    $g: (max(green($color1), green($color2))) - (min(green($color1), green($color2)));
+    $b: (max(blue($color1), blue($color2))) - (min(blue($color1), blue($color2)));
+    $sum-rgb: $r + $g + $b;
+    @return ($sum-rgb >= $threshold);
+}
+
+// Function which transforms a color to increase its contrast in comparison to
+// another given color.
+@function increase-contrast($color1, $color2) {
+    @if not $color1 or not $color2 {
+        @return null;
+    }
+    $luma-c1: luma($color1);
+    $luma-c2: luma($color2);
+    $lightness-c1: lightness($color1);
+    $lightness-inc: if($luma-c1 < $luma-c2, -1%, 1%);
+    $i: 0;
+    // Max 25% lightness change even if not contrasted enough
+    @while ($lightness-c1 > 0.1% and $lightness-c1 < 99.9% and $i < 25 and not has-enough-contrast($color1, $color2)) {
+        $color1: adjust-color($color1, $lightness: $lightness-inc);
+        $lightness-c1: $lightness-c1 + $lightness-inc;
+        $i: $i + 1;
+    }
+    @return $color1;
+}
+
+// Extend placeholder which adds a chess-like background below the color and
+// image of an element to preview the transparency of that color and image.
+// This is done thanks to both ::before and ::after elements so they must both
+// be available.
+%o-preview-alpha-background {
+    position: relative;
+    z-index: 0;
+
+    &::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        z-index: -1;
+        background-image: url('/web/static/img/transparent.png');
+        background-size: var(--PreviewAlphaBg-background-size, 10px) auto;
+        border-radius: inherit;
+    }
+    &::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        z-index: -1;
+        background: inherit; // Inherit all background properties
+        border-radius: inherit;
+        box-shadow: inherit;
+    }
+}
+
+// This function checks if the color ($color) has enough contrast to be visible
+// on a background with the color ($background-color). If not, it is replaced
+// with $light (if too dark) or $dark (if too light).
+@function adjust-color-to-background($color, $background-color, $light: $color-contrast-light, $dark: $color-contrast-dark) {
+    @return if(
+        color-contrast($color) == $color-contrast-dark,
+        color-contrast($background-color, $color, $dark),
+        color-contrast($background-color, $light, $color)
+    );
 }
 
 // ------------------------------------------------------------------
@@ -89,50 +107,18 @@
     padding-left: $left;
 }
 
-// ------------------------------------------------------------------
-// Caret
-// ------------------------------------------------------------------
-@mixin o-caret-down($caret-width: $caret-width) {
-    @include utils-caret-boilerplate;
-    border-bottom: 0;
-    border-left: $caret-width solid transparent;
-    border-right: $caret-width solid transparent;
-    border-top: $caret-width solid;
-    -moz-transform: scale(0.9999); // Smooth the caret on firefox
-}
-@mixin o-caret-up($caret-width: $caret-width) {
-    @include utils-caret-boilerplate;
-    border-bottom: $caret-width solid;
-    border-left: $caret-width solid transparent;
-    border-right: $caret-width solid transparent;
-    border-top: 0;
-    -moz-transform: scale(0.9999); // Smooth the caret on firefox
-}
-@mixin o-caret-left($caret-width: $caret-width) {
-    @include utils-caret-boilerplate;
-    border-bottom: $caret-width solid transparent;
-    border-left: 0;
-    border-right: $caret-width solid;
-    border-top: $caret-width solid transparent;
-    -moz-transform: scale(0.9999); // Smooth the caret on firefox
-}
-@mixin o-caret-right($caret-width: $caret-width) {
-    @include utils-caret-boilerplate;
-    border-bottom: $caret-width solid transparent;
-    border-left: $caret-width solid;
-    border-right: 0;
-    border-top: $caret-width solid transparent;
-    -moz-transform: scale(0.9999); // Smooth the caret on firefox
-}
+//-------------------------------------------------------------------
+// Cursor
+//-------------------------------------------------------------------
 
-// ------------------------------------------------------------------
-// Hovering effects
-// ------------------------------------------------------------------
-@mixin o-hover-text-color($default-color: $body-color, $hover-color: $link-color) {
-    color: $default-color;
+@mixin o-field-pointer() {
+    // Force `pointer`cursor on  inputs and labels
+    .form-check-input:not(:disabled), .form-check-input:not(:disabled) + label {
+        cursor: pointer;
+    }
 
-    &:hover, &:focus, &.focus {
-        color: $hover-color;
+    &:hover, &:hover .form-check-input:not(:disabled) {
+        border-color: $form-check-input-checked-border-color;
     }
 }
 
@@ -141,24 +127,57 @@
 // ------------------------------------------------------------------
 @mixin o-btn-link-variant($color, $color-active) {
     text-transform: none;
-    @include o-hover-text-color($default-color: $color, $hover-color: $color-active);
+    color: $color;
+
+    &:hover, &:focus, &.focus {
+        color: $color-active;
+    }
 
     &, &:hover, &:focus, &:active, &.active {
-        border-color: transparent;
-        background-color: transparent;
+        border-color: transparent !important;
+        background-color: transparent !important;
+    }
+
+    &:hover:active:focus {
+        box-shadow: none;
+        outline: none;
     }
 
     &.text-muted, .text-muted {
-        @include o-hover-opacity;
-        @include o-hover-text-color($default-color: $text-muted, $hover-color: $color-active);
+        color: $text-muted;
+
+        &:hover, &:focus, &.focus {
+            color: $color-active;
+        }
     }
 }
 
-// Function to remove all falsy values of a map
+// Odoo defines a limited Noto font-family for a small variety of unicode
+// characters that are not necessary defined in the user system or even defined
+// but not properly readable. This function allows to add this font family in a
+// given font list.
+//
+// @param {list} $font - a list of font names ending with the generic one.
+// @param {integer} [$index] - the position where to add the support font, if
+//        not given, it will be placed before the generic one.
+@function o-add-unicode-support-font($font, $index: false) {
+    $-with-support-font: ();
+    @for $i from 1 through length($font) {
+        $-part: nth($font, $i);
+        @if $i == $index or $-part == serif or $-part == sans-serif {
+            $-with-support-font: append($-with-support-font, 'Odoo Unicode Support Noto', $separator: comma);
+        }
+        $-with-support-font: append($-with-support-font, $-part, $separator: comma);
+    }
+
+    @return $-with-support-font;
+}
+
+// Function to remove all null values of a map.
 @function o-map-omit($map) {
     $-map: ();
     @each $key, $value in $map {
-        @if $value {
+        @if $value != null {
             $-map: map-merge($-map, (
                 $key: $value,
             ));
@@ -167,145 +186,91 @@
     @return $-map;
 }
 
+// Function to get an element of a list with a default value in case the index
+// is out-of-bounds; also return that value if the retrieved value is null.
+@function o-safe-nth($list, $index, $default: null) {
+    $value: if($index > 0 and $index <= length($list), nth($list, $index), null);
+    @return if($value != null, $value, $default);
+}
+
+// Function to get an element of a map with a default value in case the key
+// does not exist; also return that value if the retrieved value is null.
+@function o-safe-get($map, $key, $default: null) {
+    $value: map-get($map, $key);
+    @return if($value != null, $value, $default);
+}
+
 // ------- Kanban grouped mixins -------
-@mixin o-kanban-icon($base-opacity: 0.5) {
-    display: block;
-    text-align: center;
-    color: $o-main-text-color;
-    font-size: $font-size-sm;
-    cursor: pointer;
-    @include o-hover-opacity($base-opacity);
-}
-@mixin o-kanban-tag-color {
-    @for $size from 1 through length($o-colors) {
-        // Note: the first color is supposed to be invisible if there is a color
-        // field but it is used as a default color when there is no color field
-        &.o_tag_color_#{$size - 1} span {
-            background-color: nth($o-colors, $size);
-        }
-    }
-}
 @mixin o-kanban-record-color {
     @for $size from 2 through length($o-colors) {
         // Note: the first color is not defined as it is the 'no color' for kanban
-        .oe_kanban_color_#{$size - 1}::after {
-            background-color: nth($o-colors, $size);
+        .o_kanban_color_#{$size - 1} {
+            border-left-color: nth($o-colors, $size);
+            &:after {
+                background-color: nth($o-colors, $size);
+            }
         }
     }
 }
-@mixin o-kanban-slim-col {
-    position: relative;
-    flex: 0 0 auto;
-    margin: 0;
-    padding: 0 floor($o-kanban-group-padding * 0.7);
-    cursor: pointer;
-}
-@mixin o-kanban-header-title {
-    display: flex;
-    align-items: center;
-    height: $o-kanban-header-title-height;
-    line-height: 2.2;
-    color: $headings-color;
-}
-@mixin o-kanban-v-title {
-    @include o-position-absolute($o-kanban-inside-vgutter * 2, $left: floor(-$o-kanban-inside-vgutter * 1.2));
-    transform-origin: left bottom 0;
-    transform: rotate(90deg);
-    overflow: visible;
-    white-space: nowrap;
-    font-size: 15px;
-}
 
 // ------- Kanban records mixins -------
-@mixin o-kanban-record-title($font-size) {
+@mixin o-kanban-record-title($font-size: $h5-font-size) {
     color: $headings-color;
     font-size: $font-size;
     font-weight: 500;
     margin-bottom: 0;
     margin-top: 0;
 }
-@mixin o-kanban-dropdown($padding-base: $o-kanban-inside-vgutter) {
-    margin: -1px -1px auto auto; // compensate border
-    padding: $padding-base/2 $padding-base;
-    border: 1px solid transparent;
-    border-bottom: none;
-    vertical-align: top;
-    color: $body-color;
 
-    &:hover {
-        color: $headings-color;
-    }
-    &:focus, &:active, &:focus:active {
-        outline: none;
-    }
-}
-@mixin o-kanban-dropdown-open {
-    position: relative;
-    background: white;
-    border-color: gray('400');
-    z-index: $zindex-dropdown + 1;
-}
-@mixin o-kanban-dropdown-menu {
-    @include o-position-absolute($right: -1px);
-    margin-top: -1px;
-    border-color: gray('400');
-}
-@mixin o-kanban-colorpicker {
-    max-width: 150px;
-    padding: 3px ($o-dropdown-hpadding - $o-kanban-inner-hmargin) 3px $o-dropdown-hpadding;
+// ----------------------------------------------------------------------------
+// CSS Variables
+// ----------------------------------------------------------------------------
 
-    > li {
-        display: inline-block;
-        margin: $o-kanban-inner-hmargin $o-kanban-inner-hmargin 0 0;
-        border: 1px solid white;
-        box-shadow: 0 0 0 1px gray('300');
-
-        > a {
-            display: block;
-
-            &::after {
-                content: "";
-                display: block;
-                width: 20px;
-                height: 15px;
-            }
-        }
-
-        // No Color
-        &:first-child > a {
-            position: relative;
-            &::before {
-                content: "";
-                @include o-position-absolute(-2px, $left: 10px);
-                display: block;
-                width: 1px;
-                height: 20px;
-                transform: rotate(45deg);
-                background-color: red;
-            }
-            &::after {
-                background-color: white;
-            }
+// Print a document property the right way (depending on the type of the
+// printed variable).
+@mixin print-variable($key, $value) {
+    @if $value != null {
+        $-type: type-of($value);
+        @if $-type == 'string' and str-index($value, 'var(') != 1 {
+            --#{$key}: '#{$value}';
+        } @else if $-type == 'list' {
+            --#{$key}: #{inspect($value)};
+        } @else {
+            --#{$key}: #{$value};
         }
     }
 }
 
-// Emulate dropdown links
-@mixin o-kanban-dashboard-dropdown-link($link-padding-gap: $o-dropdown-hpadding) {
-    padding: 0;
 
-    > a {
-        margin: auto auto auto (-$link-padding-gap);
-        padding: 3px $link-padding-gap;
-        color: $body-color;
-        display: block;
+// ----------------------------------------------------------------------------
+// Webkit Search Cancel Button
+// ----------------------------------------------------------------------------
+// Define the webkit cancel button used for search inputs to match bootstrap
+// btn-close style with a color parameter to allow contextual override.
 
-        &:hover {
-            background-color: gray('300');
-            color: $headings-color;
-        }
-    }
-    &:last-child {
-        margin-bottom: 5px;
+@mixin o-search-cancel-button($search-cancel-button-color, $button-height: $font-size-sm) {
+    &::-webkit-search-cancel-button {
+        -webkit-appearance: none;
+        content: escape-svg(url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='#{$search-cancel-button-color}'><path d='M.293.293a1 1 0 0 1 1.414 0L8 6.586 14.293.293a1 1 0 1 1 1.414 1.414L9.414 8l6.293 6.293a1 1 0 0 1-1.414 1.414L8 9.414l-6.293 6.293a1 1 0 0 1-1.414-1.414L6.586 8 .293 1.707a1 1 0 0 1 0-1.414z'/></svg>"));
+        height: $button-height;
+        cursor: pointer;
     }
 }
+
+// ----------------------------------------------------------------------------
+// Input type number
+// ----------------------------------------------------------------------------
+// Remove arrows/spinners from input type number.
+@mixin o-input-number-no-arrows() {
+    // => Chrome, Safari, Edge, Opera
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+
+    // => Firefox
+    input[type=number] {
+        -moz-appearance: textfield;
+    }
+};

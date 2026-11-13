@@ -2,38 +2,42 @@
 <odoo>
 
     <!-- iap Client Account Views -->
-    <record id="iap_account_view_form" model="ir.ui.view">
-        <field name="name">iap.account.form</field>
+    <record id="iap_account_view_tree" model="ir.ui.view">
+        <field name="name">iap.account.list</field>
         <field name="model">iap.account</field>
         <field name="arch" type="xml">
-            <form string="IAP Account">
-                <sheet>
-                    <group name="account" string="Account Information">
-                        <field name="service_name"/>
-                        <field name="company_id"/>
-                        <field name="account_token"/>
-                    </group>
-                </sheet>
-            </form>
+            <list string="In-App Purchase Accounts" duplicate="false" multi_edit="1" editable="bottom">
+                <field name="name"/>
+                <field name="service_id"/>
+                <field name="description"/>
+                <field name="company_ids" widget="many2many_tags"/>
+                <field name="balance"/>
+                <field name="account_token" optional="hidden"/>
+                <button name="action_manage" type="object" string="Manage" class="btn btn-primary" icon="settings"/>
+                <button name="action_rotate_token" type="object" string="Rotate" class="btn btn-secondary" icon="security"
+                        confirm="This is useful if you think it may have leaked. It will also deactivate auto-refill if set. Are you sure to rotate your IAP token? "
+                />
+            </list>
         </field>
     </record>
-    <record id="iap_account_view_tree" model="ir.ui.view">
-        <field name="name">iap.account.tree</field>
-        <field name="model">iap.account</field>
+    <record id="iap_service_pack_view_tree" model="ir.ui.view">
+        <field name="name">iap.service.pack.list</field>
+        <field name="model">iap.service.pack</field>
         <field name="arch" type="xml">
-            <tree string="IAP Accounts">
-                <field name="service_name"/>
-                <field name="company_id"/>
-                <field name="account_token" readonly="1"/>
-            </tree>
+            <list string="In-App Purchase Service Packs" duplicate="false">
+                <field name="name"/>
+                <field name="credit"/>
+                <field name="price"/>
+                <field name="service_id"/>
+            </list>
         </field>
     </record>
     <!-- Actions -->
     <record id="iap_account_action" model="ir.actions.act_window">
-        <field name="name">IAP Account</field>
+        <field name="name">In-App Purchase Accounts</field>
         <field name="res_model">iap.account</field>
-        <field name='view_type'>form</field>
-        <field name='view_mode'>tree,form</field>
+        <field name="path">iap-accounts</field>
+        <field name='view_mode'>list</field>
     </record>
 
     <!-- Menus -->
@@ -41,11 +45,11 @@
         id="iap_root_menu"
         name="IAP"
         parent="base.menu_custom"
-        sequence="4"/>
+        sequence="5"/>
 
     <menuitem
         id="iap_account_menu"
-        name="IAP Accounts"
+        name="In-App Purchase Accounts"
         parent="iap_root_menu"
         action="iap_account_action"
         sequence="10"/>

@@ -1,154 +1,185 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # * account_tax_python
-# 
+#
 # Translators:
-# Jeffery CHEN Fan <jeffery9@gmail.com>, 2016
-# Gary Wei <Gary.wei@elico-corp.com>, 2018
-# Yuan Xulei <hi@yxl.name>, 2018
-# 老窦 北京 <2662059195@qq.com>, 2018
+# Martin Trigaux, 2022
+#
+# "Tiffany Chang (tic)" <tic@odoo.com>, 2025.
+# "Chloe Wang (chwa)" <chwa@odoo.com>, 2025.
+# Weblate <noreply-mt-weblate@weblate.org>, 2025.
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server saas~11.4\n"
+"Project-Id-Version: Odoo Server saas~14.4\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2018-08-02 09:12+0000\n"
-"PO-Revision-Date: 2018-08-02 09:12+0000\n"
-"Last-Translator: 老窦 北京 <2662059195@qq.com>, 2018\n"
-"Language-Team: Chinese (China) (https://www.transifex.com/odoo/teams/41243/zh_CN/)\n"
+"POT-Creation-Date: 2026-08-28 17:41+0000\n"
+"PO-Revision-Date: 2026-08-31 16:13+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Chinese (Simplified Han script) <https://translate.odoo.com/"
+"projects/odoo-s19-4/account_tax_python/zh_Hans/>\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: zh_CN\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Weblate 2026.8.1\n"
 
 #. module: account_tax_python
-#: model:ir.model.fields,field_description:account_tax_python.field_account_tax__python_applicable
-#: model:ir.model.fields,field_description:account_tax_python.field_account_tax_template__python_applicable
-msgid "Applicable Code"
-msgstr "适用代码"
-
-#. module: account_tax_python
-#: model:ir.model.fields,help:account_tax_python.field_account_tax__python_compute
+#: model:ir.model.fields,help:account_tax_python.field_account_tax__amount_type
 msgid ""
-"Compute the amount of the tax by setting the variable 'result'.\n"
 "\n"
-":param base_amount: float, actual amount on which the tax is applied\n"
+"    - Group of Taxes: The tax is a set of sub taxes.\n"
+"    - Fixed: The tax amount stays the same whatever the price.\n"
+"    - Percentage: The tax amount is a % of the price:\n"
+"        e.g 100 * (1 + 10%) = 110 (not price included)\n"
+"        e.g 110 / (1 + 10%) = 100 (price included)\n"
+"    - Percentage Tax Included: The tax amount is a division of the price:\n"
+"        e.g 180 / (1 - 10%) = 200 (not price included)\n"
+"        e.g 200 * (1 - 10%) = 180 (price included)\n"
+"        "
+msgstr ""
+"\n"
+"    - “税组”为一组子税项的统称。\n"
+"    - 固定税项：不论价钱多少，税款金额维持一样。\n"
+"    - 以百分比计算：税款为价钱的某个百分比：\n"
+"        例： 100 × (1 + 10%) = 110 （不包含价钱）\n"
+"        例： 110 ÷ (1 + 10%) = 100 （包含价钱）\n"
+"    - 以连税百分比计算：税款由总价钱除以某个百分比得出：\n"
+"        例： 180 ÷ (1 − 10%) = 200 （不包含价钱）\n"
+"        例： 200 × (1 − 10%) = 180 （包含价钱）\n"
+"        "
+
+#. module: account_tax_python
+#: model:ir.module.module,description:base.module_account_tax_python
+msgid ""
+"\n"
+"A tax defined as python code consists of two snippets of python code which "
+"are executed in a local environment containing data such as the unit price, "
+"product or partner.\n"
+"\n"
+"\"Applicable Code\" defines if the tax is to be applied.\n"
+"\n"
+"\"Python Code\" defines the amount of the tax.\n"
+msgstr ""
+
+#. module: account_tax_python
+#: model:ir.model.fields,help:account_tax_python.field_account_tax__formula
+msgid ""
+"Compute the amount of the tax.\n"
+"\n"
+":param base: float, actual amount on which the tax is applied\n"
 ":param price_unit: float\n"
 ":param quantity: float\n"
-":param company: res.company recordset singleton\n"
-":param product: product.product recordset singleton or None\n"
-":param partner: res.partner recordset singleton or None"
+":param product: A object representing the product\n"
 msgstr ""
-"通过设置变量‘结果’来计算税的总额\n"
+"计算税款。\n"
 "\n"
-":参数 base_amount: 浮点型, 税的实际额度\n"
-":参数 price_unit: 浮点型\n"
-":参数 quantity: 浮点型\n"
-":参数 company: res.company 记录单\n"
-":参数 product: product.product 记录单或者空\n"
-":参数 partner: res.partner 记录单或者空"
+":param base: 浮点数字，计税用的实际金额\n"
+":param price_unit: 浮点数字\n"
+":param quantity: 浮点数字\n"
+":param product: 物件(object)，代表有关产品\n"
 
 #. module: account_tax_python
-#: model:ir.model.fields,help:account_tax_python.field_account_tax_template__python_compute
-msgid ""
-"Compute the amount of the tax by setting the variable 'result'.\n"
-"\n"
-":param base_amount: float, actual amount on which the tax is applied\n"
-":param price_unit: float\n"
-":param quantity: float\n"
-":param product: product.product recordset singleton or None\n"
-":param partner: res.partner recordset singleton or None"
+#: model:ir.model.fields.selection,name:account_tax_python.selection__account_tax__amount_type__code
+msgid "Custom Formula"
+msgstr "自定义公式"
+
+#. module: account_tax_python
+#: model:ir.module.module,shortdesc:base.module_account_tax_python
+msgid "Define Taxes as Python Code"
 msgstr ""
-"通过设置变量‘结果’来计算税的总额\n"
-"\n"
-":参数 base_amount: 浮点型, 税的实际额度\n"
-":参数 price_unit: 浮点型\n"
-":参数 quantity: 浮点型\n"
-":参数 company: res.company 记录单\n"
-":参数 product: product.product 记录单或者空\n"
-":参数 partner: res.partner 记录单或者空"
 
 #. module: account_tax_python
-#: model:ir.model.fields,help:account_tax_python.field_account_tax__python_applicable
-msgid ""
-"Determine if the tax will be applied by setting the variable 'result' to True or False.\n"
-"\n"
-":param price_unit: float\n"
-":param quantity: float\n"
-":param company: res.company recordset singleton\n"
-":param product: product.product recordset singleton or None\n"
-":param partner: res.partner recordset singleton or None"
+#: model:ir.model.fields,field_description:account_tax_python.field_account_tax__display_name
+msgid "Display Name"
+msgstr "显示名称"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Field '%s' is not accessible"
+msgstr "字段'%s'不可访问"
+
+#. module: account_tax_python
+#: model:ir.model.fields,field_description:account_tax_python.field_account_tax__formula
+msgid "Formula"
+msgstr "公式"
+
+#. module: account_tax_python
+#: model:ir.model.fields,field_description:account_tax_python.field_account_tax__formula_decoded_info
+msgid "Formula Decoded Info"
+msgstr "公式解码信息"
+
+#. module: account_tax_python
+#: model:ir.model.fields,field_description:account_tax_python.field_account_tax__id
+msgid "ID"
+msgstr "识别号"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Invalid AST node: %s"
+msgstr "无效 AST 节点：%s"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Invalid formula"
+msgstr "无效公式"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Kwargs are not allowed"
+msgstr "不允许使用 Kwargs"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Only int, float or None are allowed as constant values"
+msgstr "只允许使用 int、float 或 None 作为常量值"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/models/account_tax.py:0
+msgid "Only primitive types are allowed in python tax formula context."
+msgstr "在 python 税收公式上下文中只允许使用原始类型。"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Only product['string'] or uom['string'] read-access is allowed"
 msgstr ""
-"通过设置变量‘结果’的真或假来决定是否计算税的额度\n"
-"\n"
-":参数 price_unit: 浮点型\n"
-":参数 quantity: 浮点型\n"
-":参数 company: res.company 记录单\n"
-":参数 product: product.product 记录单或者空\n"
-":参数 partner: res.partner 记录单或者空"
 
 #. module: account_tax_python
-#: model:ir.model.fields,help:account_tax_python.field_account_tax_template__python_applicable
-msgid ""
-"Determine if the tax will be applied by setting the variable 'result' to True or False.\n"
-"\n"
-":param price_unit: float\n"
-":param quantity: float\n"
-":param product: product.product recordset singleton or None\n"
-":param partner: res.partner recordset singleton or None"
-msgstr ""
-"通过设置变量‘结果’的真或假来决定是否计算税的额度\n"
-"\n"
-":参数 price_unit: 浮点型\n"
-":参数 quantity: 浮点型\n"
-":参数 company: res.company 记录单\n"
-":参数 product: product.product 记录单或者空\n"
-":参数 partner: res.partner 记录单或者空"
-
-#. module: account_tax_python
-#: selection:account.tax,amount_type:0
-#: selection:account.tax.template,amount_type:0
-msgid "Fixed"
-msgstr "固定"
-
-#. module: account_tax_python
-#: selection:account.tax,amount_type:0
-#: selection:account.tax.template,amount_type:0
-msgid "Group of Taxes"
-msgstr "税组"
-
-#. module: account_tax_python
-#: selection:account.tax,amount_type:0
-#: selection:account.tax.template,amount_type:0
-msgid "Percentage of Price"
-msgstr "价格百分比"
-
-#. module: account_tax_python
-#: selection:account.tax,amount_type:0
-#: selection:account.tax.template,amount_type:0
-msgid "Percentage of Price Tax Included"
-msgstr "含税价格百分比"
-
-#. module: account_tax_python
-#: selection:account.tax,amount_type:0
-#: selection:account.tax.template,amount_type:0
-#: model:ir.model.fields,field_description:account_tax_python.field_account_tax__python_compute
-#: model:ir.model.fields,field_description:account_tax_python.field_account_tax_template__python_compute
-msgid "Python Code"
-msgstr "Python 代码"
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Only read access to identifiers is allowed"
+msgstr "只允许读取标识符"
 
 #. module: account_tax_python
 #: model:ir.model,name:account_tax_python.model_account_tax
 msgid "Tax"
-msgstr "税金"
+msgstr "税项"
 
 #. module: account_tax_python
 #: model:ir.model.fields,field_description:account_tax_python.field_account_tax__amount_type
-#: model:ir.model.fields,field_description:account_tax_python.field_account_tax_template__amount_type
 msgid "Tax Computation"
-msgstr "税计算"
+msgstr "税费计算"
 
 #. module: account_tax_python
-#: model:ir.model,name:account_tax_python.model_account_tax_template
-msgid "Templates for Taxes"
-msgstr "税金模板"
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Unknown function call"
+msgstr "未知函数调用"
+
+#. module: account_tax_python
+#. odoo-python
+#: code:addons/account_tax_python/tools/formula_utils.py:0
+msgid "Unknown identifier: %s"
+msgstr "未知标识符：%s"
+
+#. module: account_tax_python
+#: model:ir.module.module,summary:base.module_account_tax_python
+msgid "Use python code to define taxes"
+msgstr ""

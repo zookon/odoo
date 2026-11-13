@@ -1,17 +1,98 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import api, fields, models
+from odoo.fields import Domain
 
 
 class ResPartner(models.Model):
-    _inherit = 'res.partner'
+    _inherit = "res.partner"
 
-    last_website_so_id = fields.Many2one('sale.order', compute='_compute_last_website_so_id', string='Last Online Sales Order')
+    wishlist_ids = fields.One2many(
+        string="Wishlist",
+        comodel_name="product.wishlist",
+        inverse_name="partner_id",
+        domain=[("active", "=", True)],
+    )
 
-    @api.multi
-    def _compute_last_website_so_id(self):
-        SaleOrder = self.env['sale.order']
-        for partner in self:
-            current_website_so = SaleOrder.search([('partner_id', '=', partner.id)]).filtered(lambda so: so.order_line.mapped('product_id.product_tmpl_id').can_access_from_current_website())
-            partner.last_website_so_id = current_website_so and current_website_so[0]
+    @api.onchange("property_product_pricelist")
+    def _onchange_property_product_pricelist(self):
+        open_order = (
+            self
+            .env["sale.order"]
+            .sudo()
+            .search(
+                [
+                    ("partner_id", "=", self._origin.id),
+                    ("pricelist_id", "=", self._origin.property_product_pricelist.id),
+                    ("pricelist_id", "!=", self.property_product_pricelist.id),
+                    ("website_id", "!=", False),
+                    ("state", "=", "draft"),
+                ],
+                limit=1,
+            )
+        )
+
+        if open_order:
+            return {
+                "warning": {
+                    "title": self.env._("Open Sale Orders"),
+                    "message": self.env._(
+                        "This partner has an open cart. "
+                        "Please note that the pricelist will not be updated on that cart. "
+                        "Also, the cart might not be visible for the customer until you update the"
+                        " pricelist of that cart."
+                    ),
+                }
+            }
+
+    def _get_current_partner(self, *, order_sudo=False, **kwargs):
+        """Override `portal` to get current partner from order_sudo if user is not signed up."""
+        if order_sudo:
+            return (
+                (not order_sudo._is_anonymous_cart() and order_sudo.partner_id)
+                or self.env["res.partner"]  # Avoid returning public user's partner
+            )
+        return super()._get_current_partner(order_sudo=order_sudo, **kwargs)
+
+    def _get_frontend_writable_fields(self):
+        """Override `portal` to make website whitelist fields writable in portal address."""
+        frontend_writable_fields = super()._get_frontend_writable_fields()
+        frontend_writable_fields.update(
+            self.env["ir.model"]._get("res.partner")._get_form_writable_fields().keys()
+        )
+
+        return frontend_writable_fields
+
+    def _needs_address(self, **kwargs):
+        if cart := kwargs.get("order_sudo"):
+            return cart._needs_customer_address()
+        return super()._needs_address(**kwargs)
+
+    def _get_order_fiscal_position_recompute_domain(self):
+        """Return a domain of sale orders for which we should recompute fiscal position after
+        address update."""
+        return Domain([
+            ("state", "=", "draft"),
+            ("website_id", "!=", False),
+            "|",
+            ("partner_id", "in", self.ids),
+            ("partner_shipping_id", "in", self.ids),
+        ])
+
+    def write(self, vals):
+        res = super().write(vals)
+        if {"country_id", "vat", "zip"} & vals.keys() and self:
+            # Recompute fiscal position for open website orders
+            order_fpos_recompute_domain = self._get_order_fiscal_position_recompute_domain()
+            if orders_sudo := self.env["sale.order"].sudo().search(order_fpos_recompute_domain):
+                orders_by_fpos = orders_sudo.grouped("fiscal_position_id")
+                self.env.add_to_compute(orders_sudo._fields["fiscal_position_id"], orders_sudo)
+                if fpos_changed := orders_sudo.filtered(
+                    lambda so: so not in orders_by_fpos.get(so.fiscal_position_id, [])
+                ):
+                    fpos_changed._recompute_taxes()
+                    # other modules may extend the orders to recompute for
+                    # non-draft orders (for ex. sale_subscription), we need
+                    # to ensure to only recompute prices for draft orders
+                    fpos_changed.filtered(lambda order: order.state == "draft")._recompute_prices()
+        return res

@@ -1,224 +1,837 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from dateutil.relativedelta import relativedelta
+import datetime
+import logging
+import random
 
-from odoo import api, fields, models, _
-from odoo.tools.safe_eval import safe_eval
-from odoo.exceptions import ValidationError
+from ast import literal_eval
+from collections import defaultdict
+from markupsafe import Markup
+
+from odoo import api, exceptions, fields, models, modules, _
+from odoo.addons.crm.models.crm_team_member import MEMBER_MAX_LEAD_ASSIGNMENT_QUOTA
+from odoo.fields import Domain
+from odoo.tools import float_compare, float_round
+
+_logger = logging.getLogger(__name__)
 
 
-class Team(models.Model):
+class CrmTeam(models.Model):
     _name = 'crm.team'
     _inherit = ['mail.alias.mixin', 'crm.team']
+    _description = 'Sales Team'
+    _explanation = "Represents a group of salespeople. It handles the assignment of leads/opportunities and can have its own pipeline stages and goals."
 
     use_leads = fields.Boolean('Leads', help="Check this box to filter and qualify incoming requests as leads before converting them into opportunities and assigning them to a salesperson.")
-    use_opportunities = fields.Boolean('Pipeline', help="Check this box to manage a presales process with opportunities.")
-    alias_id = fields.Many2one('mail.alias', string='Alias', ondelete="restrict", required=True, help="The email address associated with this channel. New emails received will automatically create new leads assigned to the channel.")
-    unassigned_leads_count = fields.Integer(
-        compute='_compute_unassigned_leads_count',
-        string='Unassigned Leads', readonly=True)
-    opportunities_count = fields.Integer(
-        compute='_compute_opportunities',
-        string='Number of open opportunities', readonly=True)
-    opportunities_amount = fields.Integer(
-        compute='_compute_opportunities',
-        string='Opportunities Revenues', readonly=True)
-    dashboard_graph_model = fields.Selection(selection_add=[('crm.lead', 'Pipeline')])
-    dashboard_graph_period_pipeline = fields.Selection([
-        ('week', 'Within a Week'),
-        ('month', 'Within a Month'),
-        ('year', 'Within a Year'),
-    ], string='Expected to Close', help="The time period this channel's dashboard graph will consider.",
-        compute="_compute_dashboard_graph_period_pipeline", inverse="_inverse_dashboard_graph_period_pipeline")
-    dashboard_graph_group_pipeline = fields.Selection([
-        ('day', 'Expected Closing Day'),
-        ('week', 'Expected Closing Week'),
-        ('month', 'Expected Closing Month'),
-        ('user', 'Salesperson'),
-        ('stage', 'Stage'),
-    ], string='Grouping Method', default='day', help="How this channel's dashboard graph will group the results.")
+    use_opportunities = fields.Boolean('Pipeline', default=True, help="Check this box to manage a presales process with opportunities.")
+    alias_id = fields.Many2one(help="The email address associated with this channel. New emails received will automatically create new leads assigned to the channel.")
+    alias_full_name = fields.Char(related='alias_id.alias_full_name')
+    # assignment
+    assignment_enabled = fields.Boolean('Lead Assign', compute='_compute_assignment_enabled')
+    assignment_auto_enabled = fields.Boolean('Auto Assignment', compute='_compute_assignment_enabled')
+    assignment_optout = fields.Boolean('Pause auto assignment')
+    assignment_max = fields.Integer(
+        'Lead Average Capacity', compute='_compute_assignment_max',
+        help='Monthly average leads capacity for all salesmen belonging to the team')
+    assignment_domain = fields.Char(
+        'Assignment Domain', tracking=True,
+        help='Additional filter domain when fetching unassigned leads to allocate to the team.')
+    show_assignment_max = fields.Boolean(compute='_compute_show_assignment_max')
+    # statistics about leads / opportunities / both
+    lead_unassigned_count = fields.Integer(
+        string='# Unassigned Leads', compute='_compute_lead_unassigned_count')
+    lead_all_assigned_month_count = fields.Integer(
+        string='# Leads/Opps assigned this month', compute='_compute_lead_all_assigned_month_count',
+        help="Number of leads and opportunities assigned this last month.")
+    lead_all_assigned_month_exceeded = fields.Boolean('Maximum Leads To Assign', compute="_compute_lead_all_assigned_month_count",
+        help="True if the monthly lead assignment count is greater than the maximum assignment limit, false otherwise."
+    )
+    opportunity_count = fields.Integer(string='Number of assigned opportunities', compute='_compute_opportunity_count')
+    # properties
+    lead_properties_definition = fields.PropertiesDefinition('Lead Properties')
 
-    def _compute_unassigned_leads_count(self):
-        leads_data = self.env['crm.lead'].read_group([
+    @api.depends('crm_team_member_ids.assignment_max')
+    def _compute_assignment_max(self):
+        for team in self:
+            team.assignment_max = sum(member.assignment_max for member in team.crm_team_member_ids)
+
+    @api.depends('crm_team_member_ids.assignment_max')
+    def _compute_show_assignment_max(self):
+        for team in self:
+            show_max = True
+            for member in team.crm_team_member_ids:
+                if member.assignment_max >= MEMBER_MAX_LEAD_ASSIGNMENT_QUOTA:
+                    show_max = False
+
+            team.show_assignment_max = show_max
+
+    def _compute_assignment_enabled(self):
+        assign_enabled = self.env['crm.lead']._is_rule_based_assignment_activated()
+        auto_assign_enabled = False
+        if assign_enabled:
+            assign_cron = self.sudo().env.ref('crm.ir_cron_crm_lead_assign', raise_if_not_found=False)
+            auto_assign_enabled = assign_cron.active if assign_cron else False
+        self.assignment_enabled = assign_enabled
+        self.assignment_auto_enabled = auto_assign_enabled
+
+    def _compute_lead_unassigned_count(self):
+        leads_data = self.env['crm.lead']._read_group([
             ('team_id', 'in', self.ids),
-            ('type', '=', 'lead'),
             ('user_id', '=', False),
-        ], ['team_id'], ['team_id'])
-        counts = {datum['team_id'][0]: datum['team_id_count'] for datum in leads_data}
+        ], ['team_id'], ['__count'])
+        counts = {team.id: count for team, count in leads_data}
         for team in self:
-            team.unassigned_leads_count = counts.get(team.id, 0)
+            team.lead_unassigned_count = counts.get(team.id, 0)
 
-    def _compute_opportunities(self):
-        opportunity_data = self.env['crm.lead'].read_group([
+    def _compute_opportunity_count(self):
+        leads_data = self.env['crm.lead']._read_group([
             ('team_id', 'in', self.ids),
-            ('probability', '<', 100),
             ('type', '=', 'opportunity'),
-        ], ['planned_revenue', 'probability', 'team_id'], ['team_id'])
-        counts = {datum['team_id'][0]: datum['team_id_count'] for datum in opportunity_data}
-        amounts = {datum['team_id'][0]: (datum['planned_revenue'] * datum['probability'] / 100) for datum in opportunity_data}
+        ], ['team_id'], ['__count'])
+        counts = {team.id: count for team, count in leads_data}
         for team in self:
-            team.opportunities_count = counts.get(team.id, 0)
-            team.opportunities_amount = amounts.get(team.id, 0)
+            team.opportunity_count = counts.get(team.id, 0)
 
-    def _compute_dashboard_graph_period_pipeline(self):
-        for channel in self:
-            channel.dashboard_graph_period_pipeline = channel.dashboard_graph_period
-
-    def _inverse_dashboard_graph_period_pipeline(self):
-        for channel in self.filtered(lambda ch: ch.dashboard_graph_model == 'crm.lead'):
-                channel.dashboard_graph_period = channel.dashboard_graph_period_pipeline
-
-    def get_alias_model_name(self, vals):
-        return 'crm.lead'
-
-    def get_alias_values(self):
-        has_group_use_lead = self.env.user.has_group('crm.group_use_lead')
-        values = super(Team, self).get_alias_values()
-        values['alias_defaults'] = defaults = safe_eval(self.alias_defaults or "{}")
-        defaults['type'] = 'lead' if has_group_use_lead and self.use_leads else 'opportunity'
-        defaults['team_id'] = self.id
-        return values
+    @api.depends('crm_team_member_ids.lead_month_count', 'assignment_max')
+    def _compute_lead_all_assigned_month_count(self):
+        for team in self:
+            team.lead_all_assigned_month_count = sum(member.lead_month_count for member in team.crm_team_member_ids)
+            team.lead_all_assigned_month_exceeded = team.lead_all_assigned_month_count > team.assignment_max
 
     @api.onchange('use_leads', 'use_opportunities')
     def _onchange_use_leads_opportunities(self):
         if not self.use_leads and not self.use_opportunities:
             self.alias_name = False
-        if not self.use_opportunities and self.use_leads:
-            self.use_leads = False
 
-    @api.onchange('team_type')
-    def _onchange_team_type(self):
-        if self.team_type == 'sales':
-            self.use_opportunities = True
-            self.use_leads = lambda self: self.user_has_groups('crm.group_use_lead')
-            self.dashboard_graph_model = 'crm.lead'
-        else:
-            self.use_opportunities = False
-            self.use_leads = False
-        return super(Team, self)._onchange_team_type()
+    @api.constrains('assignment_domain')
+    def _constrains_assignment_domain(self):
+        for team in self:
+            try:
+                domain = literal_eval(team.assignment_domain or '[]')
+                if domain:
+                    self.env['crm.lead'].search(domain, limit=1)
+            except Exception:
+                raise exceptions.ValidationError(_('Assignment domain for team %(team)s is incorrectly formatted', team=team.name))
 
-    @api.onchange('dashboard_graph_model')
-    def _onchange_dashboard_graph_model(self):
-        if self.dashboard_graph_model == 'crm.lead':
-            self.dashboard_graph_period_pipeline = self.dashboard_graph_period
-            self.dashboard_graph_group_pipeline = self.dashboard_graph_group
-        else:
-            self.dashboard_graph_period = self.dashboard_graph_period_pipeline
-            if not self.dashboard_graph_group:
-                self.dashboard_graph_group = self._fields['dashboard_graph_group'].default(self)
+    # ------------------------------------------------------------
+    # ORM
+    # ------------------------------------------------------------
 
-    @api.onchange('dashboard_graph_group_pipeline')
-    def _onchange_dashboard_graph_group_pipeline(self):
-        if self.dashboard_graph_group_pipeline == 'stage':
-            self.dashboard_graph_group = False
-        else:
-            self.dashboard_graph_group = self.dashboard_graph_group_pipeline
-
-    @api.constrains('dashboard_graph_model', 'use_opportunities')
-    def _check_graph_model(self):
-        if not self.use_opportunities and self.dashboard_graph_model == 'crm.lead':
-            raise ValidationError(_("You have to enable the Pipeline on your Sales Team to be able to set it as a content for the graph"))
-
-    @api.multi
     def write(self, vals):
-        result = super(Team, self).write(vals)
-        if 'use_leads' in vals or 'alias_defaults' in vals:
+        result = super().write(vals)
+        if 'use_leads' in vals or 'use_opportunities' in vals:
             for team in self:
-                team.alias_id.write(team.get_alias_values())
+                alias_vals = team._alias_get_creation_values()
+                team.write({
+                    'alias_name': alias_vals.get('alias_name', team.alias_name),
+                    'alias_defaults': alias_vals.get('alias_defaults'),
+                })
         return result
 
-    #TODO JEM : refactor this stuff with xml action, proper customization,
+    def unlink(self):
+        """ When unlinking, concatenate ``crm.lead.scoring.frequency`` linked to
+        the team into "no team" statistics. """
+        frequencies = self.env['crm.lead.scoring.frequency'].search([('team_id', 'in', self.ids)])
+        if frequencies:
+            existing_noteam = self.env['crm.lead.scoring.frequency'].sudo().search([
+                ('team_id', '=', False),
+                ('variable', 'in', frequencies.mapped('variable'))
+            ])
+            for frequency in frequencies:
+                # skip void-like values
+                if float_compare(frequency.won_count, 0.1, 2) != 1 and float_compare(frequency.lost_count, 0.1, 2) != 1:
+                    continue
+
+                match = existing_noteam.filtered(lambda frequ_nt: frequ_nt.variable == frequency.variable and frequ_nt.value == frequency.value)
+                if match:
+                    # remove extra .1 that may exist in db as those are artifacts of initializing
+                    # frequency table. Final value of 0 will be set to 0.1.
+                    exist_won_count = float_round(match.won_count, precision_digits=0, rounding_method='HALF-UP')
+                    exist_lost_count = float_round(match.lost_count, precision_digits=0, rounding_method='HALF-UP')
+                    add_won_count = float_round(frequency.won_count, precision_digits=0, rounding_method='HALF-UP')
+                    add_lost_count = float_round(frequency.lost_count, precision_digits=0, rounding_method='HALF-UP')
+                    new_won_count = exist_won_count + add_won_count
+                    new_lost_count = exist_lost_count + add_lost_count
+                    match.won_count = new_won_count if float_compare(new_won_count, 0.1, 2) == 1 else 0.1
+                    match.lost_count = new_lost_count if float_compare(new_lost_count, 0.1, 2) == 1 else 0.1
+                else:
+                    existing_noteam += self.env['crm.lead.scoring.frequency'].sudo().create({
+                        'lost_count': frequency.lost_count if float_compare(frequency.lost_count, 0.1, 2) == 1 else 0.1,
+                        'team_id': False,
+                        'value': frequency.value,
+                        'variable': frequency.variable,
+                        'won_count': frequency.won_count if float_compare(frequency.won_count, 0.1, 2) == 1 else 0.1,
+                    })
+        return super().unlink()
+
+    # ------------------------------------------------------------
+    # MESSAGING
+    # ------------------------------------------------------------
+
+    def _alias_get_creation_values(self):
+        values = super()._alias_get_creation_values()
+        values['alias_model_id'] = self.env['ir.model']._get('crm.lead').id
+        if self.id:
+            if not self.use_leads and not self.use_opportunities:
+                values['alias_name'] = False
+            values['alias_defaults'] = defaults = literal_eval(self.alias_defaults or "{}")
+            has_group_use_lead = self.env.user.has_group('crm.group_use_lead')
+            defaults['type'] = 'lead' if has_group_use_lead and self.use_leads else 'opportunity'
+            defaults['team_id'] = self.id
+        return values
+
+    # ------------------------------------------------------------
+    # LEAD ASSIGNMENT
+    # ------------------------------------------------------------
+
     @api.model
-    def action_your_pipeline(self):
-        action = self.env.ref('crm.crm_lead_opportunities_tree_view').read()[0]
-        user_team_id = self.env.user.sale_team_id.id
-        if not user_team_id:
-            user_team_id = self.search([], limit=1).id
-            action['help'] = _("""<p class='o_view_nocontent_smiling_face'>Add new opportunities</p><p>
-    Looks like you are not a member of a Sales Team. You should add yourself
-    as a member of one of the Sales Team.
-</p>""")
-            if user_team_id:
-                action['help'] += "<p>As you don't belong to any Sales Team, Odoo opens the first one by default.</p>"
+    def _cron_assign_leads(self, force_quota=False, creation_delta_days=7):
+        """ Cron method assigning leads. Leads are allocated to all teams and
+        assigned to their members.
 
-        action_context = safe_eval(action['context'], {'uid': self.env.uid})
-        if user_team_id:
-            action_context['default_team_id'] = user_team_id
+        The cron is designed to run at least once a day or more.
+        A number of leads will be assigned each time depending on the daily leads
+        already assigned.
+        This allows the assignment process based on the cron to work on a daily basis
+        without allocating too much leads on members if the cron is executed multiple
+        times a day.
+        The daily quota of leads can be forcefully assigned with force_quota
+        (ignoring the daily leads already assigned).
 
-        action['context'] = action_context
+        See ``CrmTeam.action_assign_leads()`` and its sub methods for more
+        details about assign process.
+
+        """
+        self.env['crm.team'].search([
+            '&', '|', ('use_leads', '=', True), ('use_opportunities', '=', True),
+            ('assignment_optout', '=', False)
+        ])._action_assign_leads(force_quota=force_quota, creation_delta_days=creation_delta_days)
+        return True
+
+    def action_assign_leads(self):
+        """ Manual (direct) leads assignment. This method both
+
+          * assigns leads to teams given by self;
+          * assigns leads to salespersons belonging to self;
+
+        See sub methods for more details about assign process.
+
+        :returns: action, a client notification giving some insights on assign
+          process;
+        """
+        teams_data, members_data = self._action_assign_leads(force_quota=True, creation_delta_days=0)
+
+        # format result messages
+        logs = self._action_assign_leads_logs(teams_data, members_data)
+        html_message = Markup('<br />').join(logs)
+        notif_message = ' '.join(logs)
+
+        # log a note in case of manual assign (as this method will mainly be called
+        # on singleton record set, do not bother doing a specific message per team)
+        log_action = _("Lead Assignment requested by %(user_name)s", user_name=self.env.user.name)
+        log_message = Markup("<p>%s<br /><br />%s</p>") % (log_action, html_message)
+        self._message_log_batch(bodies=dict((team.id, log_message) for team in self))
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'type': 'success',
+                'title': _("Leads Assigned"),
+                'message': notif_message,
+                'next': {
+                    'type': 'ir.actions.act_window_close'
+                },
+            }
+        }
+
+    def _action_assign_leads(self, force_quota=False, creation_delta_days=7):
+        """ Private method for lead assignment. This method both
+
+          * assigns leads to teams given by self;
+          * assigns leads to salespersons belonging to self;
+
+        See sub methods for more details about assign process.
+
+        :param bool force_quota: Assign the full daily quota without taking into account
+                                 the leads already assigned today
+        :param int creation_delta_days: Take into account all leads created in the last nb days (by default 7).
+                                        If set to zero we take all the past leads.
+
+        :returns: 2-elements tuple (teams_data, members_data) as a
+          structure-based result of assignment process. For more details
+          about data see :meth:`CrmTeam._allocate_leads` and
+          :meth:`CrmTeam._assign_and_convert_leads`;
+        """
+        if not (self.env.user.has_group('sales_team.group_sale_manager') or self.env.su or self.env.user._is_system()):
+            raise exceptions.UserError(_('Lead/Opportunities automatic assignment is limited to managers or administrators'))
+
+        _logger.info(
+            '### START Lead Assignment (%d teams, %d sales persons, force daily quota: %s, created last %d days)',
+            len(self),
+            len(self.crm_team_member_ids),
+            "ON" if force_quota else "OFF",
+            creation_delta_days,
+        )
+        teams_data = self._allocate_leads(creation_delta_days=creation_delta_days)
+        _logger.info('### Team repartition done. Starting salesmen assignment.')
+        members_data = self._assign_and_convert_leads(force_quota=force_quota)
+        _logger.info('### END Lead Assignment')
+        return teams_data, members_data
+
+    def _action_assign_leads_logs(self, teams_data, members_data):
+        """ Tool method to prepare notification about assignment process result.
+
+        :param teams_data: see ``CrmTeam._allocate_leads()``;
+        :param members_data: see ``CrmTeam._assign_and_convert_leads()``;
+
+        :returns: list of formatted logs, ready to be formatted into a nice
+        plaintext or html message at caller's will
+        :rtype: list[str]
+        """
+        # extract some statistics
+        assigned = sum(len(teams_data[team]['assigned']) + len(teams_data[team]['merged']) for team in teams_data)
+        duplicates = sum(len(teams_data[team]['duplicates']) for team in teams_data)
+        members = len(members_data)
+        members_assigned = sum(len(member_data['assigned']) for member_data in members_data.values())
+
+        # format user notification
+        message_parts = []
+        # 1- duplicates removal
+        if duplicates:
+            message_parts.append(_("%(duplicates)s duplicates leads have been merged.",
+                                   duplicates=duplicates))
+
+        # 2- nothing assigned at all
+        if not assigned and not members_assigned:
+            if len(self) == 1:
+                if not self.assignment_max:
+                    message_parts.append(
+                        _("No allocated leads to %(team_name)s team because it has no capacity. Add capacity to its salespersons.",
+                          team_name=self.name))
+                else:
+                    message_parts.append(
+                        _("No allocated leads to %(team_name)s team and its salespersons because no unassigned lead matches its domain.",
+                          team_name=self.name))
+            else:
+                message_parts.append(
+                    _("No allocated leads to any team or salesperson. Check your Sales Teams and Salespersons configuration as well as unassigned leads."))
+
+        # 3- team allocation
+        if not assigned and members_assigned:
+            if len(self) == 1:
+                message_parts.append(
+                    _("No new lead allocated to %(team_name)s team because no unassigned lead matches its domain.",
+                      team_name=self.name))
+            else:
+                message_parts.append(_("No new lead allocated to the teams because no lead match their domains."))
+        elif assigned:
+            if len(self) == 1:
+                message_parts.append(
+                    _("%(assigned)s leads allocated to %(team_name)s team.",
+                      assigned=assigned, team_name=self.name))
+            else:
+                message_parts.append(
+                    _("%(assigned)s leads allocated among %(team_count)s teams.",
+                      assigned=assigned, team_count=len(self)))
+
+        # 4- salespersons assignment
+        if not members_assigned and assigned:
+            message_parts.append(
+                _("No lead assigned to salespersons because no unassigned lead matches their domains."))
+        elif members_assigned:
+            message_parts.append(
+                _("%(members_assigned)s leads assigned among %(member_count)s salespersons.",
+                  members_assigned=members_assigned, member_count=members))
+
+        return message_parts
+
+    def _allocate_leads(self, creation_delta_days=7):
+        """ Allocate leads to teams given by self. This method sets ``team_id``
+        field on lead records that are unassigned (no team and no responsible).
+        No salesperson is assigned in this process. Its purpose is simply to
+        allocate leads within teams.
+
+        This process allocates all available leads on teams weighted by their
+        maximum assignment by month that indicates their relative workload.
+
+        Heuristic of this method is the following:
+          * find unassigned leads for each team, aka leads being
+            * without team, without user -> not assigned;
+            * not won nor inactive -> live leads;
+            * created in the last creation_delta_days (in the last week by default)
+              This avoid to take into account old leads in the allocation.
+            * if set, a delay after creation can be applied (see BUNDLE_HOURS_DELAY)
+              parameter explanations here below;
+            * matching the team's assignment domain (empty means
+              everything);
+
+          * assign a weight to each team based on their assignment_max that
+            indicates their relative workload;
+
+          * pick a random team using a weighted random choice and find a lead
+            to assign:
+
+            * remove already assigned leads from the available leads. If there
+              is not any lead spare to assign, remove team from active teams;
+            * pick the first lead and set the current team;
+            * when setting a team on leads, leads are also merged with their
+              duplicates. Purpose is to clean database and avoid assigning
+              duplicates to same or different teams;
+            * add lead and its duplicates to already assigned leads;
+
+          * pick another random team until their is no more leads to assign
+            to any team;
+
+        This process ensure that teams having overlapping domains will all
+        receive leads as lead allocation is done one lead at a time. This
+        allocation will be proportional to their size (assignment of their
+        members).
+
+        Supported ``ir.config_parameter`` settings.
+
+        ``crm.assignment.bundle``
+            deprecated
+
+        ``crm.assignment.commit.bundle`` (``int``)
+            Allow to set size of lead batch to be committed together. By
+            default 100 which is a good trade-off between transaction time and
+            speed.
+
+        ``crm.assignment.delay`` (``float``)
+            Give a delay before taking a lead into assignment process
+            (BUNDLE_HOURS_DELAY) given in hours. Purpose if to allow other
+            crons or automation rules to make their job. This option is mainly
+            historic as its purpose was to let automation rules prepare leads
+            and score before PLS was added into CRM. This is now not required
+            anymore but still supported;
+
+        :param int creation_delta_days: see ``CrmTeam._action_assign_leads()``;
+
+        :rtype: dict[str, Any]
+        :return: dictionary mapping each team with assignment result:
+
+            ``assigned`` (``set[int]``)
+                Lead IDs directly assigned to the team
+                (no duplicate or merged found)
+
+            ``merged`` (``set[int]``)
+                Lead IDs merged and assigned to the team
+                (main leads being results of merge process)
+
+            ``duplicates`` (``set[int]``)
+                Lead IDs found as duplicates and merged into other leads.
+                Those leads are unlinked during assign process and are already
+                removed at return of this method
+
+        """
+
+        BUNDLE_HOURS_DELAY = self.env['ir.config_parameter'].sudo().get_float('crm.assignment.delay')
+        BUNDLE_COMMIT_SIZE = self.env['ir.config_parameter'].sudo().get_int('crm.assignment.commit.bundle') or 100
+
+        def _log_teams_data(global_data, teams_data, prefix='##'):
+            _logger.info(
+                '%s Assigned %s leads',
+                prefix, (len(global_data['assigned']) + len(global_data['merged'])),
+            )
+            for team, team_data in teams_data.items():
+                _logger.info(
+                    '\t-> Assigned %s leads to team %s',
+                    len(team_data['assigned']) + len(team_data['merged']),
+                    team.id,
+                )
+                _logger.info(
+                    '\t-> Leads: direct assign %s / merge result %s / duplicates merged: %s',
+                     team_data['assigned'], team_data['merged'], team_data['duplicates']
+                )
+
+        # leads
+        max_create_dt = self.env.cr.now() - datetime.timedelta(hours=BUNDLE_HOURS_DELAY)
+        duplicates_lead_cache = dict()
+
+        # teams data
+        teams_data, population, weights = dict(), list(), list()
+        for team in self:
+            if not team.assignment_max:
+                continue
+
+            lead_domain = Domain.AND([
+                literal_eval(team.assignment_domain or '[]'),
+                [('create_date', '<=', max_create_dt)],
+                ['&', ('team_id', '=', False), ('user_id', '=', False)],
+                [('won_status', '!=', 'won')]
+            ])
+            if creation_delta_days > 0:
+                lead_domain &= Domain('create_date', '>', self.env.cr.now() - datetime.timedelta(days=creation_delta_days))
+
+            leads = self.env["crm.lead"].search(lead_domain)
+            # Fill duplicate cache: search for duplicate lead before the assignment
+            # avoid to flush during the search at every assignment
+            for lead in leads:
+                if lead not in duplicates_lead_cache:
+                    duplicates_lead_cache[lead] = lead._get_lead_duplicates(email=lead.email_from)
+
+            teams_data[team] = {
+                "team": team,
+                "leads": leads,
+                "assigned": set(),
+                "merged": set(),
+                "duplicates": set(),
+            }
+            population.append(team)
+            weights.append(team.assignment_max)
+
+        # Start a new transaction, since data fetching take times
+        # and the first commit occur at the end of the bundle,
+        # the first transaction can be long which we want to avoid
+        _logger.info(
+            '## Fetched data (%d teams; %d leads)',
+            len(teams_data), sum(len(team_data["leads"]) for team_data in teams_data.values()),
+        )
+        self._auto_commit_if_not_test()
+
+        # assignment process data
+        global_data = dict(assigned=set(), merged=set(), duplicates=set())
+        commit_global_data = dict(assigned=set(), merged=set(), duplicates=set())
+        commit_teams_data = defaultdict(lambda: {'assigned': set(), 'merged': set(), 'duplicates': set()})
+
+        leads_done_ids, lead_unlink_ids, counter = set(), set(), 0
+        while population:
+            counter += 1
+            team = random.choices(population, weights=weights, k=1)[0]
+
+            # filter remaining leads, remove team if no more leads for it
+            teams_data[team]["leads"] = teams_data[team]["leads"].filtered(lambda l: l.id not in leads_done_ids).exists()
+            if not teams_data[team]["leads"]:
+                population_index = population.index(team)
+                population.pop(population_index)
+                weights.pop(population_index)
+                continue
+
+            # assign + deduplicate and concatenate results in teams_data to keep some history
+            candidate_lead = teams_data[team]["leads"][0]
+            try:
+                assign_res = team._allocate_leads_deduplicate(candidate_lead, duplicates_cache=duplicates_lead_cache)
+            except Exception as e:
+                _logger.error(
+                    "[Assign Lead] Error while assigning lead %s to team %s. Error: %s",
+                    candidate_lead.id, team.id, e,
+                )
+                _logger.info('## Assigned %s leads', (len(global_data['assigned'] - commit_global_data['assigned']) + len(global_data['merged'] - commit_global_data['assigned'])))
+                raise
+
+            for key in ('assigned', 'merged', 'duplicates'):
+                leads_done_ids.update(assign_res[key])
+                # stats
+                teams_data[team][key].update(assign_res[key])
+                commit_teams_data[team][key].update(assign_res[key])
+                global_data[key].update(assign_res[key])
+                commit_global_data[key].update(assign_res[key])
+            lead_unlink_ids.update(assign_res['duplicates'])
+
+            # auto-commit except in testing mode. As this process may be time consuming or we
+            # may encounter errors, already commit what is allocated to avoid endless cron loops.
+            if counter % BUNDLE_COMMIT_SIZE == 0:
+                # unlink duplicates once
+                self.env['crm.lead'].browse(lead_unlink_ids).unlink()
+                lead_unlink_ids = set()
+                self._auto_commit_if_not_test()
+                # reset commit log data
+                _log_teams_data(commit_global_data, commit_teams_data, prefix='  -checkpoint-')
+                commit_global_data = dict(assigned=set(), merged=set(), duplicates=set())
+                commit_teams_data = defaultdict(lambda: {'assigned': set(), 'merged': set(), 'duplicates': set()})
+
+        # unlink duplicates once and commit work (unless nothing since last commit)
+        if counter % BUNDLE_COMMIT_SIZE != 0:
+            self.env['crm.lead'].browse(lead_unlink_ids).unlink()
+            self._auto_commit_if_not_test()
+            _log_teams_data(commit_global_data, commit_teams_data, prefix='  -checkpoint-')
+
+        # some final log
+        _log_teams_data(global_data, teams_data)
+        return teams_data
+
+    def _auto_commit_if_not_test(self):
+        if not modules.module.current_test:
+            self.env.cr.commit()
+
+    def _allocate_leads_deduplicate(self, leads, duplicates_cache=None):
+        """ Assign leads to sales team given by self by calling lead tool
+        method _handle_salesmen_assignment. In this method we deduplicate leads
+        allowing to reduce number of resulting leads before assigning them
+        to salesmen.
+
+        :param leads: recordset of leads to assign to current team;
+        :param duplicates_cache: if given, avoid to perform a duplicate search
+          and fetch information in it instead;
+        """
+        self.ensure_one()
+        duplicates_cache = duplicates_cache if duplicates_cache is not None else dict()
+
+        # classify leads
+        leads_assigned = self.env['crm.lead']  # direct team assign
+        leads_done_ids, leads_merged_ids, leads_dup_ids = set(), set(), set()  # classification
+        leads_dups_dict = dict()  # lead -> its duplicate
+        for lead in leads:
+            if lead.id not in leads_done_ids:
+
+                # fill cache if not already done
+                if lead not in duplicates_cache:
+                    duplicates_cache[lead] = lead._get_lead_duplicates(email=lead.email_from)
+                lead_duplicates = duplicates_cache[lead].exists()
+
+                if len(lead_duplicates) > 1:
+                    leads_dups_dict[lead] = lead_duplicates
+                    leads_done_ids.update((lead + lead_duplicates).ids)
+                else:
+                    leads_assigned += lead
+                    leads_done_ids.add(lead.id)
+
+        # assign team to direct assign (leads_assigned) + dups keys (to ensure their team
+        # if they are elected master of merge process)
+        leads_assigned.browse().union([leads_assigned, *leads_dups_dict])._handle_salesmen_assignment(user_ids=None, team_id=self.id)
+
+        for lead in leads.filtered(lambda lead: lead in leads_dups_dict):
+            lead_duplicates = leads_dups_dict[lead]
+            merged = lead_duplicates._merge_opportunity(user_id=False, team_id=False, auto_unlink=False, max_length=0)
+            leads_dup_ids.update((lead_duplicates - merged).ids)
+            leads_merged_ids.add(merged.id)
+
+        return {
+            'assigned': set(leads_assigned.ids),
+            'merged': leads_merged_ids,
+            'duplicates': leads_dup_ids,
+        }
+
+    def _get_lead_to_assign_domain(self):
+        return [
+            ('user_id', '=', False),
+            ('date_open', '=', False),
+            ('team_id', 'in', self.ids),
+        ]
+
+    def _assign_and_convert_leads(self, force_quota=False):
+        """ Main processing method to assign leads to sales team members. It also
+        converts them into opportunities. This method should be called after
+        ``_allocate_leads`` as this method assigns leads already allocated to
+        the member's team. Its main purpose is therefore to distribute team
+        workload on its members based on their capacity.
+
+        This method follows the following heuristic
+            * Get quota per member
+            * Find all leads to be assigned per team
+            * Sort list of members per number of leads received in the last 24h
+            * Assign the lead using round robin
+                * Find the first member with a compatible domain
+                * Assign the lead
+                * Move the member at the end of the list if quota is not reached
+                * Remove it otherwise
+                * Move to the next lead
+
+        :param bool force_quota: see ``CrmTeam._action_assign_leads()``;
+
+        :returns: dict() with each member assignment result:
+          membership: {
+            'assigned': set of lead IDs directly assigned to the member;
+          }, ...
+
+        """
+        result_data = {}
+        commit_result_data = {}
+
+        commit_bundle_size = self.env['ir.config_parameter'].sudo().get_int('crm.assignment.commit.bundle') or 100
+        teams_with_members = self.filtered(lambda team: team.crm_team_member_ids)
+        quota_per_member = {member: member._get_assignment_quota(force_quota=force_quota) for member in self.crm_team_member_ids}
+        counter = 0
+        leads_per_team = dict(self.env['crm.lead']._read_group(
+            teams_with_members._get_lead_to_assign_domain(),
+            ['team_id'],
+            # Do not use recordset aggregation to avoid fetching all the leads at once in memory
+            # We want to have in memory only leads for the current team
+            # and make sure we need them before fetching them
+            ['id:array_agg'],
+        ))
+
+        def _log_members_data(members_data, prefix='##'):
+            _logger.info(
+                '%s Assigned %s leads to %s salesmen',
+                prefix, sum(len(r['assigned']) for r in members_data.values()), len(members_data),
+            )
+            for member, member_info in members_data.items():
+                if member_info["assigned"]:
+                    _logger.info(
+                        '\t-> member %s of team %s: assigned %d/%d leads (%s)',
+                        member.id, member.crm_team_id.id, len(member_info["assigned"]), member_info.get("quota", quota_per_member[member]), member_info["assigned"],
+                    )
+
+        def _assign_lead(lead, members_to_assign, leads_per_member, preferred_leads_per_member, quota_per_member):
+            """ Find relevant member whose domain(s) accept the lead. If found convert
+            and update internal structures accordingly. """
+            member_found = next((member for member in members_to_assign if lead in preferred_leads_per_member.get(member, [])), False)
+            if not member_found:
+                member_found = next((member for member in members_to_assign if lead in leads_per_member.get(member, [])), False)
+                if not member_found:
+                    return
+
+            lead.with_context(mail_auto_subscribe_no_notify=True).convert_opportunity(
+                lead.partner_id,
+                user_ids=member_found.user_id.ids
+            )
+            result_data[member_found]['assigned'] += lead
+            commit_result_data[member_found]['assigned'] += lead
+
+            # if member still has quota, move at end of list; otherwise just remove
+            members_to_assign.remove(member_found)
+            quota_per_member[member_found] -= 1
+            if quota_per_member[member_found] > 0:
+                members_to_assign.append(member_found)
+            return member_found
+
+        for team, leads_to_assign_ids in leads_per_team.items():
+            members_to_assign = list(team.crm_team_member_ids.filtered(lambda member:
+                member.assignment_max != 0 and quota_per_member.get(member, 0) > 0
+            ).sorted(key=lambda member: (quota_per_member.get(member, 0), random.random()), reverse=True))
+            if not members_to_assign:
+                continue
+            result_data.update({
+                member: {"assigned": self.env["crm.lead"], "quota": quota_per_member[member]}
+                for member in members_to_assign
+            })
+            commit_result_data = defaultdict(lambda: {"assigned": self.env["crm.lead"]})
+            # Need to check that record still exists since the ids have been fetched at the beginning of the process
+            # Previous iteration has committed the change, records may have been deleted in the meanwhile
+            to_assign = self.env['crm.lead'].browse(leads_to_assign_ids).exists()
+
+            leads_per_member = {
+                member: to_assign.filtered_domain(literal_eval(member.assignment_domain or '[]'))
+                for member in members_to_assign
+            }
+            members_to_assign_wpref = [
+                m for m in members_to_assign
+                if m.assignment_domain_preferred and literal_eval(m.assignment_domain_preferred or '')
+            ]
+            preferred_leads_per_member = {
+                member: to_assign.filtered_domain(
+                    Domain.AND([
+                        literal_eval(member.assignment_domain or '[]'),
+                        literal_eval(member.assignment_domain_preferred)
+                    ])
+                ) for member in members_to_assign_wpref
+            }
+            for lead in to_assign.sorted(lambda lead: (-lead.probability, id)):
+                try:
+                    member_found = _assign_lead(lead, members_to_assign, leads_per_member, preferred_leads_per_member, quota_per_member)
+                except Exception as e:
+                    _logger.error(
+                        "[Assign Lead] Error while assigning lead %s to a member of team %s. Error: %s",
+                        lead.id, team.id, e,
+                    )
+                    _logger.info(
+                        'Assigned %s leads to %s salesmen',
+                        sum(
+                            len(leads_info['assigned'] - commit_result_data[sales_person]['assigned'])
+                            for sales_person, leads_info in result_data.items()
+                        ), len(result_data),
+                    )
+                    raise
+                if not member_found:
+                    continue
+                counter += 1
+                if counter % commit_bundle_size == 0:
+                    self._auto_commit_if_not_test()
+                    _log_members_data(commit_result_data, prefix='  -checkpoint-')
+                    commit_result_data = defaultdict(lambda: {"assigned": self.env["crm.lead"]})
+
+            # Make sure we commit at least at the end of the team
+            if counter % commit_bundle_size != 0:
+                self._auto_commit_if_not_test()
+                _log_members_data(commit_result_data, prefix='  -checkpoint-')
+                commit_result_data = defaultdict(lambda: {"assigned": self.env["crm.lead"]})
+
+            # Once we are done with a team we don't need to keep the leads in memory
+            # Try to avoid to explode memory usage
+            self.env.invalidate_all()
+
+        _log_members_data(result_data)
+        return result_data
+
+    # ------------------------------------------------------------
+    # ACTIONS
+    # ------------------------------------------------------------
+
+    def action_open_opportunities(self):
+        action = self.env['ir.actions.actions']._for_xml_id('crm.crm_case_form_view_salesteams_opportunity')
+        rcontext = {
+            'team': self,
+        }
+        action['help'] = self.env['ir.ui.view']._render_template('crm.crm_action_helper', values=rcontext)
+        return action
+
+    def action_open_unassigned_opportunities(self):
+        """Open opportunities action without the opportunity domain as users want to see anything unassigned."""
+        action = self.action_open_opportunities()
+        action['domain'] = []
+        context = self.env['crm.lead'].with_context(force_active_id=self.id)._evaluate_context_from_action(action)
+        action['context'] = context | {'search_default_unassigned': True}
         return action
 
     def _compute_dashboard_button_name(self):
-        opportunity_teams = self.filtered('use_opportunities')
-        opportunity_teams.update({'dashboard_button_name': _("Pipeline")})
-        super(Team, self - opportunity_teams)._compute_dashboard_button_name()
+        super()._compute_dashboard_button_name()
+        team_with_pipelines = self.filtered(lambda el: el.use_opportunities)
+        team_with_pipelines.update({'dashboard_button_name': _("Pipeline")})
 
     def action_primary_channel_button(self):
+        self.ensure_one()
         if self.use_opportunities:
-            action = self.env.ref('crm.crm_case_form_view_salesteams_opportunity').read()[0]
-            return action
-        return super(Team, self).action_primary_channel_button()
+            return self.action_open_opportunities()
+        return super().action_primary_channel_button()
 
-    def _graph_get_dates(self, today):
-        """ return a coherent start and end date for the dashboard graph according to the graph settings.
+    # ------------------------------------------------------------
+    # UTILS
+    # ------------------------------------------------------------
+
+    @api.model
+    def get_team_switcher_data(self):
+        """ Retrieves the data for the team switcher.
+        The switcher only considers teams using opportunities.
+
+        :returns: A dictionary with:
+        - "available": Whether or not the team switcher is available for display.
+                       There needs to be at least 2 teams using opportunities in DB,
+                       regardless of the current user's own access.
+        - "teams": A list of dictionaries containing the data of the teams to be displayed in the switcher.
+                   Limited to own teams if the current user doesn't have "User: All Documents" access.
+                   Can be empty even when "available" is True, in this case only "All Teams" will be visible.
         """
-        if self.dashboard_graph_model == 'crm.lead':
-            if self.dashboard_graph_group == 'month':
-                start_date = today.replace(day=1)
-            elif self.dashboard_graph_group == 'week':
-                start_date = today - relativedelta(days=today.isocalendar()[2] - 1)
-            else:
-                start_date = today
+        teams = self.env["crm.team"].search([("use_opportunities", "=", True)], order="sequence, id")
+        if len(teams) <= 1:
+            # Deactivating the team switcher if there's not enough teams in db.
+            return {"available": False, "teams": []}
+        if not self.env.user.has_group("sales_team.group_sale_salesman_all_leads"):
+            teams = teams.filtered(lambda team: team.id in self.env.user.crm_team_ids.ids)
 
-            if self.dashboard_graph_period == 'week':
-                end_date = today + relativedelta(weeks=1)
-            elif self.dashboard_graph_period == 'year':
-                end_date = today + relativedelta(years=1)
-            else:
-                end_date = today + relativedelta(months=1)
-
-            # we take the end of the preceding month/week/day if we group by month/week/day
-            # (to avoid having twice the same month/week/day from different years/month/week)
-            if self.dashboard_graph_group == 'month':
-                end_date = end_date.replace(day=1) - relativedelta(days=1)
-            elif self.dashboard_graph_group == 'week':
-                end_date -= relativedelta(days=end_date.isocalendar()[2])
-            else:
-                end_date -= relativedelta(days=1)
-
-            return [start_date, end_date]
-        return super(Team, self)._graph_get_dates(today)
-
-    def _get_graph(self):
-        graph_datas = super(Team, self)._get_graph()
-        if self.dashboard_graph_model == 'crm.lead' and self.dashboard_graph_group_pipeline == 'stage':
-            stage_ids = [d['label'] for d in graph_datas[0]['values'] if d['label'] is not None]
-            stage_data = self.env['crm.stage'].browse(stage_ids).read(['sequence', 'name'])
-            stage_data = {d['id']: {'name': d['name'], 'sequence': d['sequence']} for d in stage_data}
-            # use "Undefined" stage for unset stage records
-            stage_data[None] = {'name': _('Undefined'), 'sequence': -1}
-            graph_datas[0]['values'] = sorted(graph_datas[0]['values'], key=lambda el: stage_data[el['label']]['sequence'])
-            for gdata in graph_datas[0]['values']:
-                gdata['label'] = stage_data[gdata['label']]['name']
-        return graph_datas
-
-    def _graph_date_column(self):
-        if self.dashboard_graph_model == 'crm.lead':
-            return 'date_deadline'
-        return super(Team, self)._graph_date_column()
-
-    def _graph_x_query(self):
-        if self.dashboard_graph_model == 'crm.lead' and self.dashboard_graph_group_pipeline == 'stage':
-            return 'stage_id'
-        return super(Team, self)._graph_x_query()
-
-    def _graph_y_query(self):
-        if self.dashboard_graph_model == 'crm.lead':
-            return 'SUM(expected_revenue)'
-        return super(Team, self)._graph_y_query()
-
-    def _graph_title_and_key(self):
-        if self.dashboard_graph_model == 'crm.lead':
-            return ['', _('Pipeline: Expected Revenue')] # no more title
-        return super(Team, self)._graph_title_and_key()
+        team_stages_mapping = self.env["crm.stage"]._read_group(
+            self.env["crm.stage"]._get_visible_stages_domain(teams.ids),
+            groupby=["team_ids"],
+            aggregates=["id:recordset"],
+        )
+        stage_ids_by_team = {team.id: stages.ids for team, stages in team_stages_mapping}
+        shared_stage_ids = stage_ids_by_team.get(False, [])
+        return {
+            "available": True,
+            "teams": [
+                {
+                    'id': team.id,
+                    'name': team.name,
+                    # Domain applied when this team will be selected in the team switcher.
+                    # Showing all "crm.lead" records assigned to the team + the unassigned ones which
+                    # happens to be part of the team visible stages.
+                    'switcher_domain': list(
+                        Domain("team_id", "=", team.id) | (
+                            Domain("team_id", "=", False) &
+                            Domain("stage_id", "in", stage_ids_by_team.get(team.id, []) + shared_stage_ids)
+                        )
+                    ),
+                } for team in teams
+            ],
+        }

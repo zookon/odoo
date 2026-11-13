@@ -1,204 +1,341 @@
-.vote {
-    min-width: 38px;
-    margin-right: 12px;
+$gold: #eca801;
 
-    .vote_count {
-        font-size: 160%;
-        font-weight: bold;
-        line-height: 12px;
+.website_forum, .o_wprofile_body {
+    --o-avatar-height: 1.875rem;
+
+    .o_wforum_avatar {
+        width: var(--o-avatar-height);
+        height: var(--o-avatar-height);
     }
 
-    .vote_down,
-    .vote_up {
-        font-size: 130%;
+    .o_wforum_author_box {
+        &.o_show_info {
+            line-height: 1.2;
+        }
+
+        &.o_compact {
+            --o-avatar-height: 1.4rem;
+            line-height: 1;
+        }
+    }
+}
+.website_forum {
+    --o-post-header-height: var(--o-avatar-height);
+
+    .o_wforum_content_wrapper {
+        #o_wforum_nav {
+            .breadcrumb-item {
+                padding-top: calc(var(--o-bs-btn-padding-y) + #{$btn-border-width});
+                padding-bottom: calc(var(--o-bs-btn-padding-y) + #{$btn-border-width});
+                font-size: var(--o-bs-btn-font-size);
+                line-height: var(--o-bs-btn-line-height);
+
+                h1 {
+                    font-family: var(--body-font-family);
+                }
+            }
+
+            .o_searchbar_form {
+                min-width: 200px;
+            }
+        }
+    }
+
+    aside.o_wforum_sidebar {
+        .btn.w-100:hover {
+            background-color: var(--light);
+            color: color-contrast($light);
+        }
+    }
+
+    .o_wforum_table {
+        --o-avatar-height: 2.25rem;
+
+        img.o_wforum_avatar {
+            border: 2px solid var(--o-color-4);
+        }
+
+        .o_wforum_reply_count, .o_wforum_view_count, .o_wforum_last_activity {
+            min-width: 100px;
+        }
+
+        &> :not(caption) > * > * {
+            @media (max-width: 991.98px) {
+                padding-left: 0;
+                padding-right: var(--o-bs-table-cell-padding-x-sm);
+            }
+
+        }
+
+        tbody {
+            @media (max-width: 991.98px) {
+                border-top: 0;
+            }
+
+            tr {
+                transform: scale(1); /* Hack for Safari not supporting `position-relative` */
+
+                &:hover {
+                    @if ($body-bg and color-contrast($body-bg) != $color-contrast-dark) {
+                        background-color: lighten($body-bg, 10%);
+                    } @else {
+                        background-color: darken($body-bg, 2%);
+                    }
+                }
+            }
+        }
+    }
+
+    .o_wforum_index_entry_title a:visited span {
+        color:  lighten($body-color, 25%);
+    }
+
+    .btn[aria-expanded="true"] {
+        opacity: 1 !important;
+    }
+
+    /* Single Post */
+    .o_wforum_post, .note-editable {
+        word-wrap: break-word;
+
+        pre {
+            color: color-contrast(map-get($grays, '100'));
+            border-radius: var(--o-bs-border-radius);
+            padding: 1rem;
+            background-color: var(--gray-100);
+            white-space: pre-wrap;
+        }
+
+        blockquote {
+            position: relative;
+            border-left: .25em solid var(--gray-500);
+            padding-left: 1em;
+            color: var(--gray-600);
+        }
+    }
+
+    #post_reply {
+        z-index: var(--o-bs-zindex-modal);
+        min-height: 0;
+        max-height: 0;
+        border-radius: var(--o-bs-border-radius) var(--o-bs-border-radius) 0 0;
+        transition: max-#{$transition-collapse}, min-#{$transition-collapse}, var(--o-bs-transition-collapse), var(--o-bs-transition-collapse-width);
+
+        &.show {
+            max-height: 100%;
+
+            &.o_expand {
+                .o_wforum_expand_toggle::before {
+                    content:'\f066';
+                }
+
+                .odoo-editor-editable {
+                    transition: var(--o-bs-transition-collapse);
+                    flex-grow: 1;
+                }
+
+                form.js_website_submit_form {
+                    height: calc(100vh - 100px);
+                }
+            }
+
+            .o_wysiwyg_textarea_wrapper {
+                display: flex;
+                flex-flow: column;
+                flex-grow: 1;
+
+                .odoo-editor {
+                    height: 200px !important;
+                    display: flex;
+                    flex-grow: 1;
+                    flex-flow: column;
+
+                    .note-editable {
+                        flex-grow: 1;
+                    }
+                }
+            }
+        }
+    }
+
+    .o_wforum_post_header, .o_wforum_answer_header {
+        min-height: var(--o-post-header-height);
+    }
+
+    .o_wforum_readable {
+        p {
+            margin-bottom: 0.5rem;
+        }
+
+        img {
+            max-width: 100%;
+        }
+
+        &::after {
+            content: "";
+            display: table;
+            clear: both;
+        }
+    }
+
+    textarea.o_wysiwyg_loader {
+        /* Prevent background display inside the wysiwyg loader */
+        background: none !important;
+        + .note-editor {
+            border: 0;
+        }
+    }
+
+    .o_wforum_question > .post_content_wrapper {
+        animation: fade-out-background-color 2s ease-in-out;
+    }
+
+    @keyframes fade-out-background-color {
+        0% {
+            background-color: var(--info);
+        }
+        100% {
+            background-color: transparent;
+        }
+    }
+
+    .o_wforum_answer {
+        transition: var(--o-bs-transition-base);
+
+        &.o_wforum_answer_correct {
+            /* This hack is to have either a light or dark success color
+               depending on the background color's contrast */
+            $-cc1-bg: o-color(map-get($o-color-palette, o-cc1-bg));
+            $-isBright: color-contrast($-cc1-bg) == $color-contrast-dark;
+
+            @if ($-isBright) {
+                background-color: mix($color-contrast-light, $success, 90%);
+            } @else {
+                $-success-light: lighten(saturate($success, 70), 30);
+                border: 1px solid $-success-light;
+                background-color: mix($color-contrast-dark, $-success-light, 80%);
+            }
+
+            .o_wforum_author_pic img {
+                box-shadow: 0 0 0 2px var(--o-bs-success);
+            }
+        }
+    }
+
+    .o_wforum_gold {
+        color: $gold;
+    }
+
+    a.no-decoration {
+        cursor: pointer;
+        text-decoration: none !important;
+    }
+
+    .dropdown-menu {
+        button:focus {
+            outline: 0;
+        }
     }
 }
 
-.author-box {
-    min-width: 200px;
-    padding: 4px;
-    background-color: #f5f5f5;
-}
+.website_forum, .o_wforum_profile_tab {
+    .vote {
+        .vote_count {
+            animation-play-state: paused;
 
-.question-block {
-    margin-left: 50px;
-}
+            &.o_forum_vote_animate {
+                animation: bounceIn 0.3s ease running;
+            }
+        }
 
-.o_forum_tag_follow_box {
-    display: none;
-    position: absolute;
-    z-index: 1;
-    text-align: center;
-    opacity: 0.9;
-}
+        .vote_up {
+            color: inherit;
 
-.question {
-    clear: left;
-}
+            &:hover, &:focus, &.focus {
+                color: var(--success);
+            }
+        }
 
-.question {
-    .question-name {
-        font-size: 150%;
-    }
+        .vote_down {
+            color: inherit;
 
-    .badge {
-        background-color: #ccc;
-        margin-left: 4px;
-    }
-
-    .badge-active {
-        background-color: #428bca;
-    }
-
-    img {
-        max-width: 600px;
-        height: auto !important;
+            &:hover, &:focus, &.focus {
+                color: var(--danger);
+            }
+        }
     }
 }
 
-.forum_answer {
-    img {
-        max-width: 600px;
-        height: auto !important;
+.o_wforum_bio_popover_wrap {
+    .o_wforum_bio_popover_name {
+        address > div, span[data-oe-model="res.country"] {
+            display: flex;
+            align-items: center;
+        }
+
+        span[data-oe-model="res.country"] {
+            margin-left: 10px;
+        }
+    }
+
+    .o_wforum_bio_popover_info .css_editable_mode_hidden > div:last-child > .o_forum_tooltip_line {
+        margin-top: -0.5rem; /* compensate parent 'mt-2' class */
     }
 }
 
-img.o_forum_avatar {
-    max-height: 40px;
-    margin-right: 10px;
+.popover.o_wforum_bio_popover_container {
+    --o-wforum-silver: #acacac;
+    --o-wforum-bronze: #ba651f;
+
+    .popover-header {
+        background-color: tint-color($primary, 80%);
+        border-bottom: 0;
+        color: var(--primary);
+    }
+
+    .popover-body {
+        color: var(--dark);
+    }
+
+    max-width: 552px;
+
+    .o-text-gold {
+        color: $gold;
+    }
+
+    .o-text-silver {
+        color: var(--o-wforum-silver);
+    }
+
+    .o-text-bronze {
+        color: var(--o-wforum-bronze);
+    }
 }
 
-img.o_forum_avatar_big {
-    max-width: 75px;
-    margin-right: 10px;
-}
-
-.oe_grey {
-    background-color: #eeeeee;
-}
-
-.badge-gold {
-    color: #ffcc00;
-}
-
-.badge-silver {
-    color: #cccccc;
-}
-
-.badge-bronze {
-    color: #eea91e;
-}
-
-.oe_answer_true {
-    color: #3c763d;
+#o_wforum_forums_index_list .card {
+    border-radius: .75rem;
 
     &:hover {
-        color: #4D964E;
+        transform: translateY(-5px);
+        box-shadow: var(--box-shadow) !important;
     }
 }
 
-.oe_answer_false {
-    color: #bbbbbb;
+.o_wforum_background_gradient {
+    background-image: linear-gradient(0deg, color-mix(in srgb, var(--body-bg) 75%, transparent) 30%, color-mix(in srgb, var(--body-bg) 0%, transparent) 100%);
+}
 
-    &:hover {
-        color: #9E9C9C;
+.o_website_forum_follow_answers {
+    .js_follow_btn, .js_unfollow_btn, .follow_btn {
+        opacity: 1 !important;
     }
 }
 
-.favourite_question {
-    color: #bbbbbb !important;
-}
-
-.forum_favourite_question {
-    color: #ffcc00 !important;
-}
-
-a.no-decoration {
-    cursor: pointer;
-    text-decoration: none !important;
-}
-
-.faq-question:hover {
-    text-decoration: none !important;
-    color: #428bca;
-}
-
-.oe_comment_grey {
-    background-color: #f5f5f5;
-    padding: 4px;
-}
-
-.close.comment_delete {
-    font-size: 16px;
-    float: none;
-}
-
-.country_flag {
-    max-height: 16px;
-    display: inline-block;
-    margin-left: 2px;
-}
-
-.tag_text .text-core .text-wrap {
-    .text-dropdown,
-    .text-prompt,
-    input,
-    textarea {
-        font: 1.2em "Helvetica Neue", Helvetica, Arial, sans-serif !important;
-    }
-
-    .text-tags .text-tag .text-button {
-        font: 1.2em "Helvetica Neue", Helvetica, Arial, sans-serif !important;
-        height: 1.2em !important;
-    }
-}
-
-.oe_forum_alert {
-    position: absolute;
-    width: 300px;
-    z-index: 9999;
-}
-
-.oe_forum_email_required {
-    position: absolute;
-    margin-top: 155px;
-    margin-left: 500px;
-    margin-right: 100px;
-    z-index: 5;
-}
-
-button.btn-link.text-muted {
-    color: #999;
-}
-
-.o_forum_user_bio_expand {
-    position: absolute;
-    z-index: 200;
-    display: none;
-}
-
-.o_forum_tooltip_heading {
-    padding: 0;
-    margin: 0;
-    font-size: 18px;
-}
-
-.o_forum_user_bio {
-    color: black;
-    width: 318px;
-    min-height: 100px;
-    cursor: auto;
-    border: 1px solid darkgray;
-    background-color: whitesmoke;
-    line-height: 13px;
-    font-size: 11px;
-    word-wrap: break-word;
-
-    .o_forum_tooltip_line {
-        min-height: 13px;
-    }
-
-    .o_forum_tooltip_header {
-        min-height: 75px;
-    }
+.forum_intro.o_wforum_intro_closing {
+    height: 0 !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    opacity: 0;
+    overflow: hidden;
+    transition: height .4s ease-in-out, padding .4s ease-in-out, opacity .4s ease-in-out;
 }

@@ -1,24 +1,32 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import api, models
 
 
-class IrModelReferenceReport(models.AbstractModel):
+class ReportBaseReport_Irmodulereference(models.AbstractModel):
     _name = 'report.base.report_irmodulereference'
+    _description = 'Module Reference Report (base)'
 
     @api.model
     def _object_find(self, module):
         Data = self.env['ir.model.data'].sudo()
-        data = Data.search([('model','=','ir.model'), ('module','=',module.name)])
+        data = Data.search([
+            ('model', '=', 'ir.model'),
+            ('module', '=', module.name),
+            ('res_id', '!=', False),
+        ])
         res_ids = data.mapped('res_id')
         return self.env['ir.model'].browse(res_ids)
 
-    @api.multi
     def _fields_find(self, model, module):
         Data = self.env['ir.model.data'].sudo()
         fname_wildcard = 'field_' + model.replace('.', '_') + '_%'
-        data = Data.search([('model', '=', 'ir.model.fields'), ('module', '=', module.name), ('name', 'like', fname_wildcard)])
+        data = Data.search([
+            ('model', '=', 'ir.model.fields'),
+            ('module', '=', module.name),
+            ('name', 'like', fname_wildcard),
+            ('res_id', '!=', False),
+        ])
         if data:
             res_ids = data.mapped('res_id')
             fnames = self.env['ir.model.fields'].browse(res_ids).mapped('name')

@@ -1,19 +1,28 @@
-# -*- coding: utf-8 -*-
-# Part of Odoo. See LICENSE file for full copyright and licensing details.
 {
     'name': 'Survey CRM',
-    'version': '2.0',
-    'category': 'Marketing',
-    'complexity': 'easy',
+    'category': 'Marketing/Surveys',
+    'summary': 'Generate leads from surveys',
     'description': """
-Survey - CRM (bridge module)
-=================================================================================
-This module adds a Survey mass mailing button inside the more option of lead/customers views
-""",
-    'depends': ['crm', 'survey'],
+    Bridge module between Survey and CRM.
+    Enables the creation of a lead from a survey when the participant selects lead-generating answers.
+    An option on the suggested answers can be activated to make them lead-generating.
+    """,
+    'depends': ['survey', 'crm'],
     'data': [
-        'views/survey_crm_views.xml',
+        'views/survey_question_views.xml',
+        'views/survey_survey_views.xml',
+        'views/survey_user_views.xml',
     ],
-    'installable': True,
-    'auto_install': True
+    'demo': [
+        'demo/lead_qualification_survey_demo.xml',
+        'demo/lead_qualification_answer_demo.xml',
+    ],
+    'assets': {
+        'web.assets_backend': [
+            'survey_crm/static/src/components/lead_generation_dropdown/crm_lead_gen_element.js',
+        ],
+    },
+    'auto_install': True,
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }

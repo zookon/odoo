@@ -1,0 +1,87 @@
+import { proxy, usePlugin } from "@odoo/owl";
+
+import { _t } from "@web/core/l10n/translation";
+import { NotificationPlugin } from "@web/core/notifications/notification_plugin";
+import { registry } from "@web/core/registry";
+import { SelectionField, selectionField } from "@web/views/fields/selection/selection_field";
+import { user } from "@web/core/user";
+import { useService } from "@web/core/utils/hooks";
+import { ORM } from "@web/core/orm_plugin";
+
+export class MailServerConfiguratorSelection extends SelectionField {
+    static template = "mail.MailServerConfiguratorSelection";
+
+    setup() {
+        super.setup();
+        this.action = useService("action");
+        this.orm = usePlugin(ORM);
+        this.notification = usePlugin(NotificationPlugin);
+        this.state = proxy({
+            value: null,
+            connectionFailed: false,
+        });
+    }
+
+    /**
+     * Allow to change the value displayed without making the field dirty.
+     */
+    get value() {
+        return this.state.value || super.value;
+    }
+
+    get readonly() {
+        return this.props.record.resId !== user.userId;
+    }
+
+    get isServerConfigured() {
+        return !!this.props.record.data.outgoing_mail_server_id;
+    }
+
+    async onOptionChange(value) {
+        const oldValue = this.value;
+        this.state.value = value;
+        await this.props.record.model.root.save();
+        try {
+            const action = await this.orm.call("res.users", "action_setup_outgoing_mail_server", [
+                value,
+            ]);
+            if (action) {
+                this.action.doAction(action);
+            }
+        } catch (error) {
+            // The component was destroyed during the call: rethrow so the AbortError skips the
+            // error handling below and reaches the global handler, which silently ignores it.
+            if (error.name === "AbortError") {
+                throw error;
+            }
+            this.state.value = oldValue;
+            this.notification.add(error.data.message, {
+                type: "danger",
+            });
+        }
+    }
+
+    async onTestConnection() {
+        await this.props.record.model.root.save();
+        try {
+            const action = await this.orm.call("res.users", "action_test_outgoing_mail_server");
+            this.state.connectionFailed = false;
+            this.action.doAction(action);
+        } catch (error) {
+            // The component was destroyed during the call: rethrow so the AbortError skips the
+            // error handling below and reaches the global handler, which silently ignores it.
+            if (error.name === "AbortError") {
+                throw error;
+            }
+            this.notification.add(_t("Connection failed: %s", error.data.message), {
+                type: "danger",
+            });
+            this.state.connectionFailed = true;
+        }
+    }
+}
+
+registry.category("fields").add("mail_server_configurator_selection", {
+    ...selectionField,
+    component: MailServerConfiguratorSelection,
+});

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<odoo>
+
+    <template id="inline_form">
+        <div t-attf-id="o_mercado_pago_brick_container_{{provider_sudo.id}}_{{pm_sudo.id}}"/>
+    </template>
+
+</odoo>

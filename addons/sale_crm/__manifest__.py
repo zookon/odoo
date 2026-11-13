@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 {
     'name': 'Opportunity to Quotation',
-    'version': '1.0',
-    'category': 'Hidden',
+    'category': 'Sales/Sales',
     'description': """
 This module adds a shortcut on one or several opportunity cases in the CRM.
 ===========================================================================
@@ -16,12 +14,17 @@ The case is then closed and linked to the generated sales order.
 We suggest you to install this module, if you installed both the sale and the crm
 modules.
     """,
-    'depends': ['sale_management', 'crm'],
+    'depends': ['sale', 'crm'],
     'data': [
-        'security/ir.model.access.csv',
-        'views/partner_views.xml',
+        'data/crm_lead_merge_template.xml',
         'views/sale_order_views.xml',
         'views/crm_lead_views.xml',
+        'views/crm_team_views.xml',
+        'wizard/crm_opportunity_to_quotation_views.xml',
+        'security/ir.access.csv',
     ],
     'auto_install': True,
+    'uninstall_hook': 'uninstall_hook',
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }

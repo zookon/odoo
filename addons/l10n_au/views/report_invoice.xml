@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="report_invoice_document" inherit_id="account.report_invoice_document" primary="True">
+        <xpath expr="//t[@t-if='o.partner_bank_id']//span[@t-field='o.partner_bank_id']" position="after">
+            <t t-if="o.partner_bank_id.country_id.code == 'AU' and o.partner_bank_id.clearing_number">
+                - <span class="fw-bold" t-out="o.partner_bank_id.clearing_number"/>
+            </t>
+        </xpath>
+    </template>
+
+    <!-- Workaround for Studio reports, see odoo/odoo#60660 -->
+    <template id="report_invoice" inherit_id="account.report_invoice">
+        <xpath expr='//t[@t-call="account.report_invoice_document"]' position="after">
+            <t t-elif="o._get_name_invoice_report() == 'l10n_au.report_invoice_document'"
+               t-call="l10n_au.report_invoice_document"
+               t-lang="lang"/>
+        </xpath>
+    </template>
+</odoo>

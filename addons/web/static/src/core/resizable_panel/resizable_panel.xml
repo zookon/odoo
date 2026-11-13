@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<templates>
+
+    <t t-name="web_studio.ResizablePanel">
+        <div class="o_resizable_panel d-flex flex-column" t-att-class="this.class" t-ref="this.containerRef">
+            <t t-call-slot="default" />
+            <div
+                class="o_resizable_panel_handle position-absolute top-0 bottom-0" t-att-class="this.handleClass()"
+                t-ref="this.handleRef"
+            >
+                <span t-if="this.props.outerHandle" class="border-start border-2 border-primary h-100"/>
+            </div>
+        </div>
+    </t>
+
+</templates>

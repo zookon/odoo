@@ -1,0 +1,59 @@
+.o-discuss-Typing-dot {
+    background-color: var(--gray-500);
+    animation: o_mail_Typing_animation 1.5s linear infinite;
+    filter: drop-shadow(0px 0px 5px rgba(0, 0, 0, .25));
+
+    &.o-discuss-Typing-dot2 {
+        animation-delay: 0.25s;
+    }
+
+    &.o-discuss-Typing-dot3 {
+        animation-delay: .5s;
+    }
+
+    .o-mail-ImStatus &, .o-mail-ThreadIcon & {
+        background-color: #fff;
+    }
+
+    &.o-sizeMedium {
+        width: 4px;
+        height: 4px;
+    }
+
+    &.o-sizeSmall {
+        width: 3px;
+        height: 3px;
+    }
+}
+
+.o-discuss-Typing-icon {
+    padding: 1px 0px;
+    gap: 1px;
+
+    .o-mail-ImStatus &, .o-mail-ThreadIcon & {
+        gap: 2px; /* spread the dots in the pill, whose width fits them */
+    }
+}
+
+@keyframes o_mail_Typing_animation {
+    0%, 25%, 75% {
+        opacity: initial;
+        transform: scale(1);
+        filter: drop-shadow(0px 0px 5px rgba(0, 0, 0, .15));
+    }
+    50% {
+        opacity: 75%;
+        transform: scale(.85) translateY(-1px);
+        filter: drop-shadow(0px 0px 2px rgba(0, 0, 0, .15));
+    }
+}
+
+.o-discuss-Typing {
+    background-color: var(--gray-100);
+}
+
+.o-mail-DiscussContent .o-discuss-Typing {
+    transform: translateY(-85%);
+    /* Aligned with the first action inside the composer, whose own padding is 1.5rem. */
+    padding-inline-start: 2rem;
+}

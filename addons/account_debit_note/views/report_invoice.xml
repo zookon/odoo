@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <template id="report_invoice_document_inherit_debit_note" inherit_id="account.report_invoice_document">
+
+            <xpath expr="//div[@name='invoice_date']/t[@t-if=&quot;o.move_type == 'out_invoice'&quot;]" position="replace">
+                <t t-if="o.move_type == 'out_invoice' and o.debit_origin_id"><strong>Debit Note Date</strong></t>
+                <t t-elif="o.move_type == 'out_invoice'"><strong>Invoice Date</strong></t>
+            </xpath>
+
+        </template>
+    </data>
+</odoo>

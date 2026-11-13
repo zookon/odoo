@@ -1,361 +1,287 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # * uom
-# 
+#
 # Translators:
-# e2f <projects@e2f.com>, 2018
-# Martin Trigaux, 2018
-# Fabien Pinckaers <fp@openerp.com>, 2018
-# Adriana Ierfino <adriana.ierfino@savoirfairelinux.com>, 2018
-# Florian Hatat, 2018
-# Simon CARRIER <carrier.sim@gmail.com>, 2018
-# Lucas Deliege <lud@odoo.com>, 2018
-# Micky Jault <micky037@hotmail.fr>, 2018
-# Eloïse Stilmant <est@odoo.com>, 2018
-# Bertrand LATOUR <divoir@gmail.com>, 2018
+# Martin Trigaux, 2022
+# Cécile Collart <cco@odoo.com>, 2022
+# Jolien De Paepe, 2023
+# "Dylan Kiss (dyki)" <dyki@odoo.com>, 2025.
+# "Manon Rondou (ronm)" <ronm@odoo.com>, 2025, 2026.
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server saas~11.4\n"
+"Project-Id-Version: Odoo Server 16.0beta\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2018-08-02 09:56+0000\n"
-"PO-Revision-Date: 2018-08-02 09:56+0000\n"
-"Last-Translator: Bertrand LATOUR <divoir@gmail.com>, 2018\n"
-"Language-Team: French (https://www.transifex.com/odoo/teams/41243/fr/)\n"
+"POT-Creation-Date: 2026-09-11 17:43+0000\n"
+"PO-Revision-Date: 2026-08-31 20:45+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: French <https://translate.odoo.com/projects/odoo-s19-4/uom/fr/"
+">\n"
+"Language: fr\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: fr\n"
-"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+"Plural-Forms: nplurals=3; plural=(n == 0 || n == 1) ? 0 : ((n != 0 && n % "
+"1000000 == 0) ? 1 : 2);\n"
+"X-Generator: Weblate 2026.8.1\n"
+
+#. module: uom
+#: model:ir.module.module,description:base.module_uom
+msgid ""
+"\n"
+"This is the base module for managing Units of measure.\n"
+"========================================================================\n"
+msgstr ""
+
+#. module: uom
+#: model:ir.model.fields,field_description:uom.field_uom_uom__factor
+msgid "Absolute Quantity"
+msgstr "Quantité absolue"
+
+#. module: uom
+#: model:ir.model,name:uom.model_res_groups
+msgid "Access Groups"
+msgstr ""
 
 #. module: uom
 #: model:ir.model.fields,field_description:uom.field_uom_uom__active
 msgid "Active"
-msgstr "Actif/ve"
+msgstr "Actif"
 
 #. module: uom
-#: model:ir.actions.act_window,help:uom.product_uom_form_action
+#: model_terms:ir.actions.act_window,help:uom.uom_uom_action_list
 msgid "Add a new unit of measure"
-msgstr ""
+msgstr "Ajouter une nouvelle unité de mesure"
 
 #. module: uom
-#: model:ir.actions.act_window,help:uom.product_uom_categ_form_action
-msgid "Add a new unit of measure category"
-msgstr ""
+#: model_terms:ir.ui.view,arch_db:uom.uom_uom_view_search
+msgid "Archived"
+msgstr "Archivé"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_uom__factor_inv
-msgid "Bigger Ratio"
-msgstr "Ratio supérieur"
+#: model:ir.model.fields,field_description:uom.field_uom_uom__relative_factor
+msgid "Contains"
+msgstr "Contient"
 
 #. module: uom
-#: selection:uom.uom,uom_type:0
-msgid "Bigger than the reference Unit of Measure"
-msgstr "Plus grand que l'unité de mesure de référence"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_uom__category_id
-msgid "Category"
-msgstr "Catégorie"
-
-#. module: uom
-#: model:ir.model.fields,help:uom.field_uom_uom__category_id
-msgid ""
-"Conversion between Units of Measure can only occur if they belong to the "
-"same category. The conversion will be made based on the ratios."
-msgstr ""
-"Il est possible de convertir deux unités de mesures si elles appartiennent à"
-" la même catégorie. Cette conversion utilise les rapports définis pour ces "
-"unités."
-
-#. module: uom
-#: code:addons/uom/models/uom_uom.py:138
-#, python-format
-msgid ""
-"Conversion from Product UoM %s to Default UoM %s is not possible as they "
-"both belong to different Category!."
-msgstr ""
-"La conversion d'unité de mesure (UdM) de l'article %s dans l'UdM par défaut "
-"%s n'est pas possible car elles appartiennent à deux catégories différentes "
-"!"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__create_uid
 #: model:ir.model.fields,field_description:uom.field_uom_uom__create_uid
 msgid "Created by"
 msgstr "Créé par"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__create_date
 #: model:ir.model.fields,field_description:uom.field_uom_uom__create_date
 msgid "Created on"
 msgstr "Créé le"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_day
-msgid "Day(s)"
-msgstr "Jour(s)"
+msgid "Days"
+msgstr "Jours"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__display_name
+#: model:ir.model.fields,field_description:uom.field_res_groups__display_name
 #: model:ir.model.fields,field_description:uom.field_uom_uom__display_name
 msgid "Display Name"
-msgstr "Nom à afficher"
+msgstr "Nom d'affichage"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_dozen
-msgid "Dozen(s)"
-msgstr "Douzaine(s)"
+msgid "Dozens"
+msgstr "Douzaines"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_hour
-msgid "Hour(s)"
-msgstr "Heure(s)"
+msgid "Hours"
+msgstr "Heures"
 
 #. module: uom
-#: model:ir.model.fields,help:uom.field_uom_uom__factor_inv
+#: model:ir.model.fields,help:uom.field_uom_uom__relative_factor
 msgid ""
-"How many times this Unit of Measure is bigger than the reference Unit of "
-"Measure in this category: 1 * (this unit) = ratio * (reference unit)"
+"How much bigger or smaller this unit is compared to the reference UoM for "
+"this unit"
 msgstr ""
-"Combien de fois cette unité de mesure est plus grande que l'unité de mesure "
-"de référence de cette catégorie : 1 x (cette unité) = ratio x (unité de "
-"référence)"
+"Quelle est la différence de taille entre cette unité et l'unité de mesure de "
+"référence pour cette unité"
 
 #. module: uom
-#: model:ir.model.fields,help:uom.field_uom_uom__factor
-msgid ""
-"How much bigger or smaller this unit is compared to the reference Unit of "
-"Measure for this category: 1 * (reference unit) = ratio * (this unit)"
-msgstr ""
-"Combien de fois cette unité est plus petite ou plus grande que l'unité de "
-"mesure de référence de cette catégorie : 1 x (unité de référence) = ratio x "
-"(cette unité)"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__id
+#: model:ir.model.fields,field_description:uom.field_res_groups__id
 #: model:ir.model.fields,field_description:uom.field_uom_uom__id
 msgid "ID"
 msgstr "ID"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category____last_update
-#: model:ir.model.fields,field_description:uom.field_uom_uom____last_update
-msgid "Last Modified on"
-msgstr "Dernière modification le"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__write_uid
-#: model:ir.model.fields,field_description:uom.field_uom_uom__write_uid
-msgid "Last Updated by"
-msgstr "Dernière mise à jour par"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__write_date
-#: model:ir.model.fields,field_description:uom.field_uom_uom__write_date
-msgid "Last Updated on"
-msgstr "Dernière mise à jour le"
-
-#. module: uom
-#: selection:uom.category,measure_type:0
-msgid "Length"
-msgstr "Longueur"
-
-#. module: uom
-#: model:uom.category,name:uom.uom_categ_length
-msgid "Length / Distance"
-msgstr "Longueur/distance"
+#: model:uom.uom,name:uom.product_uom_kwh
+msgid "KWH"
+msgstr "KWH"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_litre
-msgid "Liter(s)"
-msgstr "Litre(s)"
+msgid "L"
+msgstr "L"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_res_users__has_group_uom
+#: model:ir.model.fields,field_description:uom.field_uom_uom__write_uid
+msgid "Last Updated by"
+msgstr "Mis à jour par"
+
+#. module: uom
+#: model:ir.model.fields,field_description:uom.field_uom_uom__write_date
+msgid "Last Updated on"
+msgstr "Mis à jour le"
+
+#. module: uom
 #: model:res.groups,name:uom.group_uom
 msgid "Manage Multiple Units of Measure"
 msgstr "Gérer plusieurs unités de mesure"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__name
-msgid "Name"
-msgstr "Nom"
+#: model:uom.uom,name:uom.product_uom_minute
+msgid "Minutes"
+msgstr "Minutes"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_pack_6
+msgid "Pack of 6"
+msgstr "Pack de 6"
+
+#. module: uom
+#: model:ir.model.fields,field_description:uom.field_uom_uom__parent_path
+msgid "Parent Path"
+msgstr "Chemin parent"
+
+#. module: uom
+#. odoo-javascript
+#: code:addons/uom/static/src/components/many2one_uom/many2one_uom_field.js:0
+#: code:addons/uom/static/src/components/many2x_uom_tags/many2x_uom_tags.js:0
+msgid "Product Field Name"
+msgstr "Nom du champ produit"
 
 #. module: uom
 #: model:ir.model,name:uom.model_uom_uom
 msgid "Product Unit of Measure"
-msgstr "Unité de mesure d'article"
+msgstr "Unité de mesure du produit"
 
 #. module: uom
-#: model:ir.model,name:uom.model_uom_category
-msgid "Product UoM Categories"
-msgstr "Catégorie d'UdM"
+#: model_terms:ir.ui.view,arch_db:uom.uom_uom_view_form
+msgid "Quantity"
+msgstr "Quantité"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_uom__factor
-msgid "Ratio"
-msgstr "Ratio"
+#. odoo-javascript
+#: code:addons/uom/static/src/components/many2one_uom/many2one_uom_field.js:0
+#: code:addons/uom/static/src/components/many2x_uom_tags/many2x_uom_tags.js:0
+msgid "Quantity Field Name"
+msgstr "Nom du champ quantité"
 
 #. module: uom
-#: selection:uom.uom,uom_type:0
-msgid "Reference Unit of Measure for this category"
-msgstr "Unité de mesure de référence pour cette catégorie"
+#: model:ir.model.fields,field_description:uom.field_uom_uom__relative_uom_id
+#: model_terms:ir.ui.view,arch_db:uom.uom_uom_view_form
+msgid "Reference Unit"
+msgstr "Unité de référence"
 
 #. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_uom__rounding
-msgid "Rounding Precision"
-msgstr "Précision d'arrondi"
+#. odoo-python
+#: code:addons/uom/models/uom_uom.py:0
+msgid "Reference unit of measure is missing."
+msgstr "L'unité de mesure de référence est manquante."
 
 #. module: uom
-#: selection:uom.uom,uom_type:0
-msgid "Smaller than the reference Unit of Measure"
-msgstr "Plus petit que l'unité de référence"
+#: model:ir.model.fields,field_description:uom.field_uom_uom__related_uom_ids
+msgid "Related UoMs"
+msgstr "Unités de mesure liées"
 
 #. module: uom
-#: model:ir.model.fields,help:uom.field_uom_uom__rounding
+#: model_terms:ir.ui.view,arch_db:uom.uom_uom_view_search
+msgid "Search UOM"
+msgstr "Rechercher UdM"
+
+#. module: uom
+#: model:ir.model.fields,field_description:uom.field_uom_uom__sequence
+msgid "Sequence"
+msgstr "Séquence"
+
+#. module: uom
+#. odoo-python
+#: code:addons/uom/models/uom_uom.py:0
 msgid ""
-"The computed quantity will be a multiple of this value. Use 1.0 for a Unit "
-"of Measure that cannot be further split, such as a piece."
+"Some critical fields have been modified on %s.\n"
+"Note that existing data WON'T be updated by this change.\n"
+"\n"
+"As units of measure impact the whole system, this may cause critical "
+"issues.\n"
+"Therefore, changing core units of measure in a running database is not "
+"recommended."
 msgstr ""
-"La quantité calculée sera un multiple de cette valeur. Utilisez 1,0 pour une"
-" unité de mesure indivisible telle que la pièce."
+"Certains champs critiques ont été modifiés sur %s.\n"
+"Veuillez noter que les données existantes NE SERONT PAS mises à jour par ce "
+"changement.\n"
+"Étant donné que les unités de mesure impactent l'ensemble du système, cela "
+"peut causer des problèmes critiques.\n"
+"Par conséquent, modifier les unités de mesure principales dans une base de "
+"données en fonctionnement n'est pas recommandé."
 
 #. module: uom
-#: sql_constraint:uom.uom:0
+#: model:ir.model.constraint,message:uom.constraint_uom_uom_factor_gt_zero
 msgid "The conversion ratio for a unit of measure cannot be 0!"
-msgstr "Le rapport de conversion d'une unité de mesure ne peut pas être 0 !"
+msgstr "Le facteur de conversion d'une unité de mesure ne peut pas être 0 !"
 
 #. module: uom
-#: sql_constraint:uom.uom:0
-msgid "The rounding precision must be greater than 0!"
-msgstr "L'arrondissement doit être supérieur à 0 !"
-
-#. module: uom
-#: selection:uom.category,measure_type:0
-msgid "Time"
-msgstr "Heure"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_uom__uom_type
-msgid "Type"
-msgstr "Type"
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_category__measure_type
-msgid "Type of Measure"
+#. odoo-python
+#: code:addons/uom/models/uom_uom.py:0
+msgid ""
+"The following units of measure are used by the system and cannot be deleted: "
+"%s\n"
+"You can archive them instead."
 msgstr ""
-
-#. module: uom
-#: model:ir.model.fields,field_description:uom.field_uom_uom__measure_type
-msgid "Type of measurement category"
-msgstr ""
+"Les unités de mesure suivantes sont utilisées par le système et ne peuvent "
+"pas être supprimées : %s\n"
+"Vous pouvez les archiver à la place."
 
 #. module: uom
 #: model:ir.model.fields,help:uom.field_uom_uom__active
 msgid ""
 "Uncheck the active field to disable a unit of measure without deleting it."
 msgstr ""
-"Décochez le champ actif de désactiver une unité de mesure sans la supprimer."
-
-#. module: uom
-#: model:uom.category,name:uom.product_uom_categ_unit
-msgid "Unit"
-msgstr "Unité"
+"Décochez le champ actif pour désactiver une unité de mesure sans la "
+"supprimer."
 
 #. module: uom
 #: model:ir.model.fields,field_description:uom.field_uom_uom__name
-msgid "Unit of Measure"
-msgstr "Unité de mesure"
-
-#. module: uom
-#: model:ir.actions.act_window,name:uom.product_uom_categ_form_action
-msgid "Unit of Measure Categories"
-msgstr "Catégories d'unités de mesure"
+msgid "Unit Name"
+msgstr "Nom de l'unité"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_unit
-msgid "Unit(s)"
+msgid "Units"
 msgstr "Unité(s)"
 
 #. module: uom
-#: selection:uom.category,measure_type:0
-msgid "Units"
-msgstr ""
+#: model:ir.actions.act_window,name:uom.uom_uom_action_list
+#: model_terms:ir.ui.view,arch_db:uom.uom_uom_view_list
+msgid "Units & Packagings"
+msgstr "Unités et conditionnements"
 
 #. module: uom
-#: model:ir.actions.act_window,name:uom.product_uom_form_action
-#: model:ir.ui.view,arch_db:uom.product_uom_form_view
-#: model:ir.ui.view,arch_db:uom.product_uom_tree_view
+#: model_terms:ir.ui.view,arch_db:uom.uom_uom_view_form
 msgid "Units of Measure"
 msgstr "Unités de mesure"
 
 #. module: uom
-#: model:ir.ui.view,arch_db:uom.product_uom_categ_form_view
-msgid "Units of Measure categories"
-msgstr "Catégories d'unités de mesure"
-
-#. module: uom
-#: model:ir.actions.act_window,help:uom.product_uom_categ_form_action
-msgid ""
-"Units of measure belonging to the same category can be\n"
-"            converted between each others. For example, in the category\n"
-"            <i>'Time'</i>, you will have the following units of measure:\n"
-"            Hours, Days."
-msgstr ""
-"Les unités de mesure appartenant à la même catégorie peuvent être\n"
-" converties entre elles. Par exemple, dans la catégorie\n"
-" <i>« Temps »</i>, vous aurez les unités de mesure suivantes : \n"
-" heures, jours."
-
-#. module: uom
-#: code:addons/uom/models/uom_uom.py:86
-#, python-format
-msgid ""
-"UoM category %s should have a reference unit of measure. If you just created"
-" a new category, please record the 'reference' unit first."
+#: model:ir.module.module,shortdesc:base.module_uom
+msgid "Units of measure"
 msgstr ""
 
 #. module: uom
-#: code:addons/uom/models/uom_uom.py:88
-#, python-format
-msgid "UoM category %s should only have one reference unit of measure."
-msgstr ""
+#. odoo-javascript
+#: code:addons/uom/static/src/components/many2one_uom/many2one_uom_field.js:0
+msgid "Unnamed"
+msgstr "Sans nom"
 
 #. module: uom
-#: model:ir.model,name:uom.model_res_users
-msgid "Users"
-msgstr "Utilisateurs"
-
-#. module: uom
-#: selection:uom.category,measure_type:0
-#: model:uom.category,name:uom.product_uom_categ_vol
-msgid "Volume"
-msgstr "Volume"
-
-#. module: uom
-#: selection:uom.category,measure_type:0
-#: model:uom.category,name:uom.product_uom_categ_kgm
-msgid "Weight"
-msgstr "Poids"
-
-#. module: uom
-#: model:uom.category,name:uom.uom_categ_wtime
-msgid "Working Time"
-msgstr "Temps de travail"
-
-#. module: uom
-#: sql_constraint:uom.category:0
-msgid "You can have only one category per measurement type."
-msgstr ""
-
-#. module: uom
-#: model:ir.actions.act_window,help:uom.product_uom_form_action
-msgid ""
-"You must define a conversion rate between several Units of\n"
-"            Measure within the same category."
-msgstr ""
-"Vous devez définir un taux de conversion entre plusieurs unités de\n"
-" mesure au sein de la même catégorie."
+#. odoo-python
+#: code:addons/uom/models/uom_uom.py:0
+msgid "Warning for %s"
+msgstr "Avertissement pour %s"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_cm
@@ -363,34 +289,44 @@ msgid "cm"
 msgstr "cm"
 
 #. module: uom
-#: model:ir.ui.view,arch_db:uom.product_uom_form_view
-msgid "e.g: 1 * (reference unit) = ratio * (this unit)"
-msgstr "ex : 1 * (unité de référence) = rapport * (cette unité)"
-
-#. module: uom
-#: model:ir.ui.view,arch_db:uom.product_uom_form_view
-msgid "e.g: 1 * (this unit) = ratio * (reference unit)"
-msgstr "ex. : 1 x (cette unité) = rapport x (unité de référence)"
-
-#. module: uom
 #: model:uom.uom,name:uom.product_uom_floz
-msgid "fl oz"
-msgstr "fl oz"
+msgid "fl oz (US)"
+msgstr "fl oz (US)"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_foot
-msgid "foot(ft)"
-msgstr "pied (ft)"
+msgid "ft"
+msgstr "ft"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_square_foot
+msgid "ft²"
+msgstr "ft²"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_cubic_foot
+msgid "ft³"
+msgstr "ft³"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_gram
+msgid "g"
+msgstr "g"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_gal
-msgid "gal(s)"
-msgstr "gal(s)"
+msgid "gal (US)"
+msgstr "gal (US)"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_inch
-msgid "inch(es)"
-msgstr "pouce(s)"
+msgid "in"
+msgstr "in"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_cubic_inch
+msgid "in³"
+msgstr "in³"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_kgm
@@ -404,20 +340,55 @@ msgstr "km"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_lb
-msgid "lb(s)"
-msgstr "lb(s)"
+msgid "lb"
+msgstr "lb"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_meter
+msgid "m"
+msgstr "m"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_mile
-msgid "mile(s)"
-msgstr "mile(s)"
+msgid "mi"
+msgstr "mi"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_milliliter
+msgid "ml"
+msgstr "ml"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_millimeter
+msgid "mm"
+msgstr "mm"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_square_meter
+msgid "m²"
+msgstr "m²"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_cubic_meter
+msgid "m³"
+msgstr "m³"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_oz
-msgid "oz(s)"
-msgstr "oz(s)"
+msgid "oz"
+msgstr "oz"
 
 #. module: uom
 #: model:uom.uom,name:uom.product_uom_qt
-msgid "qt"
-msgstr "qt"
+msgid "qt (US)"
+msgstr "qt (US)"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_ton
+msgid "t"
+msgstr "t"
+
+#. module: uom
+#: model:uom.uom,name:uom.product_uom_yard
+msgid "yd"
+msgstr "yd"

@@ -1,97 +1,203 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-import base64
-import os
-import re
 
-from odoo import api, fields, models, tools, _
-from odoo.exceptions import ValidationError, UserError
+import logging
+
+from psycopg2.extras import Json
+from zeep.cache import Base as ZeepCache
+
+from odoo import api, fields, models, modules, tools
+from odoo.api import SUPERUSER_ID, ormcache
+from odoo.exceptions import UserError, ValidationError
+from odoo.fields import Command, Domain
+from odoo.tools import SQL, BinaryBytes, file_open, html2plaintext, zeep
+from odoo.tools.image import image_process
+from odoo.tools.sql import table_columns
+
+_logger = logging.getLogger(__name__)
 
 
-class Company(models.Model):
-    _name = "res.company"
-    _description = 'Companies'
+def company_default_for(fname, target_model, target_fname):
+    """Return the attributes needed to sync a company field with `ir.default` for company dependent fields."""
+    def _compute_from_ir_default(self):
+        model = self.env[target_model]
+        field = model._fields[target_fname]
+        for company in self:
+            default = field.get_company_dependent_fallback(model.with_company(company))
+            if field.type == 'many2one':
+                default = default.exists()
+            company[fname] = default
+
+    def _inverse_to_ir_default(self):
+        # guard against invalidation
+        company_defaults = {company: self._fields[fname].convert_to_cache(company[fname], company) for company in self}
+        for company in self:
+            self.env['ir.default'].with_user(SUPERUSER_ID).set(target_model, target_fname, company_defaults[company], company_id=company.id)
+
+    def _compute_sql_ir_default(self, table):
+        model = self.env[target_model]
+        field = model._fields[target_fname]
+        data = {}
+        for company_id in self.env['res.company'].sudo()._cached_data()['id']:
+            model = model.with_company(company_id)
+            data[company_id] = field.convert_to_column(field.convert_to_write(field.get_company_dependent_fallback(model), model), model)
+        default_sql = SQL("(%s::jsonb->>%s::text)::%s", Json(data), table.id, field.sql_column_type)
+        if field.type == 'many2one':
+            related_alias = table._make_alias(fname)
+            table._query.add_join('LEFT JOIN', related_alias, self.env[field.comodel_name]._table, SQL("%s = %s", default_sql, related_alias.id))
+            return related_alias.id
+        return default_sql
+
+    return {
+        'company_default_for': (fname, target_model, target_fname),
+        'compute': _compute_from_ir_default,
+        'inverse': _inverse_to_ir_default,
+        'compute_sql': _compute_sql_ir_default,
+        'compute_sudo': True,
+        'write_sequence': -10,  # inverse before other fields to apply the company default
+    }
+
+
+class ResCompany(models.CachedModel):
+    _name = 'res.company'
+    _description = 'Company'
+    _explanation = "Represents a legal entity within the Odoo database. Odoo supports multi-company environments where each company has its own settings, chart of accounts, and business data."
     _order = 'sequence, name'
+    _inherit = ['format.address.mixin', 'format.vat.label.mixin']
+    _parent_store = True
+    _clear_asset_cache_on_fields = {'font', 'primary_color', 'secondary_color', 'external_report_layout_id'}
+    _cached_data_fields = ('name', 'active', 'sequence', 'currency_id', 'parent_id', 'partner_id')
 
-    @api.multi
     def copy(self, default=None):
-        raise UserError(_('Duplicating a company is not allowed. Please create a new company instead.'))
+        raise UserError(self.env._('Duplicating a company is not allowed. Please create a new company instead.'))
 
     def _get_logo(self):
-        return base64.b64encode(open(os.path.join(tools.config['root_path'], 'addons', 'base', 'static', 'img', 'res_company_logo.png'), 'rb') .read())
+        with file_open('base/static/img/res_company_logo.png', 'rb') as f:
+            return BinaryBytes(f.read(), filename='logo.png')
 
-    @api.model
-    def _get_euro(self):
-        return self.env['res.currency.rate'].search([('rate', '=', 1)], limit=1).currency_id
+    def _default_currency_id(self):
+        if not self.env.registry.ready and not (set(self._cached_data_fields) <= table_columns(self.env.cr, self._table).keys()):
+            # The database is being initialized, _init_column calls and tries to
+            # access the cache.
+            return None
+        return self.env.user.company_id.currency_id
 
-    @api.model
-    def _get_user_currency(self):
-        currency_id = self.env['res.users'].browse(self._uid).company_id.currency_id
-        return currency_id or self._get_euro()
-
-    name = fields.Char(related='partner_id.name', string='Company Name', required=True, store=True)
+    name = fields.Char(related='partner_id.name', string='Company Name', required=True, store=True, readonly=False)
+    active = fields.Boolean(default=True)
     sequence = fields.Integer(help='Used to order Companies in the company switcher', default=10)
-    parent_id = fields.Many2one('res.company', string='Parent Company', index=True)
-    child_ids = fields.One2many('res.company', 'parent_id', string='Child Companies')
-    partner_id = fields.Many2one('res.partner', string='Partner', required=True)
-    report_header = fields.Text(string='Company Tagline', help="Appears by default on the top right corner of your printed documents (report header).")
-    report_footer = fields.Text(string='Report Footer', translate=True, help="Footer text displayed at the bottom of all reports.")
-    logo = fields.Binary(related='partner_id.image', default=_get_logo, string="Company Logo")
-    # logo_web: do not store in attachments, since the image is retrieved in SQL for
-    # performance reasons (see addons/web/controllers/main.py, Binary.company_logo)
+    parent_id = fields.Many2one('res.company', string='Parent Company', index=True, ondelete='restrict')
+    child_ids = fields.One2many('res.company', 'parent_id', string='Branches')
+    all_child_ids = fields.One2many('res.company', 'parent_id', context={'active_test': False})
+    parent_path = fields.Char(index=True)
+    parent_ids = fields.Many2many('res.company', compute='_compute_parent_ids', compute_sudo=True)
+    root_id = fields.Many2one('res.company', compute='_compute_parent_ids', compute_sudo=True)
+    partner_id = fields.Many2one('res.partner', string='Partner', required=True, index=True)
+    report_header = fields.Html(string='Company Tagline', translate=True, help="Company tagline, which is included in a printed document's header or footer (depending on the selected layout).")
+    report_footer = fields.Html(string='Report Footer', translate=True, help="Footer text displayed at the bottom of all reports.")
+    company_details = fields.Html(
+        string="Company Details",
+        translate=True,
+        help="Header text displayed at the top of all reports.",
+        compute="_compute_parent_fields",
+        store=True,
+        readonly=False,
+        recursive=True,
+    )
+    is_company_details_empty = fields.Boolean(compute='_compute_empty_company_details')
+    logo = fields.Binary(related='partner_id.image_1920', default=_get_logo, string="Company Logo", readonly=False)
     logo_web = fields.Binary(compute='_compute_logo_web', store=True)
-    currency_id = fields.Many2one('res.currency', string='Currency', required=True, default=lambda self: self._get_user_currency())
+    uses_default_logo = fields.Boolean(compute='_compute_uses_default_logo', store=True)
+    currency_id = fields.Many2one('res.currency', string='Currency', required=True, default=lambda self: self._default_currency_id())
     user_ids = fields.Many2many('res.users', 'res_company_users_rel', 'cid', 'user_id', string='Accepted Users')
-    account_no = fields.Char(string='Account No.')
     street = fields.Char(compute='_compute_address', inverse='_inverse_street')
     street2 = fields.Char(compute='_compute_address', inverse='_inverse_street2')
     zip = fields.Char(compute='_compute_address', inverse='_inverse_zip')
     city = fields.Char(compute='_compute_address', inverse='_inverse_city')
-    state_id = fields.Many2one('res.country.state', compute='_compute_address', inverse='_inverse_state', string="Fed. State")
-    bank_ids = fields.One2many('res.partner.bank', 'company_id', string='Bank Accounts', help='Bank accounts related to this company')
+    state_id = fields.Many2one(
+        'res.country.state', compute='_compute_address', inverse='_inverse_state',
+        string="Fed. State", ui_domain="[('country_id', '=?', country_id)]"
+    )
+    bank_ids = fields.One2many(related='partner_id.bank_ids', readonly=False)
     country_id = fields.Many2one('res.country', compute='_compute_address', inverse='_inverse_country', string="Country")
-    email = fields.Char(related='partner_id.email', store=True)
-    phone = fields.Char(related='partner_id.phone', store=True)
-    website = fields.Char(related='partner_id.website')
-    vat = fields.Char(related='partner_id.vat', string="Tax ID")
-    company_registry = fields.Char()
+    # Technical field to hide country specific fields in company form view
+    country_code = fields.Char(related='country_id.code', depends=['country_id'])
+    email = fields.Char(related='partner_id.email', store=True, readonly=False)
+    phone = fields.Char(related='partner_id.phone', store=True, readonly=False)
+    website = fields.Char(related='partner_id.website', readonly=False)
+    vat = fields.Char(related='partner_id.vat', string="Tax ID", readonly=False)
+    has_vat = fields.Boolean(related='partner_id.has_vat', depends=['vat'])
+    additional_identifiers = fields.Json(related='partner_id.additional_identifiers', readonly=False)
+    available_additional_identifiers_metadata = fields.Json(related='partner_id.available_additional_identifiers_metadata')
     paperformat_id = fields.Many2one('report.paperformat', 'Paper format', default=lambda self: self.env.ref('base.paperformat_euro', raise_if_not_found=False))
     external_report_layout_id = fields.Many2one('ir.ui.view', 'Document Template')
-    _sql_constraints = [
-        ('name_uniq', 'unique (name)', 'The company name must be unique !')
-    ]
+    report_tables_id = fields.Selection([
+        ('light', 'Light'),
+        ('boxed', 'Boxed'),
+        ('bold', 'Bold'),
+        ('striped', 'Striped'),
+        ('bubble', 'Bubble'),
+        ('column', 'Column'),
+        ('compact', 'Compact'),
+    ], string='Table Design', default='light')
+    font = fields.Selection([("Lato", "Lato"), ("Roboto", "Roboto"), ("Open_Sans", "Open Sans"), ("Montserrat", "Montserrat"), ("Oswald", "Oswald"), ("Raleway", "Raleway"), ('Tajawal', 'Tajawal'), ('Noto_Sans_Mono', 'Noto Sans Mono')], default="Lato")
+    primary_color = fields.Char()
+    secondary_color = fields.Char()
+    color = fields.Integer(compute='_compute_color', inverse='_inverse_color')
+    uninstalled_l10n_module_ids = fields.Many2many('ir.module.module', compute='_compute_uninstalled_l10n_module_ids')
 
-    base_onboarding_company_state = fields.Selection([
-        ('not_done', "Not done"), ('just_done', "Just done"), ('done', "Done")], string="State of the onboarding company step", default='not_done')
+    _name_uniq = models.Constraint(
+        'unique (name)',
+        "The company name must be unique!",
+    )
 
-    @api.model_cr
     def init(self):
         for company in self.search([('paperformat_id', '=', False)]):
             paperformat_euro = self.env.ref('base.paperformat_euro', False)
             if paperformat_euro:
                 company.write({'paperformat_id': paperformat_euro.id})
-        sup = super(Company, self)
-        if hasattr(sup, 'init'):
-            sup.init()
+        if any(hasattr(f, 'company_default_for') for f in self._fields.values()):
+            def init_company_defaults(env):
+                env['res.company'].with_context(active_test=False).search([])._init_company_defaults()
+            self.pool.post_init(init_company_defaults, self.env)
+        super().init()
 
-    def _get_company_address_fields(self, partner):
-        return {
-            'street'     : partner.street,
-            'street2'    : partner.street2,
-            'city'       : partner.city,
-            'zip'        : partner.zip,
-            'state_id'   : partner.state_id,
-            'country_id' : partner.country_id,
-        }
+    def _get_company_root_delegated_field_names(self):
+        """Get the set of fields delegated to the root company.
 
-    # TODO @api.depends(): currently now way to formulate the dependency on the
-    # partner's contact address
+        Some fields need to be identical on all branches of the company. All
+        fields listed by this function will be copied from the root company and
+        appear as readonly in the form view.
+        :rtype: set
+        """
+        return ['currency_id']
+
+    def _get_company_address_field_names(self):
+        """ Return a list of fields coming from the address partner to match
+        on company address fields. Fields are labeled same on both models. """
+        return ['street', 'street2', 'city', 'zip', 'state_id', 'country_id']
+
+    def _get_company_address_update(self, partner):
+        return dict((fname, partner[fname])
+                    for fname in self._get_company_address_field_names())
+
+    @api.depends('parent_id', 'parent_id.company_details')
+    def _compute_parent_fields(self):
+        for company in self:
+            if company.parent_id and not company.company_details:
+                company.company_details = company.parent_id.company_details
+
+    @api.depends('parent_path')
+    def _compute_parent_ids(self):
+        for company in self.with_context(active_test=False):
+            company.parent_ids = self.browse(int(id) for id in company.parent_path.split('/') if id) if company.parent_path else company
+            company.root_id = company.parent_ids[0]
+
+    @api.depends(lambda self: [f'partner_id.{fname}' for fname in self._get_company_address_field_names()])
     def _compute_address(self):
         for company in self.filtered(lambda company: company.partner_id):
             address_data = company.partner_id.sudo().address_get(adr_pref=['contact'])
             if address_data['contact']:
                 partner = company.partner_id.browse(address_data['contact']).sudo()
-                company.update(company._get_company_address_fields(partner))
+                company.update(company._get_company_address_update(partner))
 
     def _inverse_street(self):
         for company in self:
@@ -117,182 +223,367 @@ class Company(models.Model):
         for company in self:
             company.partner_id.country_id = company.country_id
 
-    @api.depends('partner_id', 'partner_id.image')
+    @api.depends('partner_id.image_1920')
     def _compute_logo_web(self):
         for company in self:
-            company.logo_web = tools.image_resize_image(company.partner_id.image, (180, None))
+            img = company.partner_id.image_1920
+            company.logo_web = img and BinaryBytes(image_process(img.content, size=(180, 0)), filename='logo.png')
+
+    @api.depends('partner_id.image_1920')
+    def _compute_uses_default_logo(self):
+        default_logo = self._get_logo()
+        for company in self:
+            company.uses_default_logo = not company.logo or company.logo.content == default_logo.content
+
+    @api.depends('root_id')
+    def _compute_color(self):
+        for company in self:
+            company.color = company.root_id.partner_id.color or (company.root_id._origin.id % 12)
+
+    def _inverse_color(self):
+        for company in self:
+            company.root_id.partner_id.color = company.color
 
     @api.onchange('state_id')
     def _onchange_state(self):
-        self.country_id = self.state_id.country_id
-
-    @api.multi
-    def on_change_country(self, country_id):
-        # This function is called from account/models/chart_template.py, hence decorated with `multi`.
-        self.ensure_one()
-        currency_id = self._get_user_currency()
-        if country_id:
-            currency_id = self.env['res.country'].browse(country_id).currency_id
-        return {'value': {'currency_id': currency_id.id}}
+        if self.state_id.country_id:
+            self.country_id = self.state_id.country_id
 
     @api.onchange('country_id')
-    def _onchange_country_id_wrapper(self):
-        res = {'domain': {'state_id': []}}
+    def _onchange_country_id(self):
         if self.country_id:
-            res['domain']['state_id'] = [('country_id', '=', self.country_id.id)]
-        values = self.on_change_country(self.country_id.id)['value']
-        for fname, value in values.items():
-            setattr(self, fname, value)
-        return res
+            self.currency_id = self.country_id.currency_id
+
+    @api.onchange('parent_id')
+    def _onchange_parent_id(self):
+        if self.parent_id:
+            for fname in self._get_company_root_delegated_field_names():
+                if self[fname] != self.parent_id[fname]:
+                    self[fname] = self.parent_id[fname]
+
+    @api.depends('country_id')
+    def _compute_uninstalled_l10n_module_ids(self):
+        # This will only compute uninstalled modules with auto-install without recursion,
+        # the rest will eventually be handled by `button_install`
+        self.env['ir.module.module'].flush_model(['auto_install', 'country_ids', 'dependencies_id'])
+        self.env['ir.module.module.dependency'].flush_model()
+        self.env.cr.execute("""
+            SELECT country.id,
+                   ARRAY_AGG(module.id)
+              FROM ir_module_module module,
+                   res_country country
+             WHERE module.auto_install
+               AND state NOT IN %(install_states)s
+               AND NOT EXISTS (
+                       SELECT 1
+                         FROM ir_module_module_dependency d
+                         JOIN ir_module_module mdep ON (d.name = mdep.name)
+                        WHERE d.module_id = module.id
+                          AND d.auto_install_required
+                          AND mdep.state NOT IN %(install_states)s
+                   )
+               AND EXISTS (
+                       SELECT 1
+                         FROM module_country mc
+                        WHERE mc.module_id = module.id
+                          AND mc.country_id = country.id
+                   )
+               AND country.id = ANY(%(country_ids)s)
+          GROUP BY country.id
+        """, {
+            'country_ids': self.country_id.ids,
+            'install_states': ('installed', 'to install', 'to upgrade'),
+        })
+        mapping = dict(self.env.cr.fetchall())
+        for company in self:
+            company.uninstalled_l10n_module_ids = self.env['ir.module.module'].browse(mapping.get(company.country_id.id))
+
+    def install_l10n_modules(self):
+        self.env.flush_all()
+        uninstalled_modules = self.uninstalled_l10n_module_ids
+        is_ready_and_not_test = (
+            not tools.config['test_enable']
+            and self.env.registry.ready
+            and not modules.module.current_test
+            and not self.env.context.get('install_mode') and not self.env.context.get('import_file')  # due to savepoint when importing the file
+        )
+        if uninstalled_modules and is_ready_and_not_test:
+            return uninstalled_modules.button_immediate_install()
+        return is_ready_and_not_test
 
     @api.model
-    def _name_search(self, name, args=None, operator='ilike', limit=100, name_get_uid=None):
+    def _get_view(self, view_id=None, view_type='form', **options):
+        delegated_fnames = set(self._get_company_root_delegated_field_names())
+        arch, view = super()._get_view(view_id, view_type, **options)
+        for f in arch.iter("field"):
+            if f.get('name') in delegated_fnames:
+                f.set('readonly', "parent_id != False")
+        return arch, view
+
+    @api.model
+    def _search_display_name(self, operator, value):
         context = dict(self.env.context)
         newself = self
+        constraint = Domain.TRUE
         if context.pop('user_preference', None):
             # We browse as superuser. Otherwise, the user would be able to
             # select only the currently visible companies (according to rules,
             # which are probably to allow to see the child companies) even if
             # she belongs to some other companies.
-            companies = self.env.user.company_id + self.env.user.company_ids
-            args = (args or []) + [('id', 'in', companies.ids)]
+            companies = self.env.user.company_ids
+            constraint = Domain('id', 'in', companies.ids)
             newself = newself.sudo()
-        return super(Company, newself.with_context(context))._name_search(name=name, args=args, operator=operator, limit=limit, name_get_uid=name_get_uid)
+        newself = newself.with_context(context)
+        domain = super(ResCompany, newself)._search_display_name(operator, value)
+        return domain & constraint
 
-    @api.model
-    @api.returns('self', lambda value: value.id)
-    def _company_default_get(self, object=False, field=False):
-        """ Returns the default company (usually the user's company).
-        The 'object' and 'field' arguments are ignored but left here for
-        backward compatibility and potential override.
-        """
-        return self.env['res.users']._get_company()
+    @api.depends('company_details')
+    def _compute_empty_company_details(self):
+        # In recent change when an html field is empty a <p> balise remains with a <br> in it,
+        # but when company details is empty we want to put the info of the company
+        for record in self:
+            record.is_company_details_empty = not html2plaintext(record.company_details or '')
 
-    @api.model
-    @tools.ormcache('self.env.uid', 'company')
-    def _get_company_children(self, company=None):
-        if not company:
-            return []
-        return self.search([('parent_id', 'child_of', [company])]).ids
+    @api.model_create_multi
+    def create(self, vals_list):
 
-    @api.multi
-    def _get_partner_hierarchy(self):
-        self.ensure_one()
-        parent = self.parent_id
-        if parent:
-            return parent._get_partner_hierarchy()
-        else:
-            return self._get_partner_descendance([])
+        # create missing partners
+        no_partner_vals_list = [
+            vals
+            for vals in vals_list
+            if vals.get('name') and not vals.get('partner_id')
+        ]
+        if no_partner_vals_list:
+            partners = self.env['res.partner'].with_context(
+                default_parent_id=False,
+                default_company_id=False,
+            ).create([
+                {
+                    'name': vals['name'],
+                    'image_1920': vals.get('logo'),
+                    'email': vals.get('email'),
+                    'phone': vals.get('phone'),
+                    'website': vals.get('website'),
+                    'vat': vals.get('vat'),
+                    'country_id': vals.get('country_id'),
+                }
+                for vals in no_partner_vals_list
+            ])
+            # compute stored fields, for example address dependent fields
+            partners.flush_model()
+            for vals, partner in zip(no_partner_vals_list, partners):
+                vals['partner_id'] = partner.id
 
-    @api.multi
-    def _get_partner_descendance(self, descendance):
-        self.ensure_one()
-        descendance.append(self.partner_id.id)
-        for child_id in self._get_company_children(self.id):
-            if child_id != self.id:
-                descendance = self.browse(child_id)._get_partner_descendance(descendance)
-        return descendance
+        for vals in vals_list:
+            # Copy delegated fields from root to branches
+            if parent := self.browse(vals.get('parent_id')):
+                for fname in self._get_company_root_delegated_field_names():
+                    vals.setdefault(fname, self._fields[fname].convert_to_write(parent[fname], parent))
 
-    # deprecated, use clear_caches() instead
-    def cache_restart(self):
-        self.clear_caches()
+        companies = super().create(vals_list)
 
-    @api.model
-    def create(self, vals):
-        if not vals.get('name') or vals.get('partner_id'):
-            self.clear_caches()
-            return super(Company, self).create(vals)
-        partner = self.env['res.partner'].create({
-            'name': vals['name'],
-            'is_company': True,
-            'image': vals.get('logo'),
-            'customer': False,
-            'email': vals.get('email'),
-            'phone': vals.get('phone'),
-            'website': vals.get('website'),
-            'vat': vals.get('vat'),
-        })
-        vals['partner_id'] = partner.id
-        self.clear_caches()
-        company = super(Company, self).create(vals)
         # The write is made on the user to set it automatically in the multi company group.
-        self.env.user.write({'company_ids': [(4, company.id)]})
-        partner.write({'company_id': company.id})
+        if companies:
+            (self.env.user | self.env['res.users'].browse(SUPERUSER_ID)).write({
+                'company_ids': [Command.link(company.id) for company in companies],
+            })
 
-        # Make sure that the selected currency is enabled
+        # Make sure that the selected currencies are enabled
+        companies.currency_id.sudo().filtered(lambda c: not c.active).active = True
+
+        companies_needs_l10n = companies.filtered('country_id')
+        if companies_needs_l10n:
+            companies_needs_l10n.install_l10n_modules()
+
+        companies._init_company_defaults()
+        return companies
+
+    def write(self, vals):
+        if 'parent_id' in vals:
+            raise UserError(self.env._("The company hierarchy cannot be changed."))
+
         if vals.get('currency_id'):
             currency = self.env['res.currency'].browse(vals['currency_id'])
             if not currency.active:
                 currency.write({'active': True})
-        return company
 
-    @api.multi
-    def write(self, values):
-        self.clear_caches()
-        # Make sure that the selected currency is enabled
-        if values.get('currency_id'):
-            currency = self.env['res.currency'].browse(values['currency_id'])
-            if not currency.active:
-                currency.write({'active': True})
+        # computed before the write: afterwards, every company has the new country
+        companies_needs_l10n = (
+            vals.get('country_id')
+            and self.filtered(lambda company: not company.country_id)
+        ) or self.browse()
 
-        return super(Company, self).write(values)
+        res = super().write(vals)
 
-    @api.constrains('parent_id')
-    def _check_parent_id(self):
-        if not self._check_recursion():
-            raise ValidationError(_('You cannot create recursive companies.'))
+        if any(self._ids) and not self._clear_asset_cache_on_fields.isdisjoint(vals):
+            # this is used in the content of an asset (see asset_styles_company_report)
+            # and thus needs to invalidate the assets cache when this is changed
+            self.env.transaction.invalidate_ormcache('assets')  # not 100% it is useful a test is missing if it is the case
 
-    @api.multi
-    def open_company_edit_report(self):
-        self.ensure_one()
-        return self.env['res.config.settings'].open_company()
+        # Archiving a company should also archive all of its branches
+        if vals.get('active') is False:
+            self.child_ids.active = False
 
-    @api.multi
-    def write_company_and_print_report(self, values):
-        res = self.write(values)
+        for company in self:
+            # Copy modified delegated fields from root to branches
+            if (changed := set(vals) & set(self._get_company_root_delegated_field_names())) and not company.parent_id:
+                branches = self.sudo().search([
+                    ('id', 'child_of', company.id),
+                    ('id', '!=', company.id),
+                ])
 
-        report_name = values.get('default_report_name')
-        active_ids = values.get('active_ids')
-        active_model = values.get('active_model')
-        if report_name and active_ids and active_model:
-            docids = self.env[active_model].browse(active_ids)
-            return (self.env['ir.actions.report'].search([('report_name', '=', report_name)], limit=1)
-                        .with_context(values)
-                        .report_action(docids))
-        else:
-            return res
+                changed_vals = {
+                    fname: self._fields[fname].convert_to_write(company[fname], branches)
+                    for fname in sorted(changed)
+                }
+                branches.write(changed_vals)
+
+        if companies_needs_l10n:
+            companies_needs_l10n.install_l10n_modules()
+
+        # invalidate company cache to recompute address based on updated partner
+        company_address_fields = self._get_company_address_field_names()
+        company_address_fields_upd = set(company_address_fields) & set(vals.keys())
+        if company_address_fields_upd:
+            self.invalidate_model(company_address_fields)
+        return res
+
+    @api.constrains('active')
+    def _check_active(self):
+        for company in self:
+            if not company.active:
+                company_active_users = self.env['res.users'].search_count([
+                    ('company_id', '=', company.id),
+                    ('active', '=', True),
+                ])
+                if company_active_users:
+                    # You cannot disable companies with active users
+                    raise ValidationError(self.env._(
+                        'The company %(company_name)s cannot be archived because it is still used '
+                        'as the default company of %(active_users)s users.',
+                        company_name=company.name,
+                        active_users=company_active_users,
+                    ))
+
+    @api.constrains(lambda self: self._get_company_root_delegated_field_names() +['parent_id'])
+    def _check_root_delegated_fields(self):
+        for company in self:
+            if company.parent_id:
+                for fname in company._get_company_root_delegated_field_names():
+                    if company[fname] != company.parent_id[fname]:
+                        description = self.env['ir.model.fields']._get("res.company", fname).field_description
+                        raise ValidationError(self.env._("The %s of a subsidiary must be the same as it's root company.", description))
 
     @api.model
-    def action_open_base_onboarding_company(self):
-        """ Onboarding step for company basic information. """
-        action = self.env.ref('base.action_open_base_onboarding_company').read()[0]
-        action['res_id'] = self.env.user.company_id.id
-        return action
+    def _get_main_company(self):
+        try:
+            main_company = self.sudo().env.ref('base.main_company')
+        except ValueError:
+            main_company = self.env['res.company'].sudo().search([], limit=1, order="id")
 
-    def set_onboarding_step_done(self, step_name):
-        if self[step_name] == 'not_done':
-            self[step_name] = 'just_done'
+        return main_company
 
-    def get_and_update_onbarding_state(self, onboarding_state, steps_states):
-        """ Needed to display onboarding animations only one time. """
-        old_values = {}
-        all_done = True
-        for step_state in steps_states:
-            old_values[step_state] = self[step_state]
-            if self[step_state] == 'just_done':
-                self[step_state] = 'done'
-            all_done = all_done and self[step_state] == 'done'
+    @api.ormcache('frozenset(self.env.companies.ids)', 'self.id', 'self.env.uid')
+    def __accessible_branches(self):
+        # Get branches of this company that the current user can use
+        self.ensure_one()
 
-        if all_done:
-            if self[onboarding_state] == 'not_done':
-                # string `onboarding_state` instead of variable name is not an error
-                old_values['onboarding_state'] = 'just_done'
-            else:
-                old_values['onboarding_state'] = 'done'
-            self[onboarding_state] = 'done'
-        return old_values
+        accessible_branch_ids = []
+        accessible = self.env.companies
+        current = self.sudo()
+        while current:
+            accessible_branch_ids.extend((current & accessible).ids)
+            current = current.child_ids
 
-    @api.multi
-    def action_save_onboarding_company_step(self):
-        if bool(self.street):
-            self.set_onboarding_step_done('base_onboarding_company_state')
+        if not accessible_branch_ids and self.env.uid == SUPERUSER_ID:
+            # Accessible companies will always be the same for super user when called in a cron.
+            # Because of that, the intersection between them and self might be empty. The super user anyway always has
+            # access to all companies (as it bypasses the record rules), so we return the current company in this case.
+            return self.ids
+
+        return accessible_branch_ids
+
+    def _accessible_branches(self):
+        return self.browse(self.__accessible_branches())
+
+    def _all_branches_selected(self):
+        """Return whether or all the branches of the companies in self are selected.
+
+        Is ``True`` if all the branches, and only those, are selected.
+        Can be used when some actions only make sense for whole companies regardless of the
+        branches.
+        """
+        return self == self.sudo().search([('id', 'child_of', self.root_id.ids)])
+
+    def action_all_company_branches(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': self.env._('Branches'),
+            'res_model': 'res.company',
+            'domain': [('parent_id', '=', self.id)],
+            'context': {
+                'active_test': False,
+                'default_parent_id': self.id,
+            },
+            'views': [[False, 'list'], [False, 'kanban'], [False, 'form']],
+        }
+
+    def _get_public_user(self):
+        self.ensure_one()
+        # We need sudo to be able to see public users from others companies too
+        public_users = self.env.ref('base.group_public').sudo().with_context(active_test=False).all_user_ids
+        public_users_for_company = public_users.filtered(lambda user: user.company_id == self)
+
+        if public_users_for_company:
+            return public_users_for_company[0]
+        else:
+            return self.env.ref('base.public_user').sudo().copy({
+                'name': 'Public user for %s' % self.name,
+                'login': 'public-user@company-%s.com' % self.id,
+                'company_id': self.id,
+                'company_ids': [(6, 0, [self.id])],
+            })
+
+    def _valid_field_parameter(self, field, name):
+        if name == 'company_default_for':
+            assert field.name == field.company_default_for[0], f"{field.company_default_for[0]} is not {field.name}"
+            return True
+        return super()._valid_field_parameter(field, name)
+
+    def _init_company_defaults(self):
+        """Write ir.default entries for company_default_for fields that declare a default."""
+        for fname, field in self._fields.items():
+            if not hasattr(field, 'company_default_for') or not field.default:
+                continue
+            fname, target_model, target_fname = field.company_default_for
+            for company in self:
+                existing = self.env['ir.default'].with_user(SUPERUSER_ID).with_company(company)._get_model_defaults(target_model).get(target_fname)
+                if existing is None:
+                    company[fname] = field.default(company)
+
+    @ormcache('self.id', cache='stable')
+    def _get_zeep_cache__(self):  # noqa: PLW3201
+        """Return a cache bucket used by ``odoo.tools.zeep`` for XSDs/WSDLs."""
+        return {}
+
+    def _get_zeep_client__(self, url, *args, **kwargs):  # noqa: PLW3201
+        """Return a Zeep Client which uses the ORM cache for XSDs/WSDLs."""
+        self.ensure_one()
+        transport = kwargs.setdefault('transport', zeep.Transport())
+        if not transport.cache:
+            transport.cache = ZeepOrmCache(self)
+        return zeep.Client(url, *args, **kwargs)
+
+
+class ZeepOrmCache(ZeepCache):
+    """Zeep cache for XSD/WSDL resources backed by the ORM cache."""
+
+    def __init__(self, company):
+        self.company = company
+
+    def add(self, url, content):
+        self.company._get_zeep_cache__()[url] = content
+
+    def get(self, url):
+        return self.company._get_zeep_cache__().get(url)

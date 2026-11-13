@@ -1,29 +1,68 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 # Copyright (C) 2004-2008 PC Solutions (<http://pcsol.be>). All Rights Reserved
-from odoo import fields, models, api
+from odoo import fields, models, api, _
+from odoo.exceptions import ValidationError
+from odoo.addons.base.models.ir_model import MODULE_UNINSTALL_FLAG
 
 
 class AccountJournal(models.Model):
     _inherit = 'account.journal'
 
-    journal_user = fields.Boolean('Use in Point of Sale',
-        help="Check this box if this journal define a payment method that can be used in a point of sale.")
-    amount_authorized_diff = fields.Float('Amount Authorized Difference',
-        help="This field depicts the maximum difference allowed between the ending balance and the theoretical cash when "
-             "closing a session, for non-POS managers. If this maximum is reached, the user will have an error message at "
-             "the closing of his session saying that he needs to contact his manager.")
+    pos_payment_method_ids = fields.One2many('pos.payment.method', 'journal_id', string='Point of Sale Payment Methods')
+
+    @api.constrains('type')
+    def _check_type(self):
+        methods = self.env['pos.payment.method'].sudo().search([("journal_id", "in", self.ids)])
+        if methods:
+            raise ValidationError(_("This journal is associated with a payment method. You cannot modify its type"))
+
+    def _check_no_active_payments(self):
+        linked_payment_methods = self.env['pos.payment.method'].sudo().search([('journal_id', 'in', self.ids)], limit=1)
+        if linked_payment_methods:
+            raise ValidationError(_("You can not archive this journal because it is set on the following payment method : %s.", linked_payment_methods.name))
+
+    @api.ondelete(at_uninstall=False)
+    def _unlink_journal_except_with_active_payments(self):
+        for journal in self:
+            journal._check_no_active_payments()
+
+    @api.ondelete(at_uninstall=True)
+    def _unlink_journal_cascade_pos_payment_methods(self):
+        if self.env.context.get(MODULE_UNINSTALL_FLAG):  # only cascade when switching CoA
+            self.pos_payment_method_ids.unlink()
+            self.env['pos.config'].search([('journal_id', 'in', self.ids)]).unlink()
+
+    def action_archive(self):
+        self._check_no_active_payments()
+        return super().action_archive()
+
+    def _get_journal_inbound_outstanding_payment_accounts(self):
+        return (
+            super()._get_journal_inbound_outstanding_payment_accounts()
+            | self.sudo().pos_payment_method_ids.outstanding_account_id.with_env(self.env)
+        )
 
     @api.model
-    def _search(self, args, offset=0, limit=None, order=None, count=False, access_rights_uid=None):
-        session_id = self.env.context.get('pos_session_id', False)
-        if session_id:
-            session = self.env['pos.session'].browse(session_id)
-            if session:
-                args += [('id', 'in', session.config_id.journal_ids.ids)]
-        return super(AccountJournal, self)._search(args=args, offset=offset, limit=limit, order=order, count=count, access_rights_uid=access_rights_uid)
+    def _ensure_company_account_journal(self):
+        return self._ensure_pos_journal('POSS', _('Point of Sale'))
 
-    @api.onchange('type')
-    def onchange_type(self):
-        if self.type not in ['bank', 'cash']:
-            self.journal_user = False
+    @api.model
+    def _ensure_company_closing_journal(self):
+        return self._ensure_pos_journal('POSC', _('Point of Sale Closing'))
+
+    @api.model
+    def _ensure_pos_journal(self, code, name):
+        journal = self.search([
+            ('code', '=', code),
+            ('type', '=', 'sale'),
+            ('company_id', '=', self.env.company.id),
+        ], limit=1)
+        if not journal:
+            journal = self.create({
+                'name': name,
+                'code': code,
+                'type': 'sale',
+                'company_id': self.env.company.id,
+            })
+        return journal

@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+    <t t-name="point_of_sale.paymentMethodCard">
+        <t t-set="diffAmount" t-value="this.getDifference(pm.id)" />
+        <div class="payment-method-card col-12" t-att-class="{ 'col-md-6' : this.paymentMethods.length > 1 }">
+            <div class="d-flex justify-content-between fs-5 fw-bold">
+                <span t-out="pm.name"/>
+                <div>
+                    <span
+                        t-if="diffAmount"
+                        class="me-2 amount-difference"
+                        t-att-class="diffAmount &lt; 0 ? 'text-danger' : 'text-success'"
+                        t-out="'(' + this.pos.formatCurrency(diffAmount) + ')'"
+                    />
+                    <span class="text-muted" t-out="this.pos.formatCurrency(pm.amount)"/>
+                </div>
+            </div>
+            <div class="mt-1" t-att-class="{ 'd-flex gap-2' : pm.is_default_cash }">
+                <CashInput
+                    class="'w-100' + (pm.is_default_cash ? ' cash-input' : '')"
+                    readonly="!pm.editable"
+                    autofocus="pm.is_default_cash"
+                    currencySymbol="this.pos.currency.symbol"
+                    currencyPosition="this.pos.currency.position"
+                    tModel="[this.state.payments[pm.id], 'counted']"
+                    isValid="(val) => this.pos.isValidFloat(val)"
+                    onClick="(ev) => ev.target.scrollIntoView({ behavior: 'smooth' })"
+                    onBlur="() => this.handlePaymentCountBlur(pm.id)"
+                />
+                <button
+                    t-if="pm.is_default_cash"
+                    class="icon oi btn btn-secondary"
+                    data-icon="payments"
+                    t-on-click="this.openDetailsPopup"
+                />
+            </div>
+            <div t-if="pm.is_default_cash" class="cash-summary">
+                <div class="d-flex justify-content-between pt-1 fs-5">
+                    <span>Opening</span>
+                    <span t-out="this.pos.formatCurrency(pm.opening)"/>
+                </div>
+                <t t-set="transactionSummary" t-value="this.cashTransactionSummary"/>
+                <PaymentMethodBreakdown
+                    title.translate="Transactions"
+                    total_amount="transactionSummary.total"
+                    transactions="transactionSummary.list"
+                />
+            </div>
+        </div>
+    </t>
+
+    <t t-name="point_of_sale.ClosePosPopup">
+        <Dialog contentClass="'close-pos-popup' + (!this.ui.isSmall ? ' p-2 rounded-4' : '')" bodyClass="'pt-2 pb-1'">
+            <t t-set-slot="header">
+                <div class="d-flex flex-grow-1 justify-content-between pb-2 border-bottom">
+                    <h4 class="my-1 fs-2">Closing Register</h4>
+                    <div class="total-orders fw-bolder align-middle my-1">
+                        <t t-out="this.props.orders_details.quantity"/> Orders:
+                        <span class="amount" t-out="this.pos.formatCurrency(this.props.orders_details.amount)"/>
+                    </div>
+                </div>
+            </t>
+            <div class="payment-method-summary row gy-3 gx-4">
+                <t t-foreach="this.paymentMethods" t-as="pm" t-key="pm.id">
+                    <t t-call="point_of_sale.paymentMethodCard"/>
+                </t>
+            </div>
+            <div class="notes-container d-flex flex-column flex-sm-row gap-3 pt-3">
+                <div t-if="this.props.opening_notes" class="opening-notes-container d-flex flex-column flex-grow-1 align-items-start fs-5">
+                    <label class="form-label" for="openingNotes">Opening note</label>
+                    <textarea class="opening-notes form-control" rows="7" id="openingNotes" style="height: 80px" t-model.proxy="this.state.opening_notes"/>
+                </div>
+                <div class="closing-notes-container d-flex flex-column flex-grow-1 align-items-start fs-5">
+                    <label class="form-label" for="closingNotes">Closing note</label>
+                    <textarea class="closing-notes form-control" style="height: 80px" rows="7" id="closingNotes" placeholder="Add a closing note..." t-model.proxy="this.state.closing_notes"/>
+                </div>
+            </div>
+            <div class="mt-3" t-if="this.orderForNextDays > 0">
+                <label class="form-label">Open Orders</label>
+                <div class="alert alert-info" role="alert">
+                    You still have <span t-out="this.orderForNextDays" /> open orders for the next few days.
+                </div>
+            </div>
+            <t t-set-slot="footer">
+                <div class="w-100 gap-2" t-att-class="this.ui.isSmall ? 'd-grid' : 'd-flex justify-content-between flex-wrap'"
+                    t-att-style="this.ui.isSmall ? 'grid-template-columns: repeat(2, minmax(0, 1fr));' : ''">
+                    <button class="button highlight btn btn-primary" t-att-disabled="!this.canConfirm()" t-on-click="this.confirm" t-att-class="{'btn-lg': !this.ui.isSmall}">
+                        Close Register
+                    </button>
+                    <button class="button btn btn-secondary" t-att-disabled="!this.canCancel()" t-on-click="this.cancel" t-att-class="{'btn-lg me-auto': !this.ui.isSmall}">
+                        Discard
+                    </button>
+                    <button t-if="this.pos.showCashMoveButton" class="button btn btn-secondary" t-on-click="() => this.cashMove()" t-att-class="{'btn-lg' : !this.ui.isSmall}">
+                        Cash In/Out
+                    </button>
+                    <div class="d-flex gap-2">
+                        <button class="button icon btn btn-secondary flex-grow-1" t-on-click="this.downloadSalesReport" t-att-class="{'btn-lg': !this.ui.isSmall}" title="Download Sales Report">
+                            <i t-if="!this.ui.isSmall" class="oi" data-icon="download" role="img"/>
+                            Daily Sale
+                        </button>
+                        <button t-if="this.pos.ticketPrinter.hasReceiptPrinters" class="button icon btn btn-secondary">
+                            <SaleDetailsButton/>
+                        </button>
+                    </div>
+                </div>
+            </t>
+        </Dialog>
+    </t>
+</templates>

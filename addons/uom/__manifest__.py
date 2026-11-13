@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 {
     'name': 'Units of measure',
-    'version': '1.0',
-    'category': 'Sales',
+    'category': 'Sales/Sales',
     'depends': ['base'],
     'description': """
 This is the base module for managing Units of measure.
@@ -13,10 +11,14 @@ This is the base module for managing Units of measure.
     'data': [
         'data/uom_data.xml',
         'security/uom_security.xml',
-        'security/ir.model.access.csv',
         'views/uom_uom_views.xml',
-        'views/res_users_views.xml',
+        'security/ir.access.csv',
     ],
-    'installable': True,
-    'auto_install': False,
+    'assets': {
+        'web.assets_backend': [
+            'uom/static/src/components/**/*',
+        ],
+    },
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }

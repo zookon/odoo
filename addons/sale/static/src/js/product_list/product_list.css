@@ -1,0 +1,11 @@
+table.o_sale_product_configurator_table > tbody > tr > td {
+    min-width: 50px;
+}
+
+.o_sale_optional_products {
+    background: hsl(from var(--o-bs-modal-content-bg) h s calc(l - 2));
+    
+    > table.o_sale_product_configurator_table {
+        --table-bg: transparent;
+    }
+}

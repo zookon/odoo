@@ -1,24 +1,33 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from . import models
-from . import controllers
-from . import report
-from . import wizard
+from odoo.tools.misc import str2bool
+from odoo.tools.sql import SQL
 
-from functools import partial
-import odoo
-from odoo import api, SUPERUSER_ID
+from . import const, controllers, models, report, wizard
 
 
-def uninstall_hook(cr, registry):
-    def update_dashboard_graph_model(dbname):
-        db_registry = odoo.modules.registry.Registry.new(dbname)
-        with api.Environment.manage(), db_registry.cursor() as cr:
-            env = api.Environment(cr, SUPERUSER_ID, {})
-            if 'crm.team' in env:
-                recs = env['crm.team'].search([])
-                for rec in recs:
-                    rec._onchange_team_type()
+def _post_init_hook(env):
+    _synchronize_crons(env)
+    _setup_downpayment_account(env)
+    _setup_accrual_accounts(env)
 
-    cr.after("commit", partial(update_dashboard_graph_model, cr.dbname))
+
+def _synchronize_crons(env):
+    for param, cron_xmlid in const.PARAM_CRON_MAPPING.items():
+        if cron := env.ref(cron_xmlid, raise_if_not_found=False):
+            cron.active = env["ir.config_parameter"].get_bool(param)
+
+
+def _setup_downpayment_account(env):
+    env["account.chart.template"]._load_pre_defined_data({
+        "res.company": {"downpayment_account_id"}
+    })
+
+
+def _setup_accrual_accounts(env):
+    env["account.chart.template"]._load_pre_defined_data({
+        "res.company": {
+            "account_invoices_to_issue_id",
+            "account_invoiced_not_delivered_id",
+        }
+    })

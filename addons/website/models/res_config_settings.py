@@ -1,104 +1,272 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from ast import literal_eval
 
 from odoo import api, fields, models
-from odoo.exceptions import AccessDenied
+from odoo.exceptions import UserError
+from odoo.tools.translate import _
+
+from werkzeug import urls
 
 
 class ResConfigSettings(models.TransientModel):
     _inherit = 'res.config.settings'
 
     def _default_website(self):
-        return self.env['website'].search([], limit=1)
+        website = self.env.website or self.env['website'].browse(self.env.context.get('host_id'))
+        if website:
+            return website
+        return self.env['website'].search([('company_id', '=', self.env.company.id)], limit=1)
 
-    website_id = fields.Many2one('website', string="website",
-                                 default=_default_website, ondelete='cascade')
-    website_name = fields.Char('Website Name', related='website_id.name')
-    website_domain = fields.Char('Website Domain', related='website_id.domain')
-    website_country_group_ids = fields.Many2many(related='website_id.country_group_ids')
-    website_company_id = fields.Many2one(related='website_id.company_id', string='Website Company')
-    language_ids = fields.Many2many(related='website_id.language_ids', relation='res.lang')
-    language_count = fields.Integer(string='Number of languages', compute='_compute_language_count', readonly=True)
+    website_id = fields.Many2one(
+        'website',
+        string="website",
+        default=_default_website, ondelete='cascade')
+    website_name = fields.Char(
+        'Website Name',
+        related='website_id.name',
+        readonly=False)
+    website_domain = fields.Char(
+        'Website Domain',
+        related='website_id.domain',
+        readonly=False)
+    website_homepage_url = fields.Char(
+        related='website_id.homepage_url', readonly=False)
+    website_company_id = fields.Many2one(
+        related='website_id.company_id',
+        string='Website Company',
+        readonly=False)
+    website_logo = fields.Binary(
+        related='website_id.logo',
+        readonly=False)
+    language_ids = fields.Many2many(
+        related='website_id.language_ids',
+        readonly=False)
+    website_language_count = fields.Integer(
+        string='Number of languages',
+        related='website_id.language_count',
+        readonly=True)
     website_default_lang_id = fields.Many2one(
-        string='Default language', related='website_id.default_lang_id',
-        relation='res.lang', required=True,
-        oldname='default_lang_id')
+        string='Default language',
+        related='website_id.default_lang_id',
+        readonly=False)
     website_default_lang_code = fields.Char(
-        'Default language code', related='website_id.default_lang_code',
-        oldname='default_lang_code')
-    specific_user_account = fields.Boolean('Specific User Account', config_parameter='website_id.specific_user_account',
-                                           help='Are newly created user accounts website specific')
+        'Default language code',
+        related='website_id.default_lang_id.code',
+        readonly=False)
+    shared_user_account = fields.Boolean(
+        string="Shared Customer Accounts",
+        compute='_compute_shared_user_account',
+        inverse='_inverse_shared_user_account')
+    website_cookies_bar = fields.Boolean(
+        related='website_id.cookies_bar',
+        readonly=False)
+    cookie_policy_id = fields.Many2one(
+        string="Cookie Policy Page",
+        related='website_id.cookie_policy_id',
+        readonly=False)
+    has_cookie_policy = fields.Boolean(compute='_compute_has_cookie_policy')
+    website_block_third_party_domains = fields.Boolean(
+        'Block 3rd-party domains',
+        related='website_id.block_third_party_domains',
+        readonly=False)
+    google_analytics_key = fields.Char(
+        'Google Analytics Key',
+        related='website_id.google_analytics_key',
+        readonly=False)
+    google_search_console = fields.Char(
+        'Google Search Console Key',
+        related='website_id.google_search_console',
+        readonly=False)
+    plausible_shared_key = fields.Char(
+        'Plausible auth Key',
+        related='website_id.plausible_shared_key',
+        readonly=False)
+    plausible_site = fields.Char(
+        'Plausible Site (e.g. domain.com)',
+        related='website_id.plausible_site',
+        readonly=False)
+    cdn_activated = fields.Boolean(
+        related='website_id.cdn_activated',
+        readonly=False)
+    cdn_url = fields.Char(
+        related='website_id.cdn_url',
+        readonly=False)
+    cdn_filters = fields.Text(
+        related='website_id.cdn_filters',
+        readonly=False)
+    auth_signup_uninvited = fields.Selection(
+        compute="_compute_auth_signup_uninvited",
+        inverse="_inverse_auth_signup_uninvited",
+        # Remove any default value and let the compute handle it
+        config_parameter=False, default=None)
 
-    google_analytics_key = fields.Char('Google Analytics Key', related='website_id.google_analytics_key')
-    google_management_client_id = fields.Char('Google Client ID', related='website_id.google_management_client_id')
-    google_management_client_secret = fields.Char('Google Client Secret', related='website_id.google_management_client_secret')
+    favicon = fields.Binary(
+        'Favicon',
+        related='website_id.favicon',
+        readonly=False)
+    social_default_image = fields.Binary(
+        'Default Social Share Image',
+        related='website_id.social_default_image',
+        readonly=False)
 
-    cdn_activated = fields.Boolean(related='website_id.cdn_activated')
-    cdn_url = fields.Char(related='website_id.cdn_url')
-    cdn_filters = fields.Text(related='website_id.cdn_filters')
-    module_website_version = fields.Boolean("A/B Testing")
-    module_website_links = fields.Boolean("Link Trackers")
-    auth_signup_uninvited = fields.Selection("Customer Account", related='website_id.auth_signup_uninvited')
+    group_multi_website = fields.Boolean(
+        "Multi-website",
+        implied_group="website.group_multi_website")
+    has_google_analytics = fields.Boolean(
+        "Google Tag Manager/Google Analytics",
+        compute='_compute_has_google_analytics',
+        inverse='_inverse_has_google_analytics')
+    has_google_search_console = fields.Boolean(
+        "Google Search Console",
+        compute='_compute_has_google_search_console',
+        inverse='_inverse_has_google_search_console')
+    has_default_share_image = fields.Boolean(
+        "Use a image by default for sharing",
+        compute='_compute_has_default_share_image',
+        inverse='_inverse_has_default_share_image')
+    has_plausible_shared_key = fields.Boolean(
+        "Plausible Analytics",
+        compute='_compute_has_plausible_shared_key',
+        inverse='_inverse_has_plausible_shared_key')
+    module_website_livechat = fields.Boolean()
+    module_website_address_autocomplete = fields.Boolean("Website Address Autocomplete")
 
-    favicon = fields.Binary('Favicon', related='website_id.favicon')
+    @api.depends('website_id')
+    def _compute_shared_user_account(self):
+        for config in self:
+            config.shared_user_account = not config.website_id.specific_user_account
 
-    google_maps_api_key = fields.Char(related='website_id.google_maps_api_key')
-    has_google_analytics = fields.Boolean(related='website_id.has_google_analytics')
-    has_google_analytics_dashboard = fields.Boolean(related='website_id.has_google_analytics_dashboard')
-    has_google_maps = fields.Boolean(related='website_id.has_google_maps')
+    @api.depends('website_id')
+    def _compute_has_cookie_policy(self):
+        for config in self:
+            config.has_cookie_policy = bool(config.website_id.cookie_policy_id)
 
-    social_twitter = fields.Char(related='website_id.social_twitter')
-    social_facebook = fields.Char(related='website_id.social_facebook')
-    social_github = fields.Char(related='website_id.social_github')
-    social_linkedin = fields.Char(related='website_id.social_linkedin')
-    social_youtube = fields.Char(related='website_id.social_youtube')
-    social_googleplus = fields.Char(related='website_id.social_googleplus')
+    @api.onchange('plausible_shared_key')
+    def _onchange_shared_key(self):
+        for config in self:
+            value = config.plausible_shared_key
+            if value and value.startswith('http'):
+                try:
+                    url = urls.url_parse(value)
+                    config.plausible_shared_key = urls.url_decode(url.query).get('auth', '')
+                    config.plausible_site = url.path.split('/')[-1]
+                except Exception:  # noqa
+                    pass
 
-    group_multi_website = fields.Boolean("Multi-website", implied_group="website.group_multi_website")
+    def _inverse_shared_user_account(self):
+        for config in self:
+            config.website_id.specific_user_account = not config.shared_user_account
 
-    @api.onchange('has_google_analytics')
-    def onchange_has_google_analytics(self):
-        if not self.has_google_analytics:
-            self.has_google_analytics_dashboard = False
-        if not self.has_google_analytics:
-            self.google_analytics_key = False
+    @api.depends('website_id.auth_signup_uninvited')
+    def _compute_auth_signup_uninvited(self):
+        for config in self:
+            # Default to `b2b` in case no website is set to avoid not being
+            # able to save.
+            config.auth_signup_uninvited = config.website_id.auth_signup_uninvited or 'b2b'
 
-    @api.onchange('has_google_analytics_dashboard')
-    def onchange_has_google_analytics_dashboard(self):
-        if not self.has_google_analytics_dashboard:
-            self.google_management_client_id = False
-            self.google_management_client_secret = False
+    def _inverse_auth_signup_uninvited(self):
+        for config in self:
+            config.website_id.auth_signup_uninvited = config.auth_signup_uninvited
+
+    @api.depends('website_id')
+    def _compute_has_plausible_shared_key(self):
+        for config in self:
+            config.has_plausible_shared_key = bool(config.plausible_shared_key)
+
+    def _inverse_has_plausible_shared_key(self):
+        for config in self:
+            if config.has_plausible_shared_key:
+                continue
+            config.plausible_shared_key = False
+            config.plausible_site = False
+
+    @api.depends('website_id')
+    def _compute_has_google_analytics(self):
+        for config in self:
+            config.has_google_analytics = bool(config.google_analytics_key)
+
+    def _inverse_has_google_analytics(self):
+        for config in self:
+            if config.has_google_analytics:
+                continue
+            config.google_analytics_key = False
+
+    @api.depends('website_id')
+    def _compute_has_google_search_console(self):
+        for config in self:
+            config.has_google_search_console = bool(config.google_search_console)
+
+    def _inverse_has_google_search_console(self):
+        for config in self:
+            if not config.has_google_search_console:
+                config.google_search_console = False
+
+    @api.depends('website_id')
+    def _compute_has_default_share_image(self):
+        for config in self:
+            config.has_default_share_image = bool(config.social_default_image)
+
+    def _inverse_has_default_share_image(self):
+        for config in self:
+            if not config.has_default_share_image:
+                config.social_default_image = False
 
     @api.onchange('language_ids')
     def _onchange_language_ids(self):
         # If current default language is removed from language_ids
         # update the website_default_lang_id
-        if self.language_ids and self.website_default_lang_id not in self.language_ids:
-            self.website_default_lang_id = self.language_ids[0]
+        language_ids = self.language_ids._origin
+        if not language_ids:
+            self.website_default_lang_id = self.env['website']._default_language()
+        elif self.website_default_lang_id not in language_ids:
+            self.website_default_lang_id = language_ids[0]
+        self.website_language_count = len(language_ids)
 
-    @api.depends('language_ids')
-    def _compute_language_count(self):
-        for config in self:
-            config.language_count = len(self.language_ids)
+    def action_website_create_new(self):
+        return {
+            'name': _('Add Website'),
+            'view_mode': 'form',
+            'view_id': self.env.ref('website.view_website_form_view_themes_modal').id,
+            'res_model': 'website',
+            'type': 'ir.actions.act_window',
+            'target': 'new',
+            'res_id': False,
+        }
 
-    def set_values(self):
-        if not self.user_has_groups('website.group_website_designer'):
-            raise AccessDenied()
-        super(ResConfigSettings, self).set_values()
-
-    @api.multi
-    def open_template_user(self):
-        action = self.env.ref('base.action_res_users').read()[0]
-        action['res_id'] = literal_eval(self.env['ir.config_parameter'].sudo().get_param('base.template_portal_user_id', 'False'))
-        action['views'] = [[self.env.ref('base.view_users_form').id, 'form']]
-        return action
-
-    def website_go_to(self):
+    def action_open_robots(self):
         self.website_id._force()
         return {
-            'type': 'ir.actions.act_url',
-            'url': '/',
-            'target': 'self',
+            'name': _("Robots.txt"),
+            'view_mode': 'form',
+            'res_model': 'website.robots',
+            'type': 'ir.actions.act_window',
+            "views": [[False, "form"]],
+            'target': 'new',
+            'context': {
+                'website_id': self.website_id.id,
+            },
+        }
+
+    def action_open_llms(self):
+        self.ensure_one()
+        return {
+            'name': _("LLMs.txt"),
+            'type': 'ir.actions.act_window',
+            'res_model': 'website.llms',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {
+                'default_website_id': self.website_id.id,
+            },
+        }
+
+    def action_open_blocked_third_party_domains(self):
+        self.website_id._force()
+        return {
+            'name': _("Add external websites"),
+            'view_mode': 'form',
+            'res_model': 'website.custom_blocked_third_party_domains',
+            'type': 'ir.actions.act_window',
+            'views': [[False, "form"]],
+            'target': 'new',
         }

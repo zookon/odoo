@@ -1,0 +1,155 @@
+import { MailPopoutPlugin } from "@mail/core/common/mail_popout_plugin";
+import { propStatic, usePropsPlus } from "@mail/utils/common/hooks";
+
+import { Component, onMounted, onWillUnmount, signal, t, useOnChange, usePlugin } from "@odoo/owl";
+
+import { UIPlugin } from "@web/core/ui/ui_plugin";
+import { useService } from "@web/core/utils/hooks";
+import { hidePDFJSButtons } from "@web/core/utils/pdfjs";
+import { isMobileOS } from "@web/core/browser/feature_detection";
+import { _t } from "@web/core/l10n/translation";
+import { NotificationPlugin } from "@web/core/notifications/notification_plugin";
+
+class AbstractAttachmentView extends Component {
+    static template = "mail.AttachmentView";
+    static components = {};
+
+    iframeViewerPdfRef = signal.ref();
+
+    setup() {
+        super.setup();
+        this.store = useService("mail.store");
+        this.props = usePropsPlus({
+            thread: propStatic(t.signal(t.instanceOf(this.store["mail.thread"]))),
+        });
+        this.uiService = usePlugin(UIPlugin);
+        this.isMobileOS = isMobileOS();
+        useOnChange(
+            () => [this.iframeViewerPdfRef()],
+            (el) => {
+                if (el) {
+                    hidePDFJSButtons(el);
+                }
+            }
+        );
+    }
+
+    onClickNext() {
+        const thread = this.props.thread();
+        const index = thread.attachmentsInWebClientView.findIndex((attachment) =>
+            attachment.eq(thread.message_main_attachment_id)
+        );
+        thread.setMainAttachmentFromIndex(
+            index >= thread.attachmentsInWebClientView.length - 1 ? 0 : index + 1
+        );
+    }
+
+    onClickPrevious() {
+        const thread = this.props.thread();
+        const index = thread.attachmentsInWebClientView.findIndex((attachment) =>
+            attachment.eq(thread.message_main_attachment_id)
+        );
+        thread.setMainAttachmentFromIndex(
+            index <= 0 ? thread.attachmentsInWebClientView.length - 1 : index - 1
+        );
+    }
+
+    get displayName() {
+        return this.props.thread().message_main_attachment_id.name;
+    }
+
+    get showsPopoutControl() {
+        return !this.isMobileOS;
+    }
+
+    onClickPopout() {}
+}
+
+/*
+ * AttachmentView inside popout window.
+ * Popout features disabled as this only makes sense in the non-popout AttachmentView.
+ */
+export class PopoutAttachmentView extends AbstractAttachmentView {
+    static template = "mail.PopoutAttachmentView";
+}
+
+/**
+ * Signal for the popout's thread, passed straight to the popout component, which reads it
+ * and re-renders in place when the thread changes.
+ *
+ * @param {Object} signals
+ * @param {import("@odoo/owl").Signal<import("models").Thread>} signals.thread
+ */
+export function usePopoutAttachment({ thread }) {
+    const uiService = usePlugin(UIPlugin);
+    const mailPopout = usePlugin(MailPopoutPlugin);
+    const notification = usePlugin(NotificationPlugin);
+
+    function attachmentViewParentElementClassList() {
+        const attachmentViewEl = document.querySelector(".o-mail-Attachment");
+        let parentElementClassList;
+        if ((parentElementClassList = attachmentViewEl?.parentElement?.classList)) {
+            return parentElementClassList;
+        }
+        return null;
+    }
+
+    function showAttachmentView() {
+        const parentElementClassList = attachmentViewParentElementClassList();
+        const hiddenClass = "d-none";
+        if (parentElementClassList?.contains(hiddenClass)) {
+            parentElementClassList.remove(hiddenClass);
+        }
+    }
+
+    function hideAttachmentView() {
+        const parentElementClassList = attachmentViewParentElementClassList();
+        const hiddenClass = "d-none";
+        if (!parentElementClassList?.contains(hiddenClass)) {
+            parentElementClassList?.add(hiddenClass);
+        }
+    }
+
+    function popout() {
+        if (isMobileOS()) {
+            return notification.add(_t("Pop out is not supported on mobile."), { type: "warning" });
+        }
+        mailPopout.addHooks(
+            () => {
+                hideAttachmentView();
+                uiService.bus.trigger("resize");
+            },
+            () => {
+                showAttachmentView();
+                uiService.bus.trigger("resize");
+            }
+        );
+        mailPopout.popout(PopoutAttachmentView, { thread });
+    }
+
+    function updatePopout() {
+        if (mailPopout.externalWindow) {
+            hideAttachmentView();
+            mailPopout.popout(PopoutAttachmentView, { thread });
+        }
+    }
+
+    function resetPopout() {
+        mailPopout.reset();
+    }
+
+    onMounted(() => updatePopout());
+    onWillUnmount(resetPopout);
+    return { popout };
+}
+
+export class AttachmentView extends AbstractAttachmentView {
+    setup() {
+        super.setup();
+        this.attachmentPopout = usePopoutAttachment({ thread: this.props.thread });
+    }
+
+    onClickPopout() {
+        this.attachmentPopout.popout();
+    }
+}

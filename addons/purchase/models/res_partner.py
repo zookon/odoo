@@ -1,34 +1,79 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import api, fields, models
-from odoo.addons.base.models.res_partner import WARNING_MESSAGE, WARNING_HELP
+from odoo import api, fields, models, _
+from odoo.exceptions import UserError
 
 
-class res_partner(models.Model):
-    _name = 'res.partner'
+class ResPartner(models.Model):
     _inherit = 'res.partner'
 
-    @api.multi
     def _compute_purchase_order_count(self):
-        PurchaseOrder = self.env['purchase.order']
-        for partner in self:
-            partner.purchase_order_count = PurchaseOrder.search_count([('partner_id', 'child_of', partner.id)])
+        self.purchase_order_count = 0
+        if not self.env.user._has_group('purchase.group_purchase_user'):
+            return
 
-    @api.multi
-    def _compute_supplier_invoice_count(self):
-        Invoice = self.env['account.invoice']
-        for partner in self:
-            partner.supplier_invoice_count = Invoice.search_count([('partner_id', 'child_of', partner.id), ('type', '=', 'in_invoice')])
+        # retrieve all children partners and prefetch 'parent_id' on them
+        all_partners = self.with_context(active_test=False).search_fetch(
+            [('id', 'child_of', self.ids)],
+            ['parent_id'],
+        )
+        purchase_order_groups = self.env['purchase.order']._read_group(
+            domain=[('partner_id', 'in', all_partners.ids)],
+            groupby=['partner_id'], aggregates=['__count'],
+        )
+        self_ids = set(self._ids)
 
-    @api.model
-    def _commercial_fields(self):
-        return super(res_partner, self)._commercial_fields()
+        for partner, count in purchase_order_groups:
+            while partner:
+                if partner.id in self_ids:
+                    partner.purchase_order_count += count
+                partner = partner.parent_id
 
     property_purchase_currency_id = fields.Many2one(
         'res.currency', string="Supplier Currency", company_dependent=True,
-        help="This currency will be used, instead of the default one, for purchases from the current partner")
-    purchase_order_count = fields.Integer(compute='_compute_purchase_order_count', string='Purchase Order Count')
-    supplier_invoice_count = fields.Integer(compute='_compute_supplier_invoice_count', string='# Vendor Bills')
-    purchase_warn = fields.Selection(WARNING_MESSAGE, 'Purchase Order', help=WARNING_HELP, default="no-message")
+        help="This currency will be used for purchases from the current partner")
+    purchase_order_count = fields.Integer(
+        string="Purchase Order Count",
+        groups='purchase.group_purchase_user',
+        compute='_compute_purchase_order_count',
+    )
     purchase_warn_msg = fields.Text('Message for Purchase Order')
+
+    receipt_reminder_email = fields.Boolean('Receipt Reminder', company_dependent=True,
+        help="Automatically send a confirmation email to the vendor X days before the expected receipt date, asking him to confirm the exact date.")
+    reminder_date_before_receipt = fields.Integer('Days Before Receipt', company_dependent=True,
+        help="Number of days to send reminder email before the promised receipt date")
+    buyer_id = fields.Many2one('res.users', string='Buyer')
+
+    purchase_incoterm_location = fields.Char("Vendor Incoterm Location")
+    purchase_incoterm_id = fields.Many2one(
+        comodel_name="account.incoterms",
+        string="Vendor Incoterm",
+        help="International Commercial Terms are a series of predefined commercial terms used in international transactions.",
+    )
+
+    def _compute_application_statistics_hook(self):
+        data_list = super()._compute_application_statistics_hook()
+        if not self.env.user.has_group('purchase.group_purchase_user'):
+            return data_list
+        for partner in self.filtered(lambda partner: partner.purchase_order_count):
+            stat_info = {'icon': 'credit_card', 'value': partner.purchase_order_count, 'label': _('Purchases')}
+            data_list[partner.id].append(stat_info)
+        return data_list
+
+    def write(self, vals):
+        res = super().write(vals)
+        if 'property_purchase_currency_id' in vals:
+            self.env['product.supplierinfo'].search([('partner_id', 'in', self.ids)]).currency_id = vals.get('property_purchase_currency_id')
+        return res
+
+    @api.ondelete(at_uninstall=False)
+    def _unlink_if_partner_in_purchase_order(self):
+        """ Prevent the deletion of a partner if it is used in a PO dropship address"""
+
+        po = self.sudo().env['purchase.order'].search_count([
+            ('dest_address_id', 'in', self.ids),
+            ('state', '!=', 'draft'),
+        ])
+        if po:
+            raise UserError(_("The partner cannot be deleted because it is used as a dropship address"))

@@ -1,0 +1,67 @@
+/*
+ * CSS variables of mail: its design variables exposed as CSS custom
+ * properties, so that stylesheets can read them with `var()` instead of
+ * being compiled by libsass. Every bundle including this file emits its
+ * own values (light, dark...).
+ */
+
+/* Background of the main discussions, in the discuss app and in chat windows */
+$o-mail-discussMainBgColor: if($o-webclient-color-scheme == dark, mix($gray-100, $white, 75%), $white);
+
+/*
+ * Tints of the messages and chat bubble previews with a bubble color, mixed into the surface
+ * they are on, at `$strength` of their full tint.
+ */
+@mixin o-mail-bubble-tints($surface, $strength: 1) {
+    @each $-type, $-color in (blue: $info, green: $success, orange: $warning) {
+        @if $o-webclient-color-scheme == dark {
+            $-dark-color: if($-type == blue, darken($info, 10%), if($-type == green, lighten($success, 2.5%), $warning));
+            $-base-bg: mix($white, $surface, 35%);
+            --o-mail-bubble-#{$-type}-bg: #{mix($-base-bg, $-dark-color, 100% - if($-type == orange, 45%, 25%) * $strength)};
+            --o-mail-bubble-#{$-type}-bg-muted: #{mix(mix($white, $surface, 75%), $-dark-color, 82.5%)};
+            --o-mail-bubble-#{$-type}-border-color: #{mix($-base-bg, mix($-dark-color, $body-color, 90%), 100% - 30% * $strength)};
+            --o-mail-bubble-#{$-type}-color-base: #{$-dark-color};
+        } @else {
+            --o-mail-bubble-#{$-type}-bg: #{mix($surface, $-color, 100% - if($-type == orange, 20%, 10%) * $strength)};
+            --o-mail-bubble-#{$-type}-bg-muted: color-mix(in srgb, #{$surface} 97.5%, #{$-color} 2.5%);
+            --o-mail-bubble-#{$-type}-border-color: #{mix($surface, mix($-color, $body-color, 75%), 100% - if($-type == orange, 35%, 20%) * $strength)};
+            --o-mail-bubble-#{$-type}-color-base: #{$-color};
+        }
+    }
+}
+
+:root,
+:host {
+    --o-mail-Avatar-size: #{$o-mail-Avatar-size};
+    --o-mail-Avatar-sizeSmall: #{$o-mail-Avatar-sizeSmall};
+    --o-mail-CallMenu-bgColor: #{$o-mail-CallMenu-bgColor};
+    --o-mail-CallMenu-bgColor-lighter: #{$o-mail-CallMenu-bgColor-lighter};
+    --o-mail-ChatBubble-sizeBig: #{$o-mail-ChatBubble-sizeBig};
+    --o-mail-ChatBubble-zindex: #{$o-mail-ChatBubble-zindex};
+    --o-mail-ChatHub-bubblesMargin: #{$o-mail-ChatHub-bubblesMargin};
+    --o-mail-ChatHub-bubblesWidth: #{$o-mail-ChatHub-bubblesWidth};
+    --o-mail-ChatWindow-width: #{$o-mail-ChatWindow-width};
+    --o-mail-Chatter-minWidth: #{$o-mail-Chatter-minWidth};
+    --o-mail-Composer-chatWindowVPadding: #{$o-mail-Composer-chatWindowVPadding};
+    --o-mail-Composer-lineHeight: #{$o-mail-Composer-lineHeight};
+    --o-mail-Composer-pillRadiusBase: #{$o-mail-Composer-pillRadiusBase};
+    --o-mail-discussMainBgColor: #{$o-mail-discussMainBgColor};
+    --o-mail-FontSize-xs: #{$o-mail-FontSize-xs};
+    --o-mail-LinkPreview-dialogWidth: #{$o-mail-LinkPreview-dialogWidth};
+    --o-mail-LinkPreview-width: #{$o-mail-LinkPreview-width};
+    --o-mail-LinkPreviewCard-height: #{$o-mail-LinkPreviewCard-height};
+    --o-mail-LinkPreviewCard-squarishImageSize: #{$o-mail-LinkPreviewCard-squarishImageSize};
+    --o-mail-LinkPreviewImage-height: #{$o-mail-LinkPreviewImage-height};
+    --o-mail-Meeting-bgColor: #{$o-mail-Meeting-bgColor};
+    --o-mail-Message-sidebarSmallWidth: #{$o-mail-Message-sidebarSmallWidth};
+    --o-mail-Message-sidebarWidth: #{$o-mail-Message-sidebarWidth};
+    --o-mail-NavigableList-zIndex: #{$o-mail-NavigableList-zIndex};
+
+    @include o-mail-bubble-tints(if($o-webclient-color-scheme == dark, $gray-100, $o-view-background-color));
+}
+
+/* Fainter on the main discuss background than on the page, which contrasts less with them. */
+.o-mail-DiscussContent-column,
+.o-mail-ChatWindow {
+    @include o-mail-bubble-tints($o-mail-discussMainBgColor, 0.85);
+}

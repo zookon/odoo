@@ -1,70 +1,131 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-import json
 
-import requests
+from odoo import api, fields, models, modules
 
-from odoo import api, fields, models, tools, _
-from odoo.exceptions import UserError
-
-
-def geo_find(addr):
-    if not addr:
-        return None
-    url = 'https://maps.googleapis.com/maps/api/geocode/json'
-    try:
-        result = requests.get(url, params={'sensor': 'false', 'address': addr}).json()
-    except Exception as e:
-        raise UserError(_('Cannot contact geolocation servers. Please make sure that your Internet connection is up and running (%s).') % e)
-
-    if result['status'] != 'OK':
-        return None
-
-    try:
-        geo = result['results'][0]['geometry']['location']
-        return float(geo['lat']), float(geo['lng'])
-    except (KeyError, ValueError):
-        return None
-
-
-def geo_query_address(street=None, zip=None, city=None, state=None, country=None):
-    if country and ',' in country and (country.endswith(' of') or country.endswith(' of the')):
-        # put country qualifier in front, otherwise GMap gives wrong results,
-        # e.g. 'Congo, Democratic Republic of the' => 'Democratic Republic of the Congo'
-        country = '{1} {0}'.format(*country.split(',', 1))
-    return tools.ustr(', '.join(
-        field for field in [street, ("%s %s" % (zip or '', city or '')).strip(), state, country]
-        if field
-    ))
+from odoo.addons.base_geolocalize.models.base_geocoder import GeoCodingError
 
 
 class ResPartner(models.Model):
     _inherit = "res.partner"
 
-    partner_latitude = fields.Float(string='Geo Latitude', digits=(16, 5))
-    partner_longitude = fields.Float(string='Geo Longitude', digits=(16, 5))
-    date_localization = fields.Date(string='Geolocation Date')
+    date_localization = fields.Datetime(string='Geolocation Updated On')
+    should_be_geolocalized = fields.Boolean(
+        compute='_compute_should_be_geolocalized', store=True, readonly=False, default=False,
+        help='Indicates whether the partner\'s address has changed, so we should geolocalize them from their new address.')
+    geo_localization_error = fields.Text(
+        compute='_compute_geo_localization_error',
+        store=True, readonly=False, copy=False, prefetch=False,
+        help='Reason of the last failed geolocation, cleared when the address changes.'
+    )
 
-    @api.multi
+    @api.depends(lambda self: self._display_address_depends())
+    def _compute_should_be_geolocalized(self):
+        for partner in self:
+            partner.should_be_geolocalized = partner.should_be_geolocalized or bool(partner._is_geolocalized())
+
+    def _is_geolocalized(self):
+        self.ensure_one()
+        return super()._is_geolocalized() and not self.should_be_geolocalized
+
+    @api.depends(lambda self: self._display_address_depends())
+    def _compute_geo_localization_error(self):
+        self.geo_localization_error = False
+
+    @api.model
+    def _geo_localize(self, street='', zip='', city='', state='', country=''):
+        geo_obj = self.env['base.geocoder']
+        search = geo_obj.geo_query_address(street=street, zip=zip, city=city, state=state, country=country)
+        result = geo_obj.geo_find(search, force_country=country)
+        if result is None:
+            search = geo_obj.geo_query_address(city=city, state=state, country=country)
+            result = geo_obj.geo_find(search, force_country=country)
+        return result
+
     def geo_localize(self):
         # We need country names in English below
+        if not self.env.context.get('force_geo_localize') and (
+            self.env.context.get('import_file')
+            or modules.module.current_test
+            or not self.env.registry.ready
+            or self.env.context.get('install_demo')
+        ):
+            return False
+
+        partners_not_geo_localized = self.env['res.partner']
+        partners_in_error = self.env['res.partner']
         for partner in self.with_context(lang='en_US'):
-            result = geo_find(geo_query_address(street=partner.street,
-                                                zip=partner.zip,
-                                                city=partner.city,
-                                                state=partner.state_id.name,
-                                                country=partner.country_id.name))
-            if result is None:
-                result = geo_find(geo_query_address(
-                    city=partner.city,
-                    state=partner.state_id.name,
-                    country=partner.country_id.name
-                ))
+            address = (
+                partner.street,
+                partner.zip,
+                partner.city,
+                partner.state_id.name,
+                partner.country_id.name,
+            )
+            try:
+                result = partner._geo_localize(*address)
+            except GeoCodingError as e:
+                partner.write({
+                    'geo_localization_error': str(e),
+                    'date_localization': fields.Datetime.now(),
+                })
+                partners_in_error |= partner
+                continue
 
             if result:
                 partner.write({
                     'partner_latitude': result[0],
                     'partner_longitude': result[1],
-                    'date_localization': fields.Date.context_today(partner)
+                    'date_localization': fields.Datetime.now(),
+                    'should_be_geolocalized': False,
+                    'geo_localization_error': False,
                 })
+            else:
+                partner.write({
+                    'geo_localization_error': self.env._(
+                        "No match found for address: %(address)s",
+                        address=self.env['base.geocoder'].geo_query_address(*address),
+                    ),
+                    'date_localization': fields.Datetime.now(),
+                    'should_be_geolocalized': False,
+                })
+                partners_not_geo_localized |= partner
+
+        if partners_not_geo_localized and not self.env.context.get('cron_id'):
+            self.env.user._bus_send("simple_notification", {
+                'type': 'danger',
+                'title': self.env._("Warning"),
+                'message': self.env._(
+                    'No match found for %(partner_names)s address(es).',
+                    partner_names=', '.join(partners_not_geo_localized.mapped('display_name'))
+                )
+            })
+        if partners_in_error and not self.env.context.get('cron_id'):
+            self.env.user._bus_send("simple_notification", {
+                'type': 'danger',
+                'title': self.env._("Warning"),
+                'message': self.env._(
+                    'Geolocation failed for %(partner_names)s: %(errors)s',
+                    partner_names=', '.join(partners_in_error.mapped('display_name')),
+                    errors=', '.join(set(partners_in_error.mapped('geo_localization_error'))),
+                ),
+            })
         return True
+
+    def write(self, vals):
+        res = super().write(vals)
+        if (
+            (vals.keys() & self._display_address_depends())
+            and self.filtered('should_be_geolocalized')
+            and (geo_localize_cron := self.env.ref('base_geolocalize.ir_cron_geolocalize_required_partners', raise_if_not_found=False))
+        ):
+            geo_localize_cron._trigger()
+        return res
+
+    def _cron_geolocalize(self, batch_size=20):
+        domain = [('should_be_geolocalized', '=', True), ('geo_localization_error', '=', False)]
+        partners_to_geolocalize = self.search(domain, limit=batch_size)
+        remaining = len(partners_to_geolocalize) if len(partners_to_geolocalize) < batch_size else self.search_count(domain)
+        self.env['ir.cron']._commit_progress(remaining=remaining)
+        for partner in partners_to_geolocalize:
+            partner.geo_localize()
+            self.env['ir.cron']._commit_progress(1)

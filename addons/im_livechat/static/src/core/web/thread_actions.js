@@ -1,0 +1,79 @@
+import { registerThreadAction } from "@mail/core/common/thread_actions";
+
+import { _t } from "@web/core/l10n/translation";
+import { LivechatChannelInfoList } from "@im_livechat/core/web/livechat_channel_info_list";
+import { LivechatStatusSelection } from "@im_livechat/core/web/livechat_status_selection";
+import { patch } from "@web/core/utils/patch";
+import { joinChannelAction } from "@mail/discuss/core/public_web/thread_actions";
+
+registerThreadAction("livechat-info", {
+    condition: ({ channel, owner, store }) =>
+        channel?.channel_type === "livechat" &&
+        store.self_user?.share === false &&
+        !owner.isDiscussSidebarChannelActions,
+    icon: "info",
+    name: _t("Information"),
+    panel: {
+        component: LivechatChannelInfoList,
+        onClose: ({ action, store }) => {
+            if (action.condition) {
+                store.discuss.isLivechatInfoPanelOpenByDefault = false;
+            }
+        },
+        onOpen: ({ store }) => {
+            store.discuss.isLivechatInfoPanelOpenByDefault = true;
+        },
+        props: ({ thread }) => ({ thread }),
+    },
+    sequence: ({ owner }) => (owner.isDiscussContent ? 40 : 10),
+    sequenceGroup: ({ owner }) => (owner.isDiscussContent ? 10 : 7),
+});
+registerThreadAction("livechat-status", {
+    condition: ({ channel, store, owner }) =>
+        channel?.channel_type === "livechat" &&
+        store.has_access_livechat &&
+        !channel.livechat_end_dt &&
+        !owner.isDiscussContent,
+    icon: ({ channel, store }) => {
+        const btn = store.livechatStatusButtons.find(
+            (btn) => btn.status === channel.livechat_status
+        );
+        if (!btn) {
+            return undefined;
+        }
+        return {
+            template: "im_livechat.LivechatStatusLabel",
+            params: { btn, inThreadActions: true },
+        };
+    },
+    name: ({ channel }) => channel.livechatStatusLabel,
+    nameClass: "fst-italic small",
+    panel: {
+        component: LivechatStatusSelection,
+        props: ({ thread }) => ({ thread }),
+    },
+    sequence: ({ owner }) => (owner.isDiscussSidebarChannelActions ? 10 : 5),
+    sequenceGroup: ({ owner }) => (owner.isDiscussSidebarChannelActions ? 5 : 7),
+});
+
+patch(joinChannelAction, {
+    condition({ channel }) {
+        return super.condition(...arguments) && !channel?.livechat_end_dt;
+    },
+    async onSelected({ channel, store }) {
+        if (channel.livechat_status === "need_help") {
+            const hasJoined = await store.orm.call(
+                "discuss.channel",
+                "livechat_join_channel_needing_help",
+                [[channel.id]]
+            );
+            if (!hasJoined && channel?.isDisplayed) {
+                store.notification.add(_t("Someone has already joined this conversation"), {
+                    type: "warning",
+                });
+            }
+        } else {
+            super.onSelected(...arguments);
+        }
+    },
+});

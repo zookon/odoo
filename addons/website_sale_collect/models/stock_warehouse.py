@@ -1,0 +1,156 @@
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
+
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from odoo import api, fields, models
+from odoo.tools.misc import OrderedSet, format_duration
+
+from odoo.addons.website_sale_collect import const
+
+
+class StockWarehouse(models.Model):
+    _inherit = "stock.warehouse"
+
+    opening_hours = fields.Many2one(
+        string="Opening Hours", comodel_name="resource.calendar", check_company=True
+    )
+
+    def _prepare_pickup_location_data(self, **kwargs):
+        wh_location = self.partner_id
+        if not wh_location._is_geolocalized() and not wh_location.geo_localization_error:
+            wh_location.geo_localize()
+
+        # Format the pickup location values of the warehouse.
+        try:
+            pickup_location_values = {
+                "id": self.id,
+                "name": wh_location["name"],
+                "street": wh_location["street"] or "",
+                "city": wh_location.city or "",
+                "state": wh_location.state_id.code or "",
+                "zip_code": wh_location.zip or "",
+                "country_code": wh_location.country_code,
+                "latitude": wh_location.partner_latitude,
+                "longitude": wh_location.partner_longitude,
+            }
+        except AttributeError:
+            return {}
+
+        pickup_location_values.update(self._prepare_pickup_availability_data(**kwargs))
+        return pickup_location_values
+
+    def _prepare_pickup_availability_data(self, estimated_dates=None):
+        """Return the warehouse's availability information for click and collect widget.
+
+        :param list[date] estimated_dates: The candidate dates to check, in chronological order.
+        :return: The availability data for the pickup.
+        :rtype: dict
+        """
+        self.ensure_one()
+        result = {
+            "opening_hours": {},
+            "next_open_date": "",
+            "closing_dates": [],
+        }
+        if self.opening_hours:
+            tz = ZoneInfo(self.opening_hours.company_id.tz or self.env.company.tz or "UTC")
+            result.update({
+                "opening_hours": self._format_opening_hours(self.opening_hours.attendance_ids),
+                "next_open_date": self._get_pickup_next_open_date(
+                    tz, estimated_dates=estimated_dates
+                ),
+                "closing_dates": self._get_exceptional_closing_dates(tz),
+            })
+        return result
+
+    @api.model
+    def _format_opening_hours(self, attendances_ids):
+        """Return the warehouse's opening hours, formatted per day of the week.
+
+        :return: A dict mapping each day of the week to a list of formatted attendance periods.
+        :rtype: dict
+        """
+        opening_hours_dict = {str(i): [] for i in range(7)}
+        for att in attendances_ids:
+            opening_hours_dict[att.dayofweek].append(
+                f"{format_duration(att.hour_from)} - {format_duration(att.hour_to)}"
+            )
+        return opening_hours_dict
+
+    @api.model
+    def get_opening_hours_by_partner(self, partner_ids):
+        """Return the formatted opening hours of the warehouses linked to the given partners.
+        If multiple warehouses are linked to the same partner, return the first one by sequence.
+
+        This is used by the website store locator snippet to read the opening hours of listed
+        partners in batch.
+
+        :param list[int] partner_ids: partners whose warehouses are to check
+        :return: A mapping of partner id to its warehouse's formatted opening hours.
+        :rtype: dict
+        """
+        warehouses = self.search([
+            ('partner_id', 'in', partner_ids), ('opening_hours', '!=', False)
+        ], order='sequence ASC, id ASC')
+        opening_hours_by_partner = {}
+        for warehouse in warehouses:
+            if warehouse.partner_id.id in opening_hours_by_partner:
+                continue
+            opening_hours_by_partner[warehouse.partner_id.id] = self._format_opening_hours(
+                warehouse.opening_hours.attendance_ids
+            )
+        return opening_hours_by_partner
+
+    def _get_pickup_next_open_date(self, tz, estimated_dates=None):
+        """Return the next date the warehouse is open.
+
+        :param ZoneInfo tz: The warehouse's timezone.
+        :param list[date] estimated_dates: Candidate dates to check for the earliest one the
+                                           warehouse is open on, in chronological order.
+        :return: The next open date, if any.
+        :rtype: str
+        """
+        self.ensure_one()
+        next_open_date = ""
+        now = datetime.now(UTC).astimezone(tz)
+        limit_date = now + timedelta(days=const.OPENING_HOURS_LOOKUP_DAYS)
+        work_intervals = self.opening_hours._work_intervals_batch(now, limit_date)[False]
+        working_dates = OrderedSet(start.astimezone(tz).date() for start, *_ in work_intervals)
+
+        if estimated_dates:  # Take into account the estimated delivery dates
+            candidate_dates = OrderedSet(day for day in working_dates if day >= estimated_dates[0])
+            if candidate_dates:
+                next_open_date = next(iter(
+                    candidate_dates & estimated_dates or candidate_dates)
+                ).isoformat()
+        elif working_dates:
+            first_interval = next(iter(work_intervals))
+            is_open_now = first_interval[0] <= now
+            next_open_date = "" if is_open_now else next(iter(working_dates)).isoformat()
+        return next_open_date
+
+    def _get_exceptional_closing_dates(self, tz):
+        """Return the warehouse's upcoming exceptional closing periods.
+
+        :param ZoneInfo tz: The warehouse's timezone.
+        :return: The exceptional closing periods, one per closing leave, sorted chronologically.
+        :rtype: list[dict]
+        """
+        self.ensure_one()
+        now_utc = fields.Datetime.now()
+        limit_utc = now_utc + timedelta(days=const.OPENING_HOURS_LOOKUP_DAYS)
+        leaves = self.opening_hours.global_leave_ids.filtered(
+            lambda leave: (
+                leave.count_as == "absence"
+                and leave.date_to >= now_utc
+                and leave.date_from <= limit_utc
+            )
+        ).sorted("date_from")
+        return [
+            {
+                "date_from": leave.date_from.replace(tzinfo=UTC).astimezone(tz).date().isoformat(),
+                "date_to": leave.date_to.replace(tzinfo=UTC).astimezone(tz).date().isoformat(),
+            }
+            for leave in leaves
+        ]

@@ -3,17 +3,43 @@
 
 import ldap
 import logging
+import time
 from ldap.filter import filter_format
 
-from odoo import _, api, fields, models, tools
+from odoo import _, fields, models, tools
 from odoo.exceptions import AccessDenied
-from odoo.tools.pycompat import to_native
+from odoo.http import request
 
 _logger = logging.getLogger(__name__)
 
+LDAP_IDENTITY_CHECK_LAST = 'identity-check-last-ldap'
+LDAP_IDENTITY_CHECK_ENTRY = 'identity-check-ldap-entry'
+LDAP_IDENTITY_CHECK_TIMEOUT = 10 * 60
 
-class CompanyLDAP(models.Model):
+
+class LDAPWrapper:
+    def __init__(self, obj):
+        self.__obj__ = obj
+
+    def passwd_s(self, *args, **kwargs):
+        self.__obj__.passwd_s(*args, **kwargs)
+
+    def modify_s(self, *args, **kwargs):
+        self.__obj__.modify_s(*args, **kwargs)
+
+    def search_st(self, *args, **kwargs):
+        return self.__obj__.search_st(*args, **kwargs)
+
+    def simple_bind_s(self, *args, **kwargs):
+        self.__obj__.simple_bind_s(*args, **kwargs)
+
+    def unbind(self, *args, **kwargs):
+        self.__obj__.unbind(*args, **kwargs)
+
+
+class ResCompanyLdap(models.Model):
     _name = 'res.company.ldap'
+    _description = 'Company LDAP configuration'
     _order = 'sequence'
     _rec_name = 'ldap_server'
 
@@ -26,8 +52,24 @@ class CompanyLDAP(models.Model):
              "Leave empty to connect anonymously.")
     ldap_password = fields.Char(string='LDAP password',
         help="The password of the user account on the LDAP server that is used to query the directory.")
-    ldap_filter = fields.Char(string='LDAP filter', required=True)
-    ldap_base = fields.Char(string='LDAP base', required=True)
+    ldap_filter = fields.Char(string='LDAP filter', required=True, help="""\
+    Filter used to look up user accounts in the LDAP database. It is an\
+    arbitrary LDAP filter in string representation. Any `%s` placeholder\
+    will be replaced by the login (identifier) provided by the user, the filter\
+    should contain at least one such placeholder.
+
+    The filter must result in exactly one (1) result, otherwise the login will\
+    be considered invalid.
+
+    Example (actual attributes depend on LDAP server and setup):
+
+        (&(objectCategory=person)(objectClass=user)(sAMAccountName=%s))
+
+    or
+
+        (|(mail=%s)(uid=%s))
+    """)
+    ldap_base = fields.Char(string='LDAP base', required=True, help="DN of the user search scope: all descendants of this base will be searched for users.")
     user = fields.Many2one('res.users', string='Template User',
         help="User to copy when creating new users")
     create_user = fields.Boolean(default=True,
@@ -45,8 +87,7 @@ class CompanyLDAP(models.Model):
         :rtype: list of dictionaries
         """
 
-        ldaps = self.sudo().search([('ldap_server', '!=', False)], order='sequence')
-        res = ldaps.read([
+        res = self.sudo().search_read([('ldap_server', '!=', False)], [
             'id',
             'company',
             'ldap_server',
@@ -58,7 +99,7 @@ class CompanyLDAP(models.Model):
             'user',
             'create_user',
             'ldap_tls'
-        ])
+        ], order='sequence')
         return res
 
     def _connect(self, conf):
@@ -73,9 +114,29 @@ class CompanyLDAP(models.Model):
         uri = 'ldap://%s:%d' % (conf['ldap_server'], conf['ldap_server_port'])
 
         connection = ldap.initialize(uri)
+        ldap_chase_ref_disabled = self.env['ir.config_parameter'].sudo().get_bool('auth_ldap.disable_chase_ref', True)
+        if ldap_chase_ref_disabled:
+            connection.set_option(ldap.OPT_REFERRALS, ldap.OPT_OFF)
         if conf['ldap_tls']:
             connection.start_tls_s()
-        return connection
+        return LDAPWrapper(connection)
+
+    def _get_entry(self, conf, login):
+        filter_tmpl = conf['ldap_filter']
+        placeholders = filter_tmpl.count('%s')
+        if not placeholders:
+            _logger.warning("LDAP filter %r contains no placeholder ('%%s').", filter_tmpl)
+
+        formatted_filter = filter_format(filter_tmpl, [login] * placeholders)
+        results = self._query(conf, formatted_filter)
+
+        # Get rid of results (dn, attrs) without a dn
+        results = [entry for entry in results if entry[0]]
+
+        dn, entry = False, False
+        if len(results) == 1:
+            dn, _ = entry = results[0]
+        return dn, entry
 
     def _authenticate(self, conf, login, password):
         """
@@ -94,27 +155,25 @@ class CompanyLDAP(models.Model):
         if not password:
             return False
 
-        entry = False
-        try:
-            filter = filter_format(conf['ldap_filter'], (login,))
-        except TypeError:
-            _logger.warning('Could not format LDAP filter. Your filter should contain one \'%s\'.')
+        dn, entry = self._get_entry(conf, login)
+        if not dn:
             return False
         try:
-            results = self._query(conf, tools.ustr(filter))
-
-            # Get rid of (None, attrs) for searchResultReference replies
-            results = [i for i in results if i[0]]
-            if len(results) == 1:
-                dn = results[0][0]
-                conn = self._connect(conf)
-                conn.simple_bind_s(dn, to_native(password))
-                conn.unbind()
-                entry = results[0]
+            conn = self._connect(conf)
+            conn.simple_bind_s(dn, password)
+            conn.unbind()
         except ldap.INVALID_CREDENTIALS:
             return False
         except ldap.LDAPError as e:
             _logger.error('An LDAP exception occurred: %s', e)
+            return False
+        if request:
+            request.session[LDAP_IDENTITY_CHECK_LAST] = time.time()  # nosemgrep: requests-in-models
+            request.session[LDAP_IDENTITY_CHECK_ENTRY] = {  # nosemgrep: requests-in-models
+                'db': self.env.cr.dbname,
+                'ldap_id': conf['id'],
+                'dn': dn,
+            }
         return entry
 
     def _query(self, conf, filter, retrieve_attributes=None):
@@ -145,8 +204,8 @@ class CompanyLDAP(models.Model):
             conn = self._connect(conf)
             ldap_password = conf['ldap_password'] or ''
             ldap_binddn = conf['ldap_binddn'] or ''
-            conn.simple_bind_s(to_native(ldap_binddn), to_native(ldap_password))
-            results = conn.search_st(to_native(conf['ldap_base']), ldap.SCOPE_SUBTREE, filter, retrieve_attributes, timeout=60)
+            conn.simple_bind_s(ldap_binddn, ldap_password)
+            results = conn.search_st(conf['ldap_base'], ldap.SCOPE_SUBTREE, filter, retrieve_attributes, timeout=60)
             conn.unbind()
         except ldap.INVALID_CREDENTIALS:
             _logger.error('LDAP bind failed.')
@@ -164,12 +223,14 @@ class CompanyLDAP(models.Model):
         :return: parameters for a new resource of model res_users
         :rtype: dict
         """
-
-        return {
+        data = {
             'name': ldap_entry[1]['cn'][0],
             'login': login,
             'company_id': conf['company'][0]
         }
+        if tools.single_email_re.match(login):
+            data['email'] = login
+        return data
 
     def _get_or_create_user(self, conf, login, ldap_entry):
         """
@@ -182,7 +243,7 @@ class CompanyLDAP(models.Model):
         :return: res_users id
         :rtype: int
         """
-        login = tools.ustr(login.lower().strip())
+        login = login.lower().strip()
         self.env.cr.execute("SELECT id, active FROM res_users WHERE lower(login)=%s", (login,))
         res = self.env.cr.fetchone()
         if res:
@@ -191,7 +252,7 @@ class CompanyLDAP(models.Model):
         elif conf['create_user']:
             _logger.debug("Creating new Odoo user \"%s\" from LDAP" % login)
             values = self._map_ldap_attributes(conf, login, ldap_entry)
-            SudoUser = self.env['res.users'].sudo()
+            SudoUser = self.env['res.users'].sudo().with_context(no_reset_password=True)
             if conf['user']:
                 values['active'] = True
                 return SudoUser.browse(conf['user'][0]).copy(default=values).id
@@ -199,3 +260,118 @@ class CompanyLDAP(models.Model):
                 return SudoUser.create(values).id
 
         raise AccessDenied(_("No local user found for LDAP login and not configured to create one"))
+
+    def _change_password(self, conf, login, new_passwd):
+        changed = False
+        dn, entry = self._get_entry(conf, login)
+        if not dn:
+            return False
+        if not self.env.user._is_admin() and (
+            not request
+            or request.session.get(LDAP_IDENTITY_CHECK_LAST, 0) <= time.time() - LDAP_IDENTITY_CHECK_TIMEOUT  # nosemgrep: requests-in-models
+            or request.session.get(LDAP_IDENTITY_CHECK_ENTRY) != {  # nosemgrep: requests-in-models
+                'db': self.env.cr.dbname,
+                'ldap_id': conf['id'],
+                'dn': dn,
+            }
+        ):
+            return False
+        ldap_password = conf["ldap_password"] or ""
+        ldap_binddn = conf["ldap_binddn"] or ""
+        try:
+            conn = self._connect(conf)
+            conn.simple_bind_s(ldap_binddn, ldap_password)
+            conn.modify_s(dn, [(ldap.MOD_REPLACE, "userPassword", new_passwd.encode())])
+            changed = True
+            conn.unbind()
+        except ldap.INVALID_CREDENTIALS:
+            pass
+        except ldap.LDAPError as e:
+            _logger.error('An LDAP exception occurred: %s', e)
+        return changed
+
+    def test_ldap_connection(self):
+        """
+        Test the LDAP connection using the current configuration.
+        Returns a dictionary with notification parameters indicating success or failure.
+        """
+        conf = {
+            'ldap_server': self.ldap_server,
+            'ldap_server_port': self.ldap_server_port,
+            'ldap_binddn': self.ldap_binddn,
+            'ldap_password': self.ldap_password,
+            'ldap_base': self.ldap_base,
+            'ldap_tls': self.ldap_tls
+        }
+
+        bind_dn = self.ldap_binddn or ''
+        bind_passwd = self.ldap_password or ''
+
+        try:
+            conn = self._connect(conf)
+            conn.simple_bind_s(bind_dn, bind_passwd)
+            conn.unbind()
+
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'type': 'success',
+                    'title': _('Connection Test Successful!'),
+                    'message': _("Successfully connected to LDAP server at %(server)s:%(port)d",
+                                 server=self.ldap_server, port=self.ldap_server_port),
+                    'sticky': False,
+                }
+            }
+
+        except ldap.SERVER_DOWN:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'type': 'danger',
+                    'title': _('Connection Test Failed!'),
+                    'message': _("Cannot contact LDAP server at %(server)s:%(port)d",
+                                 server=self.ldap_server, port=self.ldap_server_port),
+                    'sticky': False,
+                }
+            }
+
+        except ldap.INVALID_CREDENTIALS:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'type': 'danger',
+                    'title': _('Connection Test Failed!'),
+                    'message': _("Invalid credentials for bind DN %(binddn)s",
+                                 binddn=self.ldap_binddn),
+                    'sticky': False,
+                }
+            }
+
+        except ldap.TIMEOUT:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'type': 'danger',
+                    'title': _('Connection Test Failed!'),
+                    'message': _("Connection to LDAP server at %(server)s:%(port)d timed out",
+                                 server=self.ldap_server, port=self.ldap_server_port),
+                    'sticky': False,
+                }
+            }
+
+        except ldap.LDAPError as e:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'type': 'danger',
+                    'title': _('Connection Test Failed!'),
+                    'message': _("An error occurred: %(error)s",
+                                 error=e),
+                    'sticky': False,
+                }
+            }

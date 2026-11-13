@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+
+    <t t-name="web.FloatTimeField">
+        <time t-if="this.props.readonly" t-out="this.formattedValue" />
+        <input t-else="" 
+            t-att-id="this.props.id" 
+            t-att-type="this.props.inputType" 
+            t-ref="this.numpadDecimalRef"
+            class="o_input" 
+            autocomplete="off" />
+    </t>
+
+</templates>

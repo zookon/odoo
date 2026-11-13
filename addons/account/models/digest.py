@@ -1,29 +1,38 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo import fields, models, _
-from odoo.exceptions import AccessError
+from odoo import fields, models
 
 
-class Digest(models.Model):
+class DigestDigest(models.Model):
     _inherit = 'digest.digest'
 
     kpi_account_total_revenue = fields.Boolean('Revenue')
     kpi_account_total_revenue_value = fields.Monetary(compute='_compute_kpi_account_total_revenue_value')
 
     def _compute_kpi_account_total_revenue_value(self):
-        if not self.env.user.has_group('account.group_account_invoice'):
-            raise AccessError(_("Do not have access, skip this data for user's digest email"))
-        for record in self:
-            start, end, company = record._get_kpi_compute_parameters()
-            account_moves = self.env['account.move'].read_group([
-                ('journal_id.type', '=', 'sale'),
-                ('company_id', '=', company.id),
-                ('date', '>=', start),
-                ('date', '<', end)], ['journal_id', 'amount'], ['journal_id'])
-            record.kpi_account_total_revenue_value = sum([account_move['amount'] for account_move in account_moves])
+        self._raise_if_not_member_of('account.group_account_invoice')
+        start, end, companies = self._get_kpi_compute_parameters()
 
-    def compute_kpis_actions(self, company, user):
-        res = super(Digest, self).compute_kpis_actions(company, user)
-        res['kpi_account_total_revenue'] = 'account.action_invoice_tree1&menu_id=%s' % self.env.ref('account.menu_finance').id
+        total_per_companies = dict(self.env['account.move.line'].sudo()._read_group(
+            groupby=['company_id'],
+            aggregates=['balance:sum'],
+            domain=[
+                ('company_id', 'in', companies.ids),
+                ('date', '>', start),
+                ('date', '<=', end),
+                ('account_id.internal_group', '=', 'income'),
+                ('parent_state', '=', 'posted'),
+            ],
+        ))
+
+        for record in self:
+            company = record.company_id or self.env.company
+            record.kpi_account_total_revenue_value = -total_per_companies.get(company, 0)
+
+    def _get_kpi_custom_settings(self, company, user):
+        res = super()._get_kpi_custom_settings(company, user)
+        menu_id = self.env.ref('account.menu_finance').id
+        res['kpi_action']['kpi_account_total_revenue'] = f'account.action_move_out_invoice_type?menu_id={menu_id}'
+        res['kpi_sequence']['kpi_account_total_revenue'] = 5500
         return res

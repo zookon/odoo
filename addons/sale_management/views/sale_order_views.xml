@@ -1,58 +1,47 @@
 <?xml version="1.0"?>
 <odoo>
+
     <record id="sale_order_form_quote" model="ir.ui.view">
-        <field name="name">sale.order.form.payment</field>
+        <field name="name">sale.order.form.inherit.sale_management</field>
         <field name="model">sale.order</field>
         <field name="inherit_id" ref="sale.view_order_form"/>
         <field name="arch" type="xml">
-
-            <xpath expr="//header/button[@name='action_confirm'][1]" position="after">
-                <button name="preview_sale_order" type="object" string="Preview"/>
-            </xpath>
-
-            <xpath expr="//page/field[@name='order_line']/.." position="after">
-                <page string="Optional Products">
-                    <field name="sale_order_option_ids">
-                        <tree string="Sales Quotation Template Lines" editable="bottom">
-                            <control>
-                                <create string="Add a product"/>
-                            </control>
-                            <field name="sequence" widget="handle"/>
-                            <field name="product_id"/>
-                            <field name="name"/>
-                            <field name="quantity"/>
-                            <field name="uom_id" groups="uom.group_uom"/>
-                            <field name="price_unit"/>
-                            <field name="discount" groups="sale.group_discount_per_so_line"/>
-                            <button name="button_add_to_order" class="oe_link" icon="fa-shopping-cart" string="Add to order lines" type="object"/>
-                        </tree>
-                    </field>
-                </page>
-            </xpath>
-
-            <xpath expr="//field[@name='partner_shipping_id']" position="after">
-                <field name="sale_order_template_id" context="{'company_id': company_id}"
-                    options="{'no_create': True, 'no_open': True}"
-                    groups="sale_management.group_sale_order_template"
+            <field name="company_id" position="after">
+                <field
+                    name="sale_order_template_id"
+                    options="{'no_create': True}"
+                    readonly="state in ['cancel', 'sale']"
                 />
+            </field>
+
+            <xpath expr="//form//field[@name='invoice_lines']" position="before">
+                <group>
+                    <field
+                        name="is_optional"
+                        string="Optional"
+                        invisible="display_type not in ['line_section', 'line_subsection']"
+                        readonly="1"
+                    />
+                </group>
             </xpath>
 
-            <xpath expr="//field[@name='client_order_ref']" position="after">
-                <field name="require_signature" attrs="{'invisible': [('sale_order_template_id', '=', False)]}"/>
-                <field name="require_payment" attrs="{'invisible': [('sale_order_template_id', '=', False)]}"/>
+            <xpath expr="//list/field[@name='linked_virtual_id']" position="after">
+                <field name="is_optional" column_invisible="True"/> <!-- read by the section_state widget through its is_optional option -->
             </xpath>
 
+            <widget name="section_state" position="attributes">
+                <attribute name="options">{'is_optional': 'radio_button_checked'}</attribute>
+            </widget>
         </field>
     </record>
 
-    <record id="sale.action_quotations" model="ir.actions.act_window">
-        <field name="help" type="html">
-            <p class="o_view_nocontent_smiling_face">
-                Create a new quotation, the first step of a new sale!
-            </p>
-            <p>
-                Once the quotation is confirmed by the customer, it becomes a sales order.<br/> You will be able to create an invoice and collect the payment.
-            </p>
-        </field>
+    <record id="model_sale_order_action_create_quotation_template" model="ir.actions.server">
+        <field name="name">Save as template</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="binding_model_id" ref="sale.model_sale_order"/>
+        <field name="binding_view_types">form</field>
+        <field name="group_ids" eval="[(4, ref('sales_team.group_sale_manager'))]"/>
+        <field name="state">code</field>
+        <field name="code">if records: action = records.action_create_quotation_template()</field>
     </record>
 </odoo>

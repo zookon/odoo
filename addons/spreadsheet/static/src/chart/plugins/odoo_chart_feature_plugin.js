@@ -1,0 +1,133 @@
+import { _t } from "@web/core/l10n/translation";
+import { OdooUIPlugin } from "@spreadsheet/plugins";
+import { getBestGranularity, getValidGranularities } from "../../global_filters/helpers";
+
+export class OdooChartFeaturePlugin extends OdooUIPlugin {
+    static getters = /** @type {const} */ (["getAvailableChartGranularities"]);
+
+    overwrittenGranularities = {};
+    granularityOptionsCache = {};
+
+    handlers = {
+        SET_GLOBAL_FILTER_VALUE: this.onSetGlobalFilterValue,
+        UPDATE_CHART_GRANULARITY: this.onUpdateChartGranularity,
+    };
+
+    onSetGlobalFilterValue(cmd) {
+        if (this.getters.isDashboard()) {
+            this._onGlobalFilterChange(cmd);
+        }
+    }
+
+    onUpdateChartGranularity(cmd) {
+        this._updateChartGranularity(cmd.chartId, cmd.granularity);
+        this.overwrittenGranularities[cmd.chartId] = cmd.granularity;
+    }
+
+    getAvailableChartGranularities(chartId) {
+        if (this.granularityOptionsCache[chartId]) {
+            return this.granularityOptionsCache[chartId];
+        }
+        const { granularity, fieldName } = this.getters.getChartGranularity(chartId);
+        if (!granularity) {
+            return [];
+        }
+        const allGranularities = [
+            { value: "hour", label: _t("Hours") },
+            { value: "day", label: _t("Days") },
+            { value: "week", label: _t("Weeks") },
+            { value: "month", label: _t("Months") },
+            { value: "quarter", label: _t("Quarters") },
+            { value: "year", label: _t("Years") },
+        ];
+        const filterId = this._getChartHorizontalAxisFilter(chartId, fieldName);
+        const matching = this.getters.getOdooChartFieldMatching(chartId, filterId);
+        if (matching?.type !== "datetime") {
+            allGranularities.shift();
+        }
+        const currentFilterValue = filterId
+            ? this.getters.getGlobalFilterValue(filterId)
+            : undefined;
+        const allowed = getValidGranularities(currentFilterValue, this.getters);
+        const available = allGranularities.filter(({ value }) => allowed.includes(value));
+
+        this.granularityOptionsCache[chartId] = available;
+        return available;
+    }
+
+    _onGlobalFilterChange(cmd) {
+        const filterId = cmd.id;
+        const globalFilter = this.getters.getGlobalFilter(filterId);
+        if (globalFilter.type !== "date") {
+            return;
+        }
+        for (const chartId of this.getters.getOdooChartIds()) {
+            const { fieldName, granularity: currentGranularity } =
+                this.getters.getChartGranularity(chartId);
+            const fieldMatching = this.getters.getChartFieldMatch(chartId)[filterId];
+            const bestGranularity = getBestGranularity(cmd.value, fieldMatching, this.getters);
+            const validGranularities = getValidGranularities(cmd.value, this.getters);
+            const shouldAutoUpdate =
+                bestGranularity &&
+                fieldMatching?.chain === fieldName &&
+                !validGranularities.includes(this.overwrittenGranularities[chartId]) &&
+                bestGranularity !== currentGranularity;
+
+            if (shouldAutoUpdate) {
+                this.dispatch("UPDATE_CHART_GRANULARITY", {
+                    chartId,
+                    granularity: bestGranularity,
+                });
+                this.overwrittenGranularities[chartId] = undefined;
+            }
+            if (currentGranularity) {
+                this.granularityOptionsCache[chartId] = undefined;
+            }
+        }
+    }
+
+    _updateChartGranularity(chartId, newGranularity) {
+        const definition = this.getters.getChartDefinition(chartId);
+        const { fieldName, granularity } = this.getters.getChartGranularity(chartId);
+        const newGroupBy = [
+            `${fieldName}:${newGranularity}`,
+            ...definition.dataSource.searchParams.groupBy.slice(1),
+        ];
+        const style = definition.dataSetStyles
+            ? definition.dataSetStyles[`${fieldName}:${granularity}`]
+            : undefined;
+        this.dispatch("UPDATE_CHART", {
+            chartId,
+            figureId: this.getters.getFigureIdFromChartId(chartId),
+            definition: {
+                ...definition,
+                dataSetStyles: {
+                    ...definition.dataSetStyles,
+                    [`${fieldName}:${newGranularity}`]: style,
+                },
+                dataSource: {
+                    ...definition.dataSource,
+                    // I don't know why it's in both searchParams and metaData.
+                    searchParams: {
+                        ...definition.dataSource.searchParams,
+                        groupBy: newGroupBy,
+                    },
+                    metaData: {
+                        ...definition.dataSource.metaData,
+                        groupBy: newGroupBy,
+                    },
+                },
+            },
+        });
+    }
+
+    _getChartHorizontalAxisFilter(chartId, fieldName) {
+        for (const filter of this.getters.getGlobalFilters()) {
+            const matching = this.getters.getOdooChartFieldMatching(chartId, filter.id);
+            if (matching?.chain === fieldName) {
+                return filter.id;
+            }
+        }
+        return undefined;
+    }
+}

@@ -1,671 +1,826 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from datetime import datetime
+from random import randint
 
 from odoo import api, fields, models, _
-from odoo.addons import decimal_precision as dp
 from odoo.exceptions import UserError, ValidationError
+from odoo.fields import Command, Domain
 from odoo.tools import float_compare
+from odoo.tools.misc import format_date, unique
+
+MAP_REPAIR_TO_PICKING_LOCATIONS = {
+    'location_id': 'default_location_src_id',
+    'location_dest_id': 'default_location_dest_id',
+    'parts_location_id': 'default_remove_location_dest_id',
+    'recycle_location_id': 'default_recycle_location_dest_id',
+}
 
 
-class StockMove(models.Model):
-    _inherit = 'stock.move'
-
-    repair_id = fields.Many2one('repair.order')
-
-
-class Repair(models.Model):
+class RepairOrder(models.Model):
+    """ Repair Orders """
     _name = 'repair.order'
     _description = 'Repair Order'
-    _inherit = ['mail.thread', 'mail.activity.mixin']
-    _order = 'create_date desc'
+    _inherit = ['mail.thread', 'mail.activity.mixin', 'product.catalog.mixin']
+    _order = 'priority desc, create_date desc'
+    _check_company_auto = True
+    _priority_field = 'priority'
 
     @api.model
-    def _default_stock_location(self):
-        warehouse = self.env['stock.warehouse'].search([], limit=1)
-        if warehouse:
-            return warehouse.lot_stock_id.id
-        return False
+    def _default_picking_type_id(self):
+        return self._get_picking_type().get((self.env.company, self.env.user))
 
+    # Common Fields
     name = fields.Char(
         'Repair Reference',
-        default=lambda self: self.env['ir.sequence'].next_by_code('repair.order'),
+        default=lambda self: _('New'), index='trigram',
         copy=False, required=True,
-        states={'confirmed': [('readonly', True)]})
-    product_id = fields.Many2one(
-        'product.product', string='Product to Repair',
-        readonly=True, required=True, states={'draft': [('readonly', False)]})
-    product_qty = fields.Float(
-        'Product Quantity',
-        default=1.0, digits=dp.get_precision('Product Unit of Measure'),
-        readonly=True, required=True, states={'draft': [('readonly', False)]})
-    product_uom = fields.Many2one(
-        'uom.uom', 'Product Unit of Measure',
-        readonly=True, required=True, states={'draft': [('readonly', False)]})
-    partner_id = fields.Many2one(
-        'res.partner', 'Customer',
-        index=True, states={'confirmed': [('readonly', True)]},
-        help='Choose partner for whom the order will be invoiced and delivered.')
-    address_id = fields.Many2one(
-        'res.partner', 'Delivery Address',
-        domain="[('parent_id','=',partner_id)]",
-        states={'confirmed': [('readonly', True)]})
-    default_address_id = fields.Many2one('res.partner', compute='_compute_default_address_id')
-    state = fields.Selection([
-        ('draft', 'Quotation'),
-        ('cancel', 'Cancelled'),
-        ('confirmed', 'Confirmed'),
-        ('under_repair', 'Under Repair'),
-        ('ready', 'Ready to Repair'),
-        ('2binvoiced', 'To be Invoiced'),
-        ('invoice_except', 'Invoice Exception'),
-        ('done', 'Repaired')], string='Status',
-        copy=False, default='draft', readonly=True, track_visibility='onchange',
-        help="* The \'Draft\' status is used when a user is encoding a new and unconfirmed repair order.\n"
-             "* The \'Confirmed\' status is used when a user confirms the repair order.\n"
-             "* The \'Ready to Repair\' status is used to start to repairing, user can start repairing only after repair order is confirmed.\n"
-             "* The \'To be Invoiced\' status is used to generate the invoice before or after repairing done.\n"
-             "* The \'Done\' status is set when repairing is completed.\n"
-             "* The \'Cancelled\' status is used when user cancel repair order.")
-    location_id = fields.Many2one(
-        'stock.location', 'Location',
-        default=_default_stock_location,
-        index=True, readonly=True, required=True,
-        help="This is the location where the product to repair is located.",
-        states={'draft': [('readonly', False)], 'confirmed': [('readonly', True)]})
-    lot_id = fields.Many2one(
-        'stock.production.lot', 'Lot/Serial',
-        domain="[('product_id','=', product_id)]",
-        help="Products repaired are all belonging to this lot", oldname="prodlot_id")
-    guarantee_limit = fields.Date('Warranty Expiration', states={'confirmed': [('readonly', True)]})
-    operations = fields.One2many(
-        'repair.line', 'repair_id', 'Parts',
-        copy=True, readonly=True, states={'draft': [('readonly', False)]})
-    pricelist_id = fields.Many2one(
-        'product.pricelist', 'Pricelist',
-        default=lambda self: self.env['product.pricelist'].search([], limit=1).id,
-        help='Pricelist of the selected partner.')
-    partner_invoice_id = fields.Many2one('res.partner', 'Invoicing Address')
-    invoice_method = fields.Selection([
-        ("none", "No Invoice"),
-        ("b4repair", "Before Repair"),
-        ("after_repair", "After Repair")], string="Invoice Method",
-        default='none', index=True, readonly=True, required=True,
-        states={'draft': [('readonly', False)]},
-        help='Selecting \'Before Repair\' or \'After Repair\' will allow you to generate invoice before or after the repair is done respectively. \'No invoice\' means you don\'t want to generate invoice for this repair order.')
-    invoice_id = fields.Many2one(
-        'account.invoice', 'Invoice',
-        copy=False, readonly=True, track_visibility="onchange")
-    move_id = fields.Many2one(
-        'stock.move', 'Move',
-        copy=False, readonly=True, track_visibility="onchange",
-        help="Move created by the repair order")
-    fees_lines = fields.One2many(
-        'repair.fee', 'repair_id', 'Operations',
-        copy=True, readonly=True, states={'draft': [('readonly', False)]})
-    internal_notes = fields.Text('Internal Notes')
-    quotation_notes = fields.Text('Quotation Notes')
+        readonly=True)
     company_id = fields.Many2one(
         'res.company', 'Company',
-        default=lambda self: self.env['res.company']._company_default_get('repair.order'))
-    invoiced = fields.Boolean('Invoiced', copy=False, readonly=True)
-    repaired = fields.Boolean('Repaired', copy=False, readonly=True)
-    amount_untaxed = fields.Float('Untaxed Amount', compute='_amount_untaxed', store=True)
-    amount_tax = fields.Float('Taxes', compute='_amount_tax', store=True)
-    amount_total = fields.Float('Total', compute='_amount_total', store=True)
-    tracking = fields.Selection('Product Tracking', related="product_id.tracking")
+        readonly=True, required=True, index=True,
+        default=lambda self: self.env.company)
+    state = fields.Selection([
+        ('draft', 'New'),
+        ('confirmed', 'Confirmed'),
+        ('done', 'Done'),
+        ('cancel', 'Cancelled')], string='Status',
+        copy=False, default='draft', readonly=True, tracking=True, index=True,
+        help="* The \'New\' status is used when a user is encoding a new and unconfirmed repair order.\n"
+             "* The \'Confirmed\' status is used when a user confirms the repair order.\n"
+             "* The \'Done\' status is set when repairing is completed.\n"
+             "* The \'Cancelled\' status is used when user cancel repair order.")
+    priority = fields.Selection([('0', 'Normal'), ('1', 'Urgent')], default='0', string="Priority")
+    partner_id = fields.Many2one(
+        'res.partner', 'Customer',
+        index=True, check_company=True, change_default=True, compute='_compute_partner_id', readonly=False, store=True,
+        help='Choose partner for whom the order will be invoiced and delivered. You can find a partner by its Name, TIN, Email or Internal Reference.')
+    user_id = fields.Many2one('res.users', string="Responsible", default=lambda self: self.env.user, check_company=True)
 
-    @api.one
-    @api.depends('partner_id')
-    def _compute_default_address_id(self):
-        if self.partner_id:
-            self.default_address_id = self.partner_id.address_get(['contact'])['contact']
+    # Specific Fields
+    internal_notes = fields.Html('Internal Notes')
+    tag_ids = fields.Many2many('repair.tags', string="Tags")
+    under_warranty = fields.Boolean(
+        'Under Warranty',
+        help='If ticked, the sales price will be set to 0 for all products transferred from the repair order.')
+    schedule_date = fields.Datetime("Scheduled Date", default=fields.Datetime.now, index=True, required=True, copy=False)
+    search_date_category = fields.Selection([
+        ('before', 'Before'),
+        ('yesterday', 'Yesterday'),
+        ('today', 'Today'),
+        ('day_1', 'Tomorrow'),
+        ('day_2', 'The day after tomorrow'),
+        ('after', 'After')],
+        string='Date Category', store=False,
+        search='_search_date_category', readonly=True
+    )
+    repair_properties = fields.Properties('Properties', definition='picking_type_id.repair_properties_definition', copy=True)
 
-    @api.one
-    @api.depends('operations.price_subtotal', 'invoice_method', 'fees_lines.price_subtotal', 'pricelist_id.currency_id')
-    def _amount_untaxed(self):
-        total = sum(operation.price_subtotal for operation in self.operations)
-        total += sum(fee.price_subtotal for fee in self.fees_lines)
-        self.amount_untaxed = self.pricelist_id.currency_id.round(total)
+    # Product To Repair
+    move_id = fields.Many2one(  # Generated in 'action_repair_done', needed for traceability
+        'stock.move', 'Inventory Move',
+        copy=False, readonly=True, check_company=True)
+    product_id = fields.Many2one(
+        'product.product', string='Product to Repair',
+        ui_domain="[('type', '=', 'consu'), '|', ('company_id', '=', company_id), ('company_id', '=', False), '|', ('id', 'in', picking_product_ids), ('id', '=?', picking_product_id)]",
+        check_company=True, index='btree_not_null')
+    product_qty = fields.Float(
+        'Product Quantity', compute='_compute_product_qty', readonly=False, store=True,
+        default=1.0, digits='Product Unit')
+    allowed_uom_ids = fields.Many2many('uom.uom', compute='_compute_allowed_uom_ids')
+    uom_id = fields.Many2one(
+        'uom.uom', 'Unit', ui_domain="[('id', 'in', allowed_uom_ids)]",
+        compute='_compute_uom_id', store=True, precompute=True, readonly=False)
+    lot_id = fields.Many2one(
+        'stock.lot', 'Lot/Serial',
+        compute="_compute_lot_id", store=True, index='btree_not_null',
+        ui_domain="[('id', 'in', allowed_lot_ids)]", check_company=True,
+        help="Products repaired are all belonging to this lot")
+    tracking = fields.Selection(string='Product Tracking', related="product_id.tracking", readonly=False)
 
-    @api.one
-    @api.depends('operations.price_unit', 'operations.product_uom_qty', 'operations.product_id',
-                 'fees_lines.price_unit', 'fees_lines.product_uom_qty', 'fees_lines.product_id',
-                 'pricelist_id.currency_id', 'partner_id')
-    def _amount_tax(self):
-        val = 0.0
-        for operation in self.operations:
-            if operation.tax_id:
-                tax_calculate = operation.tax_id.compute_all(operation.price_unit, self.pricelist_id.currency_id, operation.product_uom_qty, operation.product_id, self.partner_id)
-                for c in tax_calculate['taxes']:
-                    val += c['amount']
-        for fee in self.fees_lines:
-            if fee.tax_id:
-                tax_calculate = fee.tax_id.compute_all(fee.price_unit, self.pricelist_id.currency_id, fee.product_uom_qty, fee.product_id, self.partner_id)
-                for c in tax_calculate['taxes']:
-                    val += c['amount']
-        self.amount_tax = val
+    # Picking & Locations
+    picking_type_id = fields.Many2one(
+        'stock.picking.type', 'Operation Type', copy=True, readonly=False,
+        compute='_compute_picking_type_id', store=True,
+        default=_default_picking_type_id,
+        ui_domain="[('code', '=', 'repair_operation'), ('company_id', '=', company_id)]",
+        required=True, precompute=True, check_company=True, index=True)
+    reference_ids = fields.Many2many(
+        'stock.reference', 'stock_reference_repair_rel',
+        'repair_id', 'reference_id', string='References', copy=False)
+    location_id = fields.Many2one(
+        'stock.location', 'Component Source Location',
+        compute="_compute_location_id",
+        store=True, readonly=False, required=True, precompute=True,
+        index=True, check_company=True,
+        help="This is the location where the components of product to repair is located.")
+    product_location_src_id = fields.Many2one(
+        'stock.location', 'Product Source Location',
+        compute="_compute_product_location_src_id",
+        store=True, readonly=False, required=True, precompute=True,
+        index=True, check_company=True,
+        help="This is the location where the product to repair is located.")
+    product_location_dest_id = fields.Many2one(
+        'stock.location', 'Product Destination Location',
+        compute="_compute_product_location_dest_id",
+        store=True, readonly=False, required=True, precompute=True,
+        index=True, check_company=True,
+        help="This is the location where the repaired product is located.")
+    location_dest_id = fields.Many2one(
+        'stock.location', 'Added Parts Destination Location',
+        related="picking_type_id.default_location_dest_id", depends=["picking_type_id"],
+        store=True, readonly=True, required=True, precompute=True,
+        index=True, check_company=True,
+        help="This is the location where the repaired product is located.")
+    parts_location_id = fields.Many2one(
+        'stock.location', 'Removed Parts Destination Location',
+        related="picking_type_id.default_remove_location_dest_id", depends=["picking_type_id"],
+        store=True, readonly=True, required=True, precompute=True,
+        index=True, check_company=True,
+        help="This is the location where the repair parts are located.")
+    recycle_location_id = fields.Many2one(
+        'stock.location', 'Recycled Parts Destination Location',
+        compute="_compute_recycle_location_id",
+        store=True, readonly=False, required=True, precompute=True,
+        index=True, check_company=True,
+        help="This is the location where the repair parts are located.")
 
-    @api.one
-    @api.depends('amount_untaxed', 'amount_tax')
-    def _amount_total(self):
-        self.amount_total = self.pricelist_id.currency_id.round(self.amount_untaxed + self.amount_tax)
+    # Parts
+    move_ids = fields.One2many(
+        'stock.move', 'repair_id', "Parts", check_company=True, copy=True,
+        domain=[('repair_line_type', '!=', False)])  # Once RO switch to state done, a binded move is created for the "Product to repair" (move_id), this move appears in 'move_ids' if not filtered
+    parts_availability = fields.Char(
+        string="Component Status", compute='_compute_parts_availability',
+        help="Latest parts availability status for this RO. If green, then the RO's readiness status is ready.")
+    parts_availability_state = fields.Selection([
+        ('available', 'Available'),
+        ('expected', 'Expected'),
+        ('late', 'Late')], compute='_compute_parts_availability')
+    is_parts_available = fields.Boolean(
+        'All Parts are available',
+        default=False, store=True, compute='_compute_availability_boolean')
+    is_parts_late = fields.Boolean(
+        'Any Part is late',
+        default=False, store=True, compute='_compute_availability_boolean')
 
-    _sql_constraints = [
-        ('name', 'unique (name)', 'The name of the Repair Order must be unique!'),
-    ]
+    # Services
+    repair_service_line_ids = fields.One2many(
+        'repair.service.line', 'repair_id', 'Service Lines', check_company=True, copy=True)
 
-    @api.onchange('product_id')
-    def onchange_product_id(self):
-        self.guarantee_limit = False
-        self.lot_id = False
-        if self.product_id:
-            self.product_uom = self.product_id.uom_id.id
+    # Sale Order Binding
+    sale_order_id = fields.Many2one(
+        'sale.order', 'Sale Order', check_company=True, readonly=True, index='btree_not_null',
+        copy=False, help="Sale Order from which the Repair Order comes from.")
+    sale_order_line_id = fields.Many2one(
+        'sale.order.line', check_company=True, readonly=True,
+        copy=False, index='btree_not_null', help="Sale Order Line from which the Repair Order comes from.")
+    repair_request = fields.Text(
+        related='sale_order_line_id.name',
+        string='Repair Request',
+        help="Sale Order Line Description.")
 
-    @api.onchange('product_uom')
-    def onchange_product_uom(self):
+    # Return Binding
+    picking_id = fields.Many2one(
+        'stock.picking', 'Transfer', check_company=True, index='btree_not_null',
+        ui_domain="[('product_id', '=?', product_id)]",
+        copy=False, help="Transfer from which the product to be repaired is picked")
+    picking_product_ids = fields.One2many('product.product', compute='_compute_picking_product_ids')
+    picking_product_id = fields.Many2one(related="picking_id.product_id")
+    allowed_lot_ids = fields.One2many('stock.lot', compute='_compute_allowed_lot_ids')
+
+    # Invoice Binding
+    invoice_count = fields.Integer(string='Invoice Count', compute='_compute_invoice_count')
+    invoice_ids = fields.One2many('account.move', 'repair_order_id', string='Invoice', compute='_compute_invoice_ids', store=True, copy=False)
+    can_create_extra_invoice = fields.Boolean(compute='_compute_can_create_sale_or_invoice')
+
+    # UI Fields
+    has_uncomplete_moves = fields.Boolean(compute='_compute_has_uncomplete_moves')
+    unreserve_visible = fields.Boolean(
+        'Allowed to Unreserve Production', compute='_compute_unreserve_visible',
+        help='Technical field to check when we can unreserve')
+    reserve_visible = fields.Boolean(
+        'Allowed to Reserve Production', compute='_compute_unreserve_visible',
+        help='Technical field to check when we can reserve quantities')
+    picking_type_visible = fields.Boolean(compute='_compute_picking_type_visible')
+    can_create_sale_or_invoice = fields.Boolean(compute='_compute_can_create_sale_or_invoice')
+    validate_button_style = fields.Selection([
+        ('primary', 'Primary'),
+        ('secondary', 'Secondary'),
+        ('invisible', 'Invisible'),
+    ], compute='_compute_validate_button_style')
+
+    def _compute_picking_type_visible(self):
+        repair_type_by_company = dict(self.env['stock.picking.type']._read_group([
+                ('code', '=', 'repair_operation'),
+                ('company_id', 'in', self.company_id.ids)
+            ], groupby=['company_id'], aggregates=['__count']))
+        for ro in self:
+            ro.picking_type_visible = repair_type_by_company.get(ro.company_id, 0) > 1
+
+    @api.depends('product_id', 'picking_id', 'lot_id')
+    def _compute_product_qty(self):
+        for repair in self:
+            if repair.picking_id:
+                if repair.tracking in ['serial', 'lot'] and repair.lot_id:
+                    lot_move_lines = repair.picking_id.move_line_ids.filtered(lambda m: m.product_id == repair.product_id and m.lot_id == repair.lot_id)
+                    repair.product_qty = sum(lot_move_lines.mapped('quantity'))
+                else:
+                    product_moves = repair.picking_id.move_ids.filtered(lambda m: m.product_id == repair.product_id)
+                    repair.product_qty = sum(product_moves.mapped('quantity'))
+            else:
+                repair.product_qty = 1.0
+
+    @api.depends('product_id', 'product_id.uom_id', 'product_id.uom_ids', 'product_id.extra_uom_ids', 'product_id.seller_ids', 'product_id.seller_ids.uom_id')
+    def _compute_allowed_uom_ids(self):
+        for repair in self:
+            repair.allowed_uom_ids = repair.product_id._get_available_uoms() | repair.product_id.seller_ids.uom_id
+
+    @api.depends('picking_id')
+    def _compute_partner_id(self):
+        for repair in self:
+            repair.partner_id = repair.picking_id.partner_id
+
+    @api.depends('picking_id')
+    def _compute_picking_product_ids(self):
+        for repair in self:
+            repair.picking_product_ids = repair.picking_id.move_ids.product_id
+
+    @api.depends('product_id', 'company_id', 'picking_id', 'picking_id.move_ids', 'picking_id.move_ids.lot_ids')
+    def _compute_allowed_lot_ids(self):
+        for repair in self:
+            domain = Domain('product_id', '=', repair.product_id.id)
+            if repair.picking_id:
+                domain &= Domain('id', 'in', repair.picking_id.move_ids.lot_ids.ids)
+            repair.allowed_lot_ids = self.env['stock.lot'].search(domain)
+
+    @api.depends('invoice_ids', 'invoice_ids.state')
+    def _compute_invoice_count(self):
+        for repair in self:
+            repair.invoice_count = len(repair.sudo().invoice_ids)
+
+    @api.depends('invoice_ids', 'invoice_ids.state', 'partner_id', 'sale_order_id', 'state', 'move_ids', 'repair_service_line_ids')
+    def _compute_can_create_sale_or_invoice(self):
+        for repair in self:
+            repair.can_create_sale_or_invoice = (
+                repair.partner_id
+                and not repair.sudo().invoice_ids
+                and not repair.sale_order_id
+                and repair.state != "cancel"
+            )
+            repair.can_create_extra_invoice = (
+                    repair.partner_id
+                    and all(invoice.state == "posted" for invoice in repair.invoice_ids)
+                    and not repair.sale_order_id
+                    and (
+                        any(not move.invoice_line_ids for move in repair.move_ids)
+                        or any(not repair_service_line.invoice_line_ids for repair_service_line in repair.repair_service_line_ids
+                        )
+                    )
+                )
+
+    @api.depends('product_id', 'product_id.uom_id')
+    def _compute_uom_id(self):
+        for repair in self:
+            if not repair.product_id:
+                repair.uom_id = False
+            elif not repair.uom_id:
+                repair.uom_id = repair.product_id.uom_id
+
+    @api.depends('product_id', 'lot_id', 'lot_id.product_id', 'picking_id')
+    def _compute_lot_id(self):
+        for repair in self:
+            if (repair.product_id and repair.lot_id and repair.lot_id.product_id != repair.product_id) or not repair.product_id:
+                repair.lot_id = False
+            elif len(repair.picking_id.move_ids.lot_ids) == 1:
+                repair.lot_id = repair.picking_id.move_ids.lot_ids
+
+    @api.depends('company_id')
+    def _compute_picking_type_id(self):
+        picking_type_by_company = self._get_picking_type()
+        for ro in self:
+            ro.picking_type_id = picking_type_by_company.get((ro.company_id, ro.user_id)) or\
+                picking_type_by_company.get((ro.company_id, False))
+
+    @api.depends('picking_type_id')
+    def _compute_location_id(self):
+        for repair in self:
+            repair.location_id = repair.picking_type_id.default_location_src_id
+
+    @api.depends('picking_type_id')
+    def _compute_product_location_src_id(self):
+        for record in self:
+            record.product_location_src_id = record.picking_type_id.default_product_location_src_id
+
+    @api.depends('picking_type_id')
+    def _compute_product_location_dest_id(self):
+        for record in self:
+            record.product_location_dest_id = record.picking_type_id.default_product_location_dest_id
+
+    @api.depends('picking_type_id')
+    def _compute_recycle_location_id(self):
+        for repair in self:
+            repair.recycle_location_id = repair.picking_type_id.default_recycle_location_dest_id
+
+    @api.depends('state', 'schedule_date', 'move_ids', 'move_ids.forecast_availability', 'move_ids.forecast_expected_date')
+    def _compute_parts_availability(self):
+        repairs = self.filtered(lambda ro: ro.state == 'confirmed')
+        repairs.parts_availability_state = 'available'
+        repairs.parts_availability = _('Available')
+
+        other_repairs = self - repairs
+        other_repairs.parts_availability = False
+        other_repairs.parts_availability_state = False
+
+        all_moves = repairs.move_ids
+        # Force to prefetch more than 1000 by 1000
+        all_moves._fields['forecast_availability'].compute_value(all_moves)
+        for repair in repairs:
+            if any(
+                move.product_id
+                and move.product_id.uom_id.compare(
+                    move.forecast_availability, move.product_qty
+                ) < 0
+                for move in repair.move_ids
+            ):
+                repair.parts_availability = _('Not Available')
+                repair.parts_availability_state = 'late'
+                continue
+            forecast_date = max(repair.move_ids.filtered('forecast_expected_date').mapped('forecast_expected_date'), default=False)
+            if not forecast_date:
+                continue
+            repair.parts_availability = _('Exp %s', format_date(self.env, forecast_date))
+            if repair.schedule_date:
+                repair.parts_availability_state = 'late' if forecast_date > repair.schedule_date else 'expected'
+
+    @api.depends('parts_availability_state')
+    def _compute_availability_boolean(self):
+        self.is_parts_available, self.is_parts_late = False, False
+        for repair in self:
+            if not repair.parts_availability_state:
+                continue
+            if repair.parts_availability_state == 'available':
+                repair.is_parts_available = True
+            elif repair.parts_availability_state == 'late':
+                repair.is_parts_late = True
+
+    @api.depends('move_ids.quantity', 'move_ids.product_uom_qty', 'move_ids.uom_id')
+    def _compute_has_uncomplete_moves(self):
+        for repair in self:
+            repair.has_uncomplete_moves = any(move.uom_id and move.uom_id.compare(move.quantity, move.product_uom_qty) < 0 for move in repair.move_ids)
+
+    @api.depends('move_ids', 'state', 'move_ids.product_uom_qty')
+    def _compute_unreserve_visible(self):
+        for repair in self:
+            repair.unreserve_visible = (
+                repair.state == 'confirmed' and
+                any(repair.move_ids.move_line_ids.mapped('quantity_product_uom'))
+            )
+            repair.reserve_visible = (
+                repair.state == 'confirmed' and
+                any(not move.picked and move.product_uom_qty and move.state in ['confirmed', 'partially_available'] for move in repair.move_ids)
+            )
+
+    @api.depends('sale_order_id.invoice_ids')
+    def _compute_invoice_ids(self):
+        self.invoice_ids |= self.sale_order_id.invoice_ids
+
+    @api.depends('state')
+    def _compute_validate_button_style(self):
+        for repair in self:
+            if repair.state in ('cancel', 'done', 'draft'):
+                repair.validate_button_style = 'invisible'
+            elif repair.state == 'confirmed':
+                repair.validate_button_style = 'primary'
+            else:
+                repair.validate_button_style = 'secondary'
+
+    def _search_date_category(self, operator, value):
+        if operator != 'in':
+            return NotImplemented
+        return Domain.OR(
+            self.env['stock.picking'].date_category_to_domain('schedule_date', item)
+            for item in value
+        )
+
+    @api.onchange('uom_id')
+    def onchange_uom_id(self):
         res = {}
-        if not self.product_id or not self.product_uom:
+        if not self.product_id or not self.uom_id:
             return res
-        if self.product_uom.category_id != self.product_id.uom_id.category_id:
-            res['warning'] = {'title': _('Warning'), 'message': _('The product unit of measure you chose has a different category than the product unit of measure.')}
-            self.product_uom = self.product_id.uom_id.id
         return res
 
-    @api.onchange('partner_id')
-    def onchange_partner_id(self):
-        if not self.partner_id:
-            self.address_id = False
-            self.partner_invoice_id = False
-            self.pricelist_id = self.env['product.pricelist'].search([], limit=1).id
-        else:
-            addresses = self.partner_id.address_get(['delivery', 'invoice', 'contact'])
-            self.address_id = addresses['delivery'] or addresses['contact']
-            self.partner_invoice_id = addresses['invoice']
-            self.pricelist_id = self.partner_id.property_product_pricelist.id
-
-    @api.multi
-    def button_dummy(self):
-        # TDE FIXME: this button is very interesting
-        return True
-
-    @api.multi
-    def action_repair_cancel_draft(self):
-        if self.filtered(lambda repair: repair.state != 'cancel'):
-            raise UserError(_("Repair must be canceled in order to reset it to draft."))
-        self.mapped('operations').write({'state': 'draft'})
-        return self.write({'state': 'draft'})
-
-    def action_validate(self):
-        self.ensure_one()
-        precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
-        available_qty_owner = self.env['stock.quant']._get_available_quantity(self.product_id, self.location_id, self.lot_id, owner_id=self.partner_id, strict=True)
-        available_qty_noown = self.env['stock.quant']._get_available_quantity(self.product_id, self.location_id, self.lot_id, strict=True)
-        for available_qty in [available_qty_owner, available_qty_noown]:
-            if float_compare(available_qty, self.product_qty, precision_digits=precision) >= 0:
-                return self.action_repair_confirm()
-        else:
+    @api.onchange('location_id', 'picking_id')
+    def _onchange_location_picking(self):
+        location_warehouse = self.location_id.warehouse_id
+        picking_warehouse = self.picking_id.location_dest_id.warehouse_id
+        if location_warehouse and picking_warehouse and location_warehouse != picking_warehouse:
             return {
-                'name': _('Insufficient Quantity'),
-                'view_type': 'form',
-                'view_mode': 'form',
-                'res_model': 'stock.warn.insufficient.qty.repair',
-                'view_id': self.env.ref('repair.stock_warn_insufficient_qty_repair_form_view').id,
-                'type': 'ir.actions.act_window',
-                'context': {
-                    'default_product_id': self.product_id.id,
-                    'default_location_id': self.location_id.id,
-                    'default_repair_id': self.id
-                    },
-                'target': 'new'
+                'warning': {'title': _("Warning"), 'message': _("Note that the warehouses of the return and repair locations don't match!")},
             }
 
-    @api.multi
-    def action_repair_confirm(self):
-        """ Repair order state is set to 'To be invoiced' when invoice method
-        is 'Before repair' else state becomes 'Confirmed'.
-        @param *arg: Arguments
-        @return: True
-        """
-        if self.filtered(lambda repair: repair.state != 'draft'):
-            raise UserError(_("Only draft repairs can be confirmed."))
-        before_repair = self.filtered(lambda repair: repair.invoice_method == 'b4repair')
-        before_repair.write({'state': '2binvoiced'})
-        to_confirm = self - before_repair
-        to_confirm_operations = to_confirm.mapped('operations')
-        to_confirm_operations.write({'state': 'confirmed'})
-        to_confirm.write({'state': 'confirmed'})
-        return True
+    @api.model
+    def default_get(self, fields):
+        # Adds the picking_id if it comes from a return. Avoids having a default_picking_id pollute the context for further move creation.
+        res = super().default_get(fields)
+        if 'picking_id' not in res and 'picking_id' in fields and 'default_repair_picking_id' in self.env.context:
+            res['picking_id'] = self.env.context.get('default_repair_picking_id')
+        if 'lot_id' not in res and 'lot_id' in fields and 'default_repair_lot_id' in self.env.context:
+            res['lot_id'] = self.env.context.get('default_repair_lot_id')
+        return res
 
-    @api.multi
+    @api.model_create_multi
+    def create(self, vals_list):
+        # We generate a standard reference
+        for vals in vals_list:
+            picking_type = self.env['stock.picking.type'].browse(
+                vals.get('picking_type_id', self.default_get(['picking_type_id'])['picking_type_id'])
+            )
+            if 'picking_type_id' not in vals:
+                vals['picking_type_id'] = picking_type.id
+            if not vals.get('name', False) or vals['name'] == _('New'):
+                vals['name'] = picking_type.sequence_id.next_by_id()
+            if not vals.get('reference_ids'):
+                vals['reference_ids'] = [Command.link(self.env["stock.reference"].create({'name': vals['name']}).id)]
+        return super().create(vals_list)
+
+    def write(self, vals):
+        moves_to_reassign = self.env['stock.move']
+        if vals.get('picking_type_id'):
+            picking_type = self.env['stock.picking.type'].browse(vals.get('picking_type_id'))
+            for repair in self:
+                if repair.state in ('cancel', 'done'):
+                    continue
+                if picking_type != repair.picking_type_id:
+                    repair.name = picking_type.sequence_id.next_by_id()
+                    moves_to_reassign |= repair.move_ids
+        res = super().write(vals)
+        if 'product_id' in vals and self.tracking == 'serial':
+            self.write({'product_qty': 1.0})
+
+        for repair in self:
+            has_modified_location = any(key in vals for key in MAP_REPAIR_TO_PICKING_LOCATIONS)
+            if has_modified_location:
+                repair.move_ids._set_repair_locations()
+            if 'schedule_date' in vals:
+                (repair.move_id + repair.move_ids).filtered(lambda m: m.state not in ('done', 'cancel')).write({'date': repair.schedule_date})
+            if 'under_warranty' in vals:
+                repair._update_sale_order_line_price()
+                repair._update_invoice_line_price()
+        if moves_to_reassign:
+            moves_to_reassign._do_unreserve()
+            moves_to_reassign = moves_to_reassign._filtered_for_assign()
+            moves_to_reassign._action_assign()
+        return res
+
+    @api.ondelete(at_uninstall=False)
+    def _unlink_except_confirmed(self):
+        repairs_to_cancel = self.filtered(lambda ro: ro.state != 'cancel')
+        repairs_to_cancel.action_repair_cancel()
+
+    def action_generate_serial(self):
+        self.ensure_one()
+        name = self.product_id.lot_sequence_id.next_by_id()
+        exist_lot = not name or self.env['stock.lot'].search([
+            ('product_id', '=', self.product_id.id),
+            '|', ('company_id', '=', False), ('company_id', '=', self.company_id.id),
+            ('name', '=', name),
+        ], limit=1)
+        if exist_lot:
+            name = self.env['stock.lot']._get_next_serial(self.company_id, self.product_id)
+        if not name:
+            raise UserError(_("Please set the first Serial Number or a default sequence"))
+        self.lot_id = self.env['stock.lot'].create({'product_id': self.product_id.id, 'name': name})
+
+    def action_assign(self):
+        return self.move_ids._action_assign()
+
+    def action_create_sale_order(self):
+        self._create_sale_order()
+        return self.action_view_sale_order()
+
     def action_repair_cancel(self):
-        if self.filtered(lambda repair: repair.state == 'done'):
-            raise UserError(_("Cannot cancel completed repairs."))
-        if any(repair.invoiced for repair in self):
-            raise UserError(_('The repair order is already invoiced.'))
-        self.mapped('operations').write({'state': 'cancel'})
+        if any(repair.state == 'done' for repair in self):
+            raise UserError(_("You cannot cancel a Repair Order that's already been completed"))
+        for repair in self:
+            if repair.sale_order_id:
+                repair.sale_order_line_id.write({'product_uom_qty': 0.0})  # Quantity of the product that generated the RO is set to 0
+        self.move_ids._action_cancel()  # Quantity of parts added from the RO to the SO is set to 0
         return self.write({'state': 'cancel'})
 
-    @api.multi
-    def action_send_mail(self):
+    def action_create_invoice(self):
         self.ensure_one()
-        template_id = self.env.ref('repair.mail_template_repair_quotation').id
-        ctx = {
-            'default_model': 'repair.order',
-            'default_res_id': self.id,
-            'default_use_template': bool(template_id),
-            'default_template_id': template_id,
-            'default_composition_mode': 'comment',
-            'custom_layout': 'mail.mail_notification_light',
-        }
-        return {
-            'type': 'ir.actions.act_window',
-            'view_type': 'form',
-            'view_mode': 'form',
-            'res_model': 'mail.compose.message',
-            'target': 'new',
-            'context': ctx,
-        }
+        invoice = self.env['account.move'].create({
+                'move_type': 'out_invoice',
+                'partner_id': self.partner_id.id,
+                'repair_order_id': self.id,
+            })
+        self.move_ids._create_repair_invoice_line()
+        self.repair_service_line_ids._create_repair_invoice_line()
+        return self.action_view_invoice(invoice)
 
-    @api.multi
-    def print_repair_order(self):
-        return self.env.ref('repair.action_report_repair_order').report_action(self)
+    def action_view_invoice(self, invoice=False):
+        self.ensure_one()
+        action = self.env['ir.actions.actions']._for_xml_id('account.action_move_out_invoice_type')
+        if not invoice and len(self.invoice_ids) == 1:
+            invoice = self.invoice_ids[0]
+        action.update({
+            'views': [[False, 'form']] if invoice else [[False, 'list'], [False, 'form']],
+            'domain': [('id', 'in', self.invoice_ids.ids)],
+            'res_id': invoice.id if invoice else False,
+            'context': {'create': False},
+        })
+        return action
 
-    def action_repair_invoice_create(self):
-        for repair in self:
-            repair.action_invoice_create()
-            if repair.invoice_method == 'b4repair':
-                repair.action_repair_ready()
-            elif repair.invoice_method == 'after_repair':
-                repair.write({'state': 'done'})
+    def action_repair_cancel_draft(self):
+        if self.filtered(lambda repair: repair.state != 'cancel'):
+            self.action_repair_cancel()
+        sale_line_to_update = self.move_ids.sale_line_id.filtered(lambda l: l.order_id.state != 'cancel' and l.product_uom_id.is_zero(l.product_uom_qty))
+        sale_line_to_update.move_ids._update_repair_sale_order_line()
+        self.move_ids.state = 'draft'
+        self.state = 'draft'
         return True
 
-    @api.multi
-    def action_invoice_create(self, group=False):
-        """ Creates invoice(s) for repair order.
-        @param group: It is set to true when group invoice is to be generated.
-        @return: Invoice Ids.
-        """
-        res = dict.fromkeys(self.ids, False)
-        invoices_group = {}
-        InvoiceLine = self.env['account.invoice.line']
-        Invoice = self.env['account.invoice']
-        for repair in self.filtered(lambda repair: repair.state not in ('draft', 'cancel') and not repair.invoice_id):
-            if not repair.partner_id.id and not repair.partner_invoice_id.id:
-                raise UserError(_('You have to select an invoice address in the repair form.'))
-            comment = repair.quotation_notes
-            if repair.invoice_method != 'none':
-                if group and repair.partner_invoice_id.id in invoices_group:
-                    invoice = invoices_group[repair.partner_invoice_id.id]
-                    invoice.write({
-                        'name': invoice.name + ', ' + repair.name,
-                        'origin': invoice.origin + ', ' + repair.name,
-                        'comment': (comment and (invoice.comment and invoice.comment + "\n" + comment or comment)) or (invoice.comment and invoice.comment or ''),
-                    })
-                else:
-                    if not repair.partner_id.property_account_receivable_id:
-                        raise UserError(_('No account defined for partner "%s".') % repair.partner_id.name)
-                    invoice = Invoice.create({
-                        'name': repair.name,
-                        'origin': repair.name,
-                        'type': 'out_invoice',
-                        'account_id': repair.partner_id.property_account_receivable_id.id,
-                        'partner_id': repair.partner_invoice_id.id or repair.partner_id.id,
-                        'currency_id': repair.pricelist_id.currency_id.id,
-                        'comment': repair.quotation_notes,
-                        'fiscal_position_id': repair.partner_id.property_account_position_id.id
-                    })
-                    invoices_group[repair.partner_invoice_id.id] = invoice
-                repair.write({'invoiced': True, 'invoice_id': invoice.id})
-
-                for operation in repair.operations:
-                    if operation.type == 'add':
-                        if group:
-                            name = repair.name + '-' + operation.name
-                        else:
-                            name = operation.name
-
-                        if operation.product_id.property_account_income_id:
-                            account_id = operation.product_id.property_account_income_id.id
-                        elif operation.product_id.categ_id.property_account_income_categ_id:
-                            account_id = operation.product_id.categ_id.property_account_income_categ_id.id
-                        else:
-                            raise UserError(_('No account defined for product "%s".') % operation.product_id.name)
-
-                        invoice_line = InvoiceLine.create({
-                            'invoice_id': invoice.id,
-                            'name': name,
-                            'origin': repair.name,
-                            'account_id': account_id,
-                            'quantity': operation.product_uom_qty,
-                            'invoice_line_tax_ids': [(6, 0, [x.id for x in operation.tax_id])],
-                            'uom_id': operation.product_uom.id,
-                            'price_unit': operation.price_unit,
-                            'price_subtotal': operation.product_uom_qty * operation.price_unit,
-                            'product_id': operation.product_id and operation.product_id.id or False
-                        })
-                        operation.write({'invoiced': True, 'invoice_line_id': invoice_line.id})
-                for fee in repair.fees_lines:
-                    if group:
-                        name = repair.name + '-' + fee.name
-                    else:
-                        name = fee.name
-                    if not fee.product_id:
-                        raise UserError(_('No product defined on fees.'))
-
-                    if fee.product_id.property_account_income_id:
-                        account_id = fee.product_id.property_account_income_id.id
-                    elif fee.product_id.categ_id.property_account_income_categ_id:
-                        account_id = fee.product_id.categ_id.property_account_income_categ_id.id
-                    else:
-                        raise UserError(_('No account defined for product "%s".') % fee.product_id.name)
-
-                    invoice_line = InvoiceLine.create({
-                        'invoice_id': invoice.id,
-                        'name': name,
-                        'origin': repair.name,
-                        'account_id': account_id,
-                        'quantity': fee.product_uom_qty,
-                        'invoice_line_tax_ids': [(6, 0, [x.id for x in fee.tax_id])],
-                        'uom_id': fee.product_uom.id,
-                        'product_id': fee.product_id and fee.product_id.id or False,
-                        'price_unit': fee.price_unit,
-                        'price_subtotal': fee.product_uom_qty * fee.price_unit
-                    })
-                    fee.write({'invoiced': True, 'invoice_line_id': invoice_line.id})
-                invoice.compute_taxes()
-                res[repair.id] = invoice.id
-        return res
-
-    @api.multi
-    def action_created_invoice(self):
-        self.ensure_one()
-        return {
-            'name': _('Invoice created'),
-            'type': 'ir.actions.act_window',
-            'view_mode': 'form',
-            'res_model': 'account.invoice',
-            'view_id': self.env.ref('account.invoice_form').id,
-            'target': 'current',
-            'res_id': self.invoice_id.id,
-            }
-
-    def action_repair_ready(self):
-        self.mapped('operations').write({'state': 'confirmed'})
-        return self.write({'state': 'ready'})
-
-    @api.multi
-    def action_repair_start(self):
-        """ Writes repair order state to 'Under Repair'
-        @return: True
-        """
-        if self.filtered(lambda repair: repair.state not in ['confirmed', 'ready']):
-            raise UserError(_("Repair must be confirmed before starting reparation."))
-        self.mapped('operations').write({'state': 'confirmed'})
-        return self.write({'state': 'under_repair'})
-
-    @api.multi
-    def action_repair_end(self):
-        """ Writes repair order state to 'To be invoiced' if invoice method is
-        After repair else state is set to 'Ready'.
-        @return: True
-        """
-        if self.filtered(lambda repair: repair.state != 'under_repair'):
-            raise UserError(_("Repair must be under repair in order to end reparation."))
-        for repair in self:
-            repair.write({'repaired': True})
-            vals = {'state': 'done'}
-            vals['move_id'] = repair.action_repair_done().get(repair.id)
-            if not repair.invoiced and repair.invoice_method == 'after_repair':
-                vals['state'] = '2binvoiced'
-            repair.write(vals)
-        return True
-
-    @api.multi
     def action_repair_done(self):
-        """ Creates stock move for operation and stock move for final product of repair order.
-        @return: Move ids of final products
-
+        """ Creates stock move for final product of repair order.
+        Writes move_id and move_ids state to 'done'.
+        Writes repair order state to 'Done'.
+        @return: True
         """
-        if self.filtered(lambda repair: not repair.repaired):
-            raise UserError(_("Repair must be repaired in order to make the product moves."))
-        res = {}
-        precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
-        Move = self.env['stock.move']
+
+        precision = self.env['decimal.precision'].precision_get('Product Unit')
+        product_move_vals = []
+
+        # Cancel moves with 0 quantity
+        self.move_ids.filtered(lambda m: m.uom_id.is_zero(m.quantity))._action_cancel()
+
+        no_service_policy = 'service_policy' not in self.env['product.template']
+        #SOL qty delivered = repair.move_ids.quantity
         for repair in self:
+            if all(not move.picked for move in repair.move_ids):
+                repair.move_ids.picked = True
+            if repair.sale_order_line_id:
+                ro_origin_product = repair.sale_order_line_id.product_template_id
+                # TODO: As 'service_policy' only appears with 'sale_project' module, isolate conditions related to this field in a 'sale_project_repair' module if it's worth
+                if ro_origin_product.type == 'service' and (no_service_policy or ro_origin_product.service_policy == 'ordered_prepaid'):
+                    repair.sale_order_line_id.qty_delivered = repair.sale_order_line_id.product_uom_qty
+            if not repair.product_id:
+                continue
+
+            if repair.product_id.tracking in ['lot', 'serial'] and not repair.lot_id:
+                raise ValidationError(_(
+                    "Serial number is required for product to repair : %s",
+                    repair.product_id.display_name
+                ))
+
             # Try to create move with the appropriate owner
             owner_id = False
             available_qty_owner = self.env['stock.quant']._get_available_quantity(repair.product_id, repair.location_id, repair.lot_id, owner_id=repair.partner_id, strict=True)
             if float_compare(available_qty_owner, repair.product_qty, precision_digits=precision) >= 0:
                 owner_id = repair.partner_id.id
 
-            moves = self.env['stock.move']
-            for operation in repair.operations:
-                move = Move.create({
-                    'name': repair.name,
-                    'product_id': operation.product_id.id,
-                    'product_uom_qty': operation.product_uom_qty,
-                    'product_uom': operation.product_uom.id,
-                    'partner_id': repair.address_id.id,
-                    'location_id': operation.location_id.id,
-                    'location_dest_id': operation.location_dest_id.id,
-                    'move_line_ids': [(0, 0, {'product_id': operation.product_id.id,
-                                           'lot_id': operation.lot_id.id, 
-                                           'product_uom_qty': 0,  # bypass reservation here
-                                           'product_uom_id': operation.product_uom.id,
-                                           'qty_done': operation.product_uom_qty,
-                                           'package_id': False,
-                                           'result_package_id': False,
-                                           'owner_id': owner_id,
-                                           'location_id': operation.location_id.id, #TODO: owner stuff
-                                           'location_dest_id': operation.location_dest_id.id,})],
-                    'repair_id': repair.id,
-                    'origin': repair.name,
-                })
-                moves |= move
-                operation.write({'move_id': move.id, 'state': 'done'})
-            move = Move.create({
-                'name': repair.name,
+            product_move_vals.append({
                 'product_id': repair.product_id.id,
-                'product_uom': repair.product_uom.id or repair.product_id.uom_id.id,
+                'uom_id': repair.uom_id.id or repair.product_id.uom_id.id,
                 'product_uom_qty': repair.product_qty,
-                'partner_id': repair.address_id.id,
-                'location_id': repair.location_id.id,
-                'location_dest_id': repair.location_id.id,
-                'move_line_ids': [(0, 0, {'product_id': repair.product_id.id,
-                                           'lot_id': repair.lot_id.id, 
-                                           'product_uom_qty': 0,  # bypass reservation here
-                                           'product_uom_id': repair.product_uom.id or repair.product_id.uom_id.id,
-                                           'qty_done': repair.product_qty,
-                                           'package_id': False,
-                                           'result_package_id': False,
-                                           'owner_id': owner_id,
-                                           'location_id': repair.location_id.id, #TODO: owner stuff
-                                           'location_dest_id': repair.location_id.id,})],
+                'partner_id': repair.partner_id.id,
+                'location_id': repair.product_location_src_id.id,
+                'location_dest_id': repair.product_location_dest_id.id,
+                'picked': True,
+                'picking_id': False,
+                'move_line_ids': [(0, 0, {
+                    'product_id': repair.product_id.id,
+                    'lot_id': repair.lot_id.id,
+                    'uom_id': repair.uom_id.id or repair.product_id.uom_id.id,
+                    'quantity': repair.product_qty,
+                    'package_id': False,
+                    'result_package_id': False,
+                    'owner_id': owner_id,
+                    'location_id': repair.product_location_src_id.id,
+                    'company_id': repair.company_id.id,
+                    'location_dest_id': repair.product_location_dest_id.id,
+                    'consume_line_ids': [(6, 0, repair.move_ids.move_line_ids.ids)]
+                })],
                 'repair_id': repair.id,
                 'origin': repair.name,
+                'company_id': repair.company_id.id,
             })
-            consumed_lines = moves.mapped('move_line_ids')
-            produced_lines = move.move_line_ids
-            moves |= move
-            moves._action_done()
-            produced_lines.write({'consume_line_ids': [(6, 0, consumed_lines.ids)]})
-            res[repair.id] = move.id
+
+        product_moves = self.env['stock.move'].create(product_move_vals)
+        repair_move = {m.repair_id.id: m for m in product_moves}
+        for repair in self:
+            move_id = repair_move.get(repair.id, False)
+            if move_id:
+                repair.move_id = move_id
+        all_moves = self.move_ids + product_moves
+        all_moves._action_done(cancel_backorder=True)
+        self.repair_service_line_ids._set_service_qty_delivered()
+        self.state = 'done'
+        self.move_ids._update_repair_linked_line()
+        self.repair_service_line_ids._update_repair_linked_line()
+        return True
+
+    def action_repair_end(self):
+        """ Checks before action_repair_done.
+        @return: True
+        """
+        if self.filtered(lambda repair: repair.state != 'confirmed'):
+            raise UserError(_("Repair must be confirmed in order to end reparation."))
+        if moves := self.move_ids.filtered(lambda move: move.quantity != move.product_uom_qty):
+            ctx = self.env.context.copy()
+            lines = []
+            for move in moves:
+                lines.append(Command.create({
+                    'move_id': move.id,
+                    'product_id': move.product_id.id,
+                    'uom_id': move.uom_id.id,
+                    'product_consumed_qty_uom': move.quantity,
+                    'product_expected_qty_uom': move.product_uom_qty,
+                }))
+            ctx.update({'default_repair_id': self.id, 'default_repair_consumption_warning_line_ids': lines})
+            action = self.env["ir.actions.actions"]._for_xml_id("repair.action_repair_consumption_warning")
+            action['context'] = ctx
+            return action
+        return self.action_repair_done()
+
+    def action_unreserve(self):
+        return self.move_ids.filtered(lambda m: m.state in ('assigned', 'partially_available'))._do_unreserve()
+
+    def action_validate(self):
+        self.ensure_one()
+        if self.filtered(lambda repair: any(m.product_uom_qty < 0 for m in repair.move_ids)):
+            raise UserError(_("You can not enter negative quantities."))
+        return self._action_repair_confirm()
+
+    def action_view_sale_order(self):
+        return {
+            "type": "ir.actions.act_window",
+            "res_model": "sale.order",
+            "views": [[False, "form"]],
+            "res_id": self.sale_order_id.id,
+        }
+
+    def print_repair_order(self):
+        return self.env.ref('repair.action_report_repair_order').report_action(self)
+
+    def _action_repair_confirm(self):
+        """ Repair order state is set to 'Confirmed'.
+        @param *arg: Arguments
+        @return: True
+        """
+        repairs_to_confirm = self.filtered(lambda repair: repair.state == 'draft')
+        repairs_to_confirm._check_company()
+        repairs_to_confirm.move_ids._check_company()
+        repairs_to_confirm.move_ids._adjust_procure_method(picking_type_code='repair_operation')
+        repairs_to_confirm.move_ids._action_confirm()
+        repairs_to_confirm.move_ids._trigger_scheduler()
+        repairs_to_confirm.write({'state': 'confirmed'})
+        return True
+
+    def _get_location(self, field):
+        return self.picking_type_id[MAP_REPAIR_TO_PICKING_LOCATIONS[field]]
+
+    def _get_picking_type(self):
+        companies = self.company_id or self.env.company
+        if not self:
+            # default case
+            default_warehouse = self.env.user.with_company(companies.id)._get_default_warehouse_id()
+            if not default_warehouse:
+                self.env['stock.warehouse']._warehouse_redirect_warning()
+            if default_warehouse.repair_type_id:
+                return {(companies, self.env.user): default_warehouse.repair_type_id}
+
+        picking_type_by_company_user = {}
+        without_default_warehouse_companies = set()
+        for company, user in unique((r.company_id, r.user_id) for r in self):
+            default_warehouse = user.with_company(company.id)._get_default_warehouse_id()
+            if default_warehouse and default_warehouse.repair_type_id:
+                picking_type_by_company_user[(company, user)] = default_warehouse.repair_type_id
+            else:
+                without_default_warehouse_companies.add(company.id)
+
+        if not without_default_warehouse_companies:
+            return picking_type_by_company_user
+
+        domain = [
+            ('code', '=', 'repair_operation'),
+            ('warehouse_id.company_id', 'in', list(without_default_warehouse_companies)),
+        ]
+
+        picking_types = self.env['stock.picking.type'].search_read(domain, ['company_id'], load=False)
+        for picking_type in picking_types:
+            if (picking_type.company_id, False) not in picking_type_by_company_user:
+                picking_type_by_company_user[(picking_type.company_id, False)] = picking_type
+        return picking_type_by_company_user
+
+    def _update_sale_order_line_price(self):
+        for repair in self:
+            add_moves = repair.move_ids.filtered(lambda m: m.repair_line_type == 'add' and m.sale_line_id)
+            sale_order_lines = add_moves.sale_line_id | repair.repair_service_line_ids.sale_line_id
+            if repair.under_warranty:
+                sale_order_lines.write({'price_unit': 0.0, 'technical_price_unit': 0.0})
+            else:
+                sale_order_lines._compute_price_unit()
+
+    def _update_invoice_line_price(self):
+        invoices = self.invoice_ids.filtered(lambda inv: inv.state == 'draft')
+        if self.under_warranty:
+            invoices.invoice_line_ids.write({'price_unit': 0.0})
+        else:
+            invoices.invoice_line_ids._compute_price_unit()
+
+    def _get_sale_order_values(self):
+        self.ensure_one()
+        return {
+            "company_id": self.company_id.id,
+            "partner_id": self.partner_id.id,
+            "warehouse_id": self.picking_type_id.warehouse_id.id,
+            "repair_order_ids": [Command.link(self.id)],
+            "origin": self.name,
+        }
+
+    def _create_sale_order(self):
+        if any(repair.sale_order_id for repair in self):
+            concerned_ro = self.filtered('sale_order_id')
+            ref_str = "\n".join(ro.name for ro in concerned_ro)
+            raise UserError(
+                _(
+                    "You cannot create a quotation for a repair order that is already linked to an existing sale order.\nConcerned repair order(s):\n%(ref_str)s",
+                    ref_str=ref_str,
+                ),
+            )
+        if any(not repair.partner_id for repair in self):
+            concerned_ro = self.filtered(lambda ro: not ro.partner_id)
+            ref_str = "\n".join(ro.name for ro in concerned_ro)
+            raise UserError(
+                _(
+                    "You need to define a customer for a repair order in order to create an associated quotation.\nConcerned repair order(s):\n%(ref_str)s",
+                    ref_str=ref_str,
+                ),
+            )
+        sale_order_values_list = [repair._get_sale_order_values() for repair in self]
+        sale_orders = self.env['sale.order'].create(sale_order_values_list)
+        # Add Sale Order Lines for 'add' move_ids and services
+        self.move_ids._create_repair_sale_order_line()
+        self.repair_service_line_ids._create_repair_sale_order_line()
+        return sale_orders
+
+    # -------------------------------------------------------------------------
+    # CATALOG
+    # -------------------------------------------------------------------------
+
+    def action_add_from_catalog(self):
+        res = super().action_add_from_catalog()
+        res['search_view_id'] = [self.env.ref('repair.product_view_search_catalog').id, 'search']
         return res
 
+    def _get_product_catalog_domain(self):
+        catalog_domain = Domain('type', '=', 'consu')
+        if self.env.context.get('child_field') == 'repair_service_line_ids':
+            catalog_domain = Domain('type', '=', 'service')
+        return super()._get_product_catalog_domain() & catalog_domain
 
-class RepairLine(models.Model):
-    _name = 'repair.line'
-    _description = 'Repair Line'
+    def _get_action_add_from_catalog_extra_context(self):
+        return {
+            **super()._get_action_add_from_catalog_extra_context(),
+            'display_stock': True,
+            'hide_product_type_filters': True,  # Only goods/services are displayed
+        }
 
-    name = fields.Text('Description', required=True)
-    repair_id = fields.Many2one(
-        'repair.order', 'Repair Order Reference',
-        index=True, ondelete='cascade')
-    type = fields.Selection([
-        ('add', 'Add'),
-        ('remove', 'Remove')], 'Type', required=True)
-    product_id = fields.Many2one('product.product', 'Product', required=True)
-    invoiced = fields.Boolean('Invoiced', copy=False, readonly=True)
-    price_unit = fields.Float('Unit Price', required=True, digits=dp.get_precision('Product Price'))
-    price_subtotal = fields.Float('Subtotal', compute='_compute_price_subtotal', store=True, digits=0)
-    tax_id = fields.Many2many(
-        'account.tax', 'repair_operation_line_tax', 'repair_operation_line_id', 'tax_id', 'Taxes')
-    product_uom_qty = fields.Float(
-        'Quantity', default=1.0,
-        digits=dp.get_precision('Product Unit of Measure'), required=True)
-    product_uom = fields.Many2one(
-        'uom.uom', 'Product Unit of Measure',
-        required=True)
-    invoice_line_id = fields.Many2one(
-        'account.invoice.line', 'Invoice Line',
-        copy=False, readonly=True)
-    location_id = fields.Many2one(
-        'stock.location', 'Source Location',
-        index=True, required=True)
-    location_dest_id = fields.Many2one(
-        'stock.location', 'Dest. Location',
-        index=True, required=True)
-    move_id = fields.Many2one(
-        'stock.move', 'Inventory Move',
-        copy=False, readonly=True)
-    lot_id = fields.Many2one('stock.production.lot', 'Lot/Serial')
-    state = fields.Selection([
-        ('draft', 'Draft'),
-        ('confirmed', 'Confirmed'),
-        ('done', 'Done'),
-        ('cancel', 'Cancelled')], 'Status', default='draft',
-        copy=False, readonly=True, required=True,
-        help='The status of a repair line is set automatically to the one of the linked repair order.')
+    def _catalog_prepare_new_line_vals(self, child_field, *args, **kwargs) -> dict:
+        res = super()._catalog_prepare_new_line_vals(child_field, *args, **kwargs)
+        if child_field != 'move_ids':
+            return res
 
-    @api.constrains('lot_id', 'product_id')
-    def constrain_lot_id(self):
-        for line in self.filtered(lambda x: x.product_id.tracking != 'none' and not x.lot_id):
-            raise ValidationError(_("Serial number is required for operation line with product '%s'") % (line.product_id.name))
+        return {
+            **res,
+            'location_id': self.location_id.id,
+            'location_dest_id': self.location_dest_id.id,
+            'repair_line_type': 'add',
+        }
 
-    @api.one
-    @api.depends('price_unit', 'repair_id', 'product_uom_qty', 'product_id', 'repair_id.invoice_method')
-    def _compute_price_subtotal(self):
-        taxes = self.tax_id.compute_all(self.price_unit, self.repair_id.pricelist_id.currency_id, self.product_uom_qty, self.product_id, self.repair_id.partner_id)
-        self.price_subtotal = taxes['total_excluded']
+    def _show_prices(self) -> bool:
+        return False
 
-    @api.onchange('type', 'repair_id')
-    def onchange_operation_type(self):
-        """ On change of operation type it sets source location, destination location
-        and to invoice field.
-        @param product: Changed operation type.
-        @param guarantee_limit: Guarantee limit of current record.
-        @return: Dictionary of values.
-        """
-        if not self.type:
-            self.location_id = False
-            self.location_dest_id = False
-        elif self.type == 'add':
-            self.onchange_product_id()
-            args = self.repair_id.company_id and [('company_id', '=', self.repair_id.company_id.id)] or []
-            warehouse = self.env['stock.warehouse'].search(args, limit=1)
-            self.location_id = warehouse.lot_stock_id
-            self.location_dest_id = self.env['stock.location'].search([('usage', '=', 'production')], limit=1).id
-        else:
-            self.price_unit = 0.0
-            self.tax_id = False
-            self.location_id = self.env['stock.location'].search([('usage', '=', 'production')], limit=1).id
-            self.location_dest_id = self.env['stock.location'].search([('scrap_location', '=', True)], limit=1).id
+    # ------------------------------------------------------------
+    # MAIL.THREAD
+    # ------------------------------------------------------------
 
-    @api.onchange('repair_id', 'product_id', 'product_uom_qty')
-    def onchange_product_id(self):
-        """ On change of product it sets product quantity, tax account, name,
-        uom of product, unit price and price subtotal. """
-        partner = self.repair_id.partner_id
-        pricelist = self.repair_id.pricelist_id
-        if not self.product_id or not self.product_uom_qty:
-            return
-        if self.product_id:
-            if partner:
-                self.name = self.product_id.with_context(lang=partner.lang).display_name
-            else:
-                self.name = self.product_id.display_name
-            if self.product_id.description_sale:
-                self.name += '\n' + self.product_id.description_sale
-            self.product_uom = self.product_id.uom_id.id
-        if self.type != 'remove':
-            if partner and self.product_id:
-                self.tax_id = partner.property_account_position_id.map_tax(self.product_id.taxes_id, self.product_id, partner).ids
-            warning = False
-            if not pricelist:
-                warning = {
-                    'title': _('No pricelist found.'),
-                    'message':
-                        _('You have to select a pricelist in the Repair form !\n Please set one before choosing a product.')}
-            else:
-                price = pricelist.get_product_price(self.product_id, self.product_uom_qty, partner)
-                if price is False:
-                    warning = {
-                        'title': _('No valid pricelist line found.'),
-                        'message':
-                            _("Couldn't find a pricelist line matching this product and quantity.\nYou have to change either the product, the quantity or the pricelist.")}
-                else:
-                    self.price_unit = price
-            if warning:
-                return {'warning': warning}
+    def message_post(self, **kwargs):
+        kwargs['notify_author_mention'] = kwargs.get('notify_author_mention', True)
+        return super().message_post(**kwargs)
 
 
-class RepairFee(models.Model):
-    _name = 'repair.fee'
-    _description = 'Repair Fees Line'
+class RepairTags(models.Model):
+    """ Tags of Repair's tasks """
+    _name = 'repair.tags'
+    _description = "Repair Tag"
 
-    repair_id = fields.Many2one(
-        'repair.order', 'Repair Order Reference',
-        index=True, ondelete='cascade', required=True)
-    name = fields.Text('Description', index=True, required=True)
-    product_id = fields.Many2one('product.product', 'Product')
-    product_uom_qty = fields.Float('Quantity', digits=dp.get_precision('Product Unit of Measure'), required=True, default=1.0)
-    price_unit = fields.Float('Unit Price', required=True)
-    product_uom = fields.Many2one('uom.uom', 'Product Unit of Measure', required=True)
-    price_subtotal = fields.Float('Subtotal', compute='_compute_price_subtotal', store=True, digits=0)
-    tax_id = fields.Many2many('account.tax', 'repair_fee_line_tax', 'repair_fee_line_id', 'tax_id', 'Taxes')
-    invoice_line_id = fields.Many2one('account.invoice.line', 'Invoice Line', copy=False, readonly=True)
-    invoiced = fields.Boolean('Invoiced', copy=False, readonly=True)
+    def _get_default_color(self):
+        return randint(1, 11)
 
-    @api.one
-    @api.depends('price_unit', 'repair_id', 'product_uom_qty', 'product_id')
-    def _compute_price_subtotal(self):
-        taxes = self.tax_id.compute_all(self.price_unit, self.repair_id.pricelist_id.currency_id, self.product_uom_qty, self.product_id, self.repair_id.partner_id)
-        self.price_subtotal = taxes['total_excluded']
+    name = fields.Char('Tag Name', required=True)
+    color = fields.Integer(string='Color Index', default=_get_default_color)
 
-    @api.onchange('repair_id', 'product_id', 'product_uom_qty')
-    def onchange_product_id(self):
-        """ On change of product it sets product quantity, tax account, name,
-        uom of product, unit price and price subtotal. """
-        if not self.product_id:
-            return
-
-        partner = self.repair_id.partner_id
-        pricelist = self.repair_id.pricelist_id
-
-        if partner and self.product_id:
-            self.tax_id = partner.property_account_position_id.map_tax(self.product_id.taxes_id, self.product_id, partner).ids
-        if self.product_id:
-            self.name = self.product_id.display_name
-            self.product_uom = self.product_id.uom_id.id
-            if self.product_id.description_sale:
-                self.name += '\n' + self.product_id.description_sale
-
-        warning = False
-        if not pricelist:
-            warning = {
-                'title': _('No pricelist found.'),
-                'message':
-                    _('You have to select a pricelist in the Repair form !\n Please set one before choosing a product.')}
-        else:
-            price = pricelist.get_product_price(self.product_id, self.product_uom_qty, partner)
-            if price is False:
-                warning = {
-                    'title': _('No valid pricelist line found.'),
-                    'message':
-                        _("Couldn't find a pricelist line matching this product and quantity.\nYou have to change either the product, the quantity or the pricelist.")}
-            else:
-                self.price_unit = price
-        if warning:
-            return {'warning': warning}
+    _name_uniq = models.Constraint(
+        'unique (name)',
+        'Tag name already exists!',
+    )

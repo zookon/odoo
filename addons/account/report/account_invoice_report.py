@@ -1,190 +1,193 @@
-# -*- coding: utf-8 -*-
+from odoo import api, fields, models
+from odoo.models import TableSQL
+from odoo.tools import SQL
 
-from odoo import tools
-from odoo import models, fields, api
+from odoo.addons.account.models.account_move import PAYMENT_STATE_SELECTION
 
 
 class AccountInvoiceReport(models.Model):
-    _name = "account.invoice.report"
+    _name = 'account.invoice.report'
     _description = "Invoices Statistics"
     _auto = False
-    _rec_name = 'date'
+    _rec_name = 'invoice_date'
+    _order = 'invoice_date desc'
 
-    @api.multi
-    @api.depends('currency_id', 'date', 'price_total', 'price_average', 'residual')
-    def _compute_amounts_in_user_currency(self):
-        """Compute the amounts in the currency of the user
-        """
-        user_currency_id = self.env.user.company_id.currency_id
-        currency_rate_id = self.env['res.currency.rate'].search([
-            ('rate', '=', 1),
-            '|', ('company_id', '=', self.env.user.company_id.id), ('company_id', '=', False)], limit=1)
-        base_currency_id = currency_rate_id.currency_id
-        for record in self:
-            date = record.date or fields.Date.today()
-            company = record.company_id
-            record.user_currency_price_total = base_currency_id._convert(record.price_total, user_currency_id, company, date)
-            record.user_currency_price_average = base_currency_id._convert(record.price_average, user_currency_id, company, date)
-            record.user_currency_residual = base_currency_id._convert(record.residual, user_currency_id, company, date)
-
-    number = fields.Char('Invoice Number', readonly=True)
-    date = fields.Date(readonly=True)
-    product_id = fields.Many2one('product.product', string='Product', readonly=True)
-    product_qty = fields.Float(string='Product Quantity', readonly=True)
-    uom_name = fields.Char(string='Reference Unit of Measure', readonly=True)
-    payment_term_id = fields.Many2one('account.payment.term', string='Payment Terms', oldname='payment_term', readonly=True)
-    fiscal_position_id = fields.Many2one('account.fiscal.position', oldname='fiscal_position', string='Fiscal Position', readonly=True)
-    currency_id = fields.Many2one('res.currency', string='Currency', readonly=True)
-    categ_id = fields.Many2one('product.category', string='Product Category', readonly=True)
+    # ==== Invoice fields ====
+    move_id = fields.Many2one('account.move', readonly=True)
     journal_id = fields.Many2one('account.journal', string='Journal', readonly=True)
-    partner_id = fields.Many2one('res.partner', string='Partner', readonly=True)
-    commercial_partner_id = fields.Many2one('res.partner', string='Partner Company', help="Commercial Entity")
     company_id = fields.Many2one('res.company', string='Company', readonly=True)
-    user_id = fields.Many2one('res.users', string='Salesperson', readonly=True)
-    price_total = fields.Float(string='Total Without Tax', readonly=True)
-    user_currency_price_total = fields.Float(string="Total Without Tax in Currency", compute='_compute_amounts_in_user_currency', digits=0)
-    price_average = fields.Float(string='Average Price', readonly=True, group_operator="avg")
-    user_currency_price_average = fields.Float(string="Average Price in Currency", compute='_compute_amounts_in_user_currency', digits=0)
-    currency_rate = fields.Float(string='Currency Rate', readonly=True, group_operator="avg", groups="base.group_multi_currency")
-    nbr = fields.Integer(string='Line Count', readonly=True)  # TDE FIXME master: rename into nbr_lines
-    invoice_id = fields.Many2one('account.invoice', readonly=True)
-    type = fields.Selection([
+    company_currency_id = fields.Many2one('res.currency', string='Company Currency', readonly=True)
+    partner_id = fields.Many2one('res.partner', string='Partner', readonly=True)
+    commercial_partner_id = fields.Many2one('res.partner', string='Main Partner')
+    country_id = fields.Many2one('res.country', string="Country")
+    invoice_user_id = fields.Many2one('res.users', string='Salesperson', readonly=True)
+    move_type = fields.Selection([
         ('out_invoice', 'Customer Invoice'),
         ('in_invoice', 'Vendor Bill'),
         ('out_refund', 'Customer Credit Note'),
         ('in_refund', 'Vendor Credit Note'),
+        ('out_receipt', 'Sales Receipt'),
+        ('in_receipt', 'Purchase Receipt'),
         ], readonly=True)
     state = fields.Selection([
         ('draft', 'Draft'),
-        ('open', 'Open'),
-        ('paid', 'Paid'),
+        ('posted', 'Open'),
         ('cancel', 'Cancelled')
         ], string='Invoice Status', readonly=True)
-    date_due = fields.Date(string='Due Date', readonly=True)
-    account_id = fields.Many2one('account.account', string='Account', readonly=True, domain=[('deprecated', '=', False)])
-    account_line_id = fields.Many2one('account.account', string='Account Line', readonly=True, domain=[('deprecated', '=', False)])
-    partner_bank_id = fields.Many2one('res.partner.bank', string='Bank Account', readonly=True)
-    residual = fields.Float(string='Due Amount', readonly=True)
-    user_currency_residual = fields.Float(string="Total Residual", compute='_compute_amounts_in_user_currency', digits=0)
-    country_id = fields.Many2one('res.country', string='Country of the Partner Company')
-    account_analytic_id = fields.Many2one('account.analytic.account', string='Analytic Account', groups="analytic.group_analytic_accounting")
+    payment_state = fields.Selection(selection=PAYMENT_STATE_SELECTION, string='Payment Status', readonly=True)
+    fiscal_position_id = fields.Many2one('account.fiscal.position', string='Fiscal Position', readonly=True)
+    invoice_date = fields.Date(readonly=True, string="Invoice Date")
 
-    _order = 'date desc'
+    # ==== Invoice line fields ====
+    quantity = fields.Float(string='Product Quantity', readonly=True)
+    product_id = fields.Many2one('product.product', string='Product', readonly=True)
+    product_uom_id = fields.Many2one('uom.uom', string='Unit', readonly=True)
+    product_categ_id = fields.Many2one('product.category', string='Product Category', readonly=True)
+    invoice_date_due = fields.Date(string='Due Date', readonly=True)
+    account_id = fields.Many2one('account.account', string='Revenue/Expense Account', readonly=True)
+    price_subtotal_currency = fields.Monetary(string='Untaxed Amount in Currency', readonly=True, currency_field='currency_id')
+    price_subtotal = fields.Monetary(
+        string='Untaxed Amount',
+        readonly=True,
+        currency_field='company_currency_id',
+        aggregator='sum_currency',
+    )
+    price_total = fields.Monetary(
+        string='Total',
+        readonly=True,
+        currency_field='company_currency_id',
+        aggregator='sum_currency',
+    )
+    price_total_currency = fields.Monetary(string='Total in Currency', readonly=True, currency_field='currency_id')
+    price_average = fields.Monetary(
+        string='Average Price',
+        readonly=True,
+        currency_field='company_currency_id',
+        aggregator="avg_currency",
+    )
+    price_margin = fields.Monetary(
+        string='Margin',
+        readonly=True,
+        currency_field='company_currency_id',
+        aggregator='sum_currency',
+    )
+    inventory_value = fields.Monetary(
+        string='Inventory Value',
+        readonly=True,
+        currency_field='company_currency_id',
+        aggregator='sum_currency',
+    )
+    currency_id = fields.Many2one('res.currency', string='Currency', readonly=True)
 
-    _depends = {
-        'account.invoice': [
-            'account_id', 'amount_total_company_signed', 'commercial_partner_id', 'company_id',
-            'currency_id', 'date_due', 'date_invoice', 'fiscal_position_id',
-            'journal_id', 'number', 'partner_bank_id', 'partner_id', 'payment_term_id',
-            'residual', 'state', 'type', 'user_id',
-        ],
-        'account.invoice.line': [
-            'account_id', 'invoice_id', 'price_subtotal', 'product_id',
-            'quantity', 'uom_id', 'account_analytic_id',
-        ],
-        'product.product': ['product_tmpl_id'],
-        'product.template': ['categ_id'],
-        'uom.uom': ['category_id', 'factor', 'name', 'uom_type'],
-        'res.currency.rate': ['currency_id', 'name'],
-        'res.partner': ['country_id'],
-    }
+    @property
+    def _table_sql(self) -> SQL:
+        today = fields.Date.context_today(self)
+        self.env['account.move.line'].check_access('read')
+        query = self.env['account.move.line'].sudo().with_context(date_to=today)._search([
+            ('move_type', 'in', self._fields['move_type'].get_values(self.env)),
+            ('account_id', '!=', False),
+            ('display_type', '=', 'product'),
+        ])
+        query.add_where(SQL("%s = %s", query.table._sudo().move_id.company_id, query.table.company_id))
+        return query.subselect(*self._select_list(query.table))
 
-    def _select(self):
-        select_str = """
-            SELECT sub.id, sub.number, sub.date, sub.product_id, sub.partner_id, sub.country_id, sub.account_analytic_id,
-                sub.payment_term_id, sub.uom_name, sub.currency_id, sub.journal_id,
-                sub.fiscal_position_id, sub.user_id, sub.company_id, sub.nbr, sub.invoice_id, sub.type, sub.state,
-                sub.categ_id, sub.date_due, sub.account_id, sub.account_line_id, sub.partner_bank_id,
-                sub.product_qty, sub.price_total as price_total, sub.price_average as price_average,
-                COALESCE(cr.rate, 1) as currency_rate, sub.residual as residual, sub.commercial_partner_id as commercial_partner_id
-        """
-        return select_str
+    def _select_list(self, table: TableSQL):
+        in_out_sign = SQL("CASE WHEN %s IN ('in_invoice','out_refund','in_receipt') THEN -1 ELSE 1 END", table.move_id.move_type)
+        uom_ratio = SQL("(COALESCE(%s, 1) / NULLIF(COALESCE(%s, 1), 0.0))", table.product_uom_id.factor, table.product_id.uom_id.factor)
+        quantity = SQL("%s * %s", table.quantity, uom_ratio)
+        table_with_company = table._with_model(table._model.with_context(sql_company_id=table.company_id))
+        return [
+            table.id,
+            table.move_id,
+            table.product_id,
+            table.account_id,
+            table.journal_id,
+            table.company_id,
+            table.currency_id,
+            table.company_currency_id,
+            SQL("%s AS commercial_partner_id", table.partner_id),
+            table.move_id.state,
+            table.move_id.move_type,
+            table.move_id.partner_id,
+            table.move_id.invoice_user_id,
+            table.move_id.fiscal_position_id,
+            table.move_id.payment_state,
+            table.move_id.invoice_date,
+            table.move_id.invoice_date_due,
+            table.partner_id.country_id,
+            SQL("%s AS product_uom_id", table.product_id.uom_id),
+            SQL("%s AS product_categ_id", table.product_id.categ_id),
+            SQL("%s * %s AS quantity", quantity, in_out_sign),
+            SQL("%s * %s AS price_subtotal_currency", table.price_subtotal, in_out_sign),
+            SQL("-%s AS price_subtotal", table.balance),
+            SQL("%s * %s / %s AS price_total", table.price_total, in_out_sign, table.move_id.invoice_currency_rate),
+            SQL("%s * %s AS price_total_currency", table.price_total, in_out_sign),
+            SQL(
+                "-COALESCE((%s / NULLIF(%s, 0.0)) * %s, 0.0) AS price_average",
+                table.balance, quantity, in_out_sign,
+            ),
+            SQL(
+                """
+                CASE
+                    WHEN %s NOT IN ('out_invoice', 'out_receipt', 'out_refund') THEN 0.0
+                    WHEN %s = 'out_refund' THEN -%s + %s * COALESCE(%s, 0.0)
+                    ELSE -%s - %s * COALESCE(%s, 0.0)
+                END AS price_margin
+                """,
+                table.move_type,
+                table.move_type, table.balance, quantity, table_with_company.product_id.standard_price,
+                table.balance, quantity, table_with_company.product_id.standard_price,
+            ),
+            SQL(
+                "-%s * %s * COALESCE(%s, 0.0) AS inventory_value",
+                quantity, in_out_sign, table_with_company.product_id.standard_price,
+            ),
+        ]
 
-    def _sub_select(self):
-        select_str = """
-                SELECT ail.id AS id,
-                    ai.date_invoice AS date,
-                    ai.number as number,
-                    ail.product_id, ai.partner_id, ai.payment_term_id, ail.account_analytic_id,
-                    u2.name AS uom_name,
-                    ai.currency_id, ai.journal_id, ai.fiscal_position_id, ai.user_id, ai.company_id,
-                    1 AS nbr,
-                    ai.id AS invoice_id, ai.type, ai.state, pt.categ_id, ai.date_due, ai.account_id, ail.account_id AS account_line_id,
-                    ai.partner_bank_id,
-                    SUM ((invoice_type.sign * ail.quantity) / u.factor * u2.factor) AS product_qty,
-                    SUM(ail.price_subtotal_signed * invoice_type.sign) AS price_total,
-                    SUM(ABS(ail.price_subtotal_signed)) / CASE
-                            WHEN SUM(ail.quantity / u.factor * u2.factor) <> 0::numeric
-                               THEN SUM(ail.quantity / u.factor * u2.factor)
-                               ELSE 1::numeric
-                            END AS price_average,
-                    ai.residual_company_signed / (SELECT count(*) FROM account_invoice_line l where invoice_id = ai.id) *
-                    count(*) * invoice_type.sign AS residual,
-                    ai.commercial_partner_id as commercial_partner_id,
-                    partner.country_id
-        """
-        return select_str
-
-    def _from(self):
-        from_str = """
-                FROM account_invoice_line ail
-                JOIN account_invoice ai ON ai.id = ail.invoice_id
-                JOIN res_partner partner ON ai.commercial_partner_id = partner.id
-                LEFT JOIN product_product pr ON pr.id = ail.product_id
-                left JOIN product_template pt ON pt.id = pr.product_tmpl_id
-                LEFT JOIN uom_uom u ON u.id = ail.uom_id
-                LEFT JOIN uom_uom u2 ON u2.id = pt.uom_id
-                JOIN (
-                    -- Temporary table to decide if the qty should be added or retrieved (Invoice vs Credit Note)
-                    SELECT id,(CASE
-                         WHEN ai.type::text = ANY (ARRAY['in_refund'::character varying::text, 'in_invoice'::character varying::text])
-                            THEN -1
-                            ELSE 1
-                        END) AS sign
-                    FROM account_invoice ai
-                ) AS invoice_type ON invoice_type.id = ai.id
-        """
-        return from_str
-
-    def _group_by(self):
-        group_by_str = """
-                GROUP BY ail.id, ail.product_id, ail.account_analytic_id, ai.date_invoice, ai.id,
-                    ai.partner_id, ai.payment_term_id, u2.name, u2.id, ai.currency_id, ai.journal_id,
-                    ai.fiscal_position_id, ai.user_id, ai.company_id, ai.id, ai.type, invoice_type.sign, ai.state, pt.categ_id,
-                    ai.date_due, ai.account_id, ail.account_id, ai.partner_bank_id, ai.residual_company_signed,
-                    ai.amount_total_company_signed, ai.commercial_partner_id, partner.country_id
-        """
-        return group_by_str
-
-    @api.model_cr
-    def init(self):
-        # self._table = account_invoice_report
-        tools.drop_view_if_exists(self.env.cr, self._table)
-        self.env.cr.execute("""CREATE or REPLACE VIEW %s as (
-            WITH currency_rate AS (%s)
-            %s
-            FROM (
-                %s %s WHERE ail.account_id IS NOT NULL %s
-            ) AS sub
-            LEFT JOIN currency_rate cr ON
-                (cr.currency_id = sub.currency_id AND
-                 cr.company_id = sub.company_id AND
-                 cr.date_start <= COALESCE(sub.date, NOW()) AND
-                 (cr.date_end IS NULL OR cr.date_end > COALESCE(sub.date, NOW())))
-        )""" % (
-                    self._table, self.env['res.currency']._select_companies_rates(),
-                    self._select(), self._sub_select(), self._from(), self._group_by()))
+    def _read_group_select(self, table: TableSQL, aggregate_spec: str) -> SQL:
+        """Calculate the average price as a quantity-weighted average in company currency."""
+        if aggregate_spec != 'price_average:avg_currency':
+            return super()._read_group_select(table, aggregate_spec)
+        return SQL(
+            'COALESCE(%s / NULLIF(SUM(%s), 0.0), 0)',
+            super()._read_group_select(table, 'price_subtotal:sum_currency'),
+            table.quantity,
+        )
 
 
-class ReportInvoiceWithPayment(models.AbstractModel):
-    _name = 'report.account.report_invoice_with_payments'
+class ReportAccountReport_Invoice(models.AbstractModel):
+    _name = 'report.account.report_invoice'
+    _description = 'Account report without payment lines'
 
     @api.model
     def _get_report_values(self, docids, data=None):
-        report = self.env['ir.actions.report']._get_report_from_name('account.report_invoice_with_payments')
+        docs = self.env['account.move'].browse(docids)
+
+        qr_code_urls = {}
+        for invoice in docs:
+            if invoice.display_qr_code:
+                # When the QR-code can't be generated, print and send raise the error so that the
+                # configuration gets fixed, while the customer portal shows the invoice without it.
+                silent_errors = data['report_type'] == 'html' or data.get('proforma')
+                new_code_url = invoice._generate_qr_code(silent_errors=silent_errors)
+                if new_code_url:
+                    qr_code_urls[invoice.id] = new_code_url
+
         return {
             'doc_ids': docids,
-            'doc_model': report.model,
-            'docs': self.env[report.model].browse(docids),
-            'type_html': data and data.get('report_type') == 'html',
+            'doc_model': 'account.move',
+            'docs': docs,
+            'qr_code_urls': qr_code_urls,
         }
+
+
+class ReportAccountReport_Invoice_With_Payments(models.AbstractModel):
+    _name = 'report.account.report_invoice_with_payments'
+    _description = 'Account report with payment lines'
+    _inherit = ['report.account.report_invoice']
+
+    @api.model
+    def _get_report_values(self, docids, data=None):
+        rslt = super()._get_report_values(docids, data)
+        rslt['report_type'] = data.get('report_type') if data else ''
+        return rslt

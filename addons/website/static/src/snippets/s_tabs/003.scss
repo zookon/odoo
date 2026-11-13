@@ -1,0 +1,129 @@
+.s_tabs_common {
+    --tabs-bg-color: var(--gray-100);
+    --tabs-link-color: var(--o-bs-body-color);
+
+    .nav-link:focus-visible {
+        // Replace "focus-visible" shadow with an inner shadow so that it's visible with container
+        // that use "overflow: hidden".
+        box-shadow: inset 0 0 var(--o-bs-focus-ring-blur) var(--focus-ring-width) var(--focus-ring-color);
+    }
+
+    .nav-underline {
+        --nav-underline-link-active-color: currentColor;
+    }
+
+    .s_tabs_content {
+        &.s_tabs_slide_up, &.s_tabs_slide_down, &.s_tabs_slide_left, &.s_tabs_slide_right {
+            > .tab-pane.fade {
+                transition: var(--o-bs-transition-base);
+            }
+        }
+        &.s_tabs_slide_up > .tab-pane.fade:where(:not(.show)) {
+            transform: translateY(calc(var(--o-bs-spacer-3) * -1));
+        }
+        &.s_tabs_slide_down > .tab-pane.fade:where(:not(.show)) {
+            transform: translateY(var(--o-bs-spacer-3));
+        }
+        &.s_tabs_slide_left > .tab-pane.fade:where(:not(.show)) {
+            transform: translateX(calc(var(--o-bs-spacer-3) * -1)) #{"/*rtl:translateX(var(--o-bs-spacer-3))*/"};
+        }
+        &.s_tabs_slide_right > .tab-pane.fade:where(:not(.show)) {
+            transform: translateX(var(--o-bs-spacer-3)) #{"/*rtl:translateX(calc(var(--o-bs-spacer-3) * -1))*/"};
+        }
+    }
+
+    .s_tabs_main {
+        .nav-tabs {
+            --nav-tabs-link-hover-border-color: transparent;
+        }
+
+        &.o_direction_horizontal .nav {
+            white-space: nowrap;
+        }
+
+        .nav {
+            @media (max-width: 767.98px) { /* media-breakpoint-down(md) */
+                white-space: nowrap;
+            }
+        }
+
+        .s_tabs_nav:not(.o_cc) {
+            &:where(:has(.nav-tabs, .nav-buttons)) {
+                background: var(--tabs-bg-color, var(--gray-100));
+            }
+
+            .nav:where(.nav-tabs, .nav-buttons) .nav-link {
+                color: var(--tabs-link-color, var(--o-bs-body-color));
+
+                &.active {
+                    background-color: var(--tabs-active-bg-color, var(--white));
+                }
+            }
+        }
+
+        .s_tabs_nav.o_cc {
+            .nav:where(.nav-tabs, .nav-buttons) .nav-link:not(.active) {
+                color: var(--tabs-link-color);
+            }
+        }
+
+        .nav-tabs a.active {
+            color: var(--o-bs-body-color);
+        }
+
+        .nav-underline {
+            border-bottom: var(--o-bs-border-width) solid var(--o-border-color);
+
+            .nav-link {
+                margin-bottom: calc(var(--o-bs-border-width) * -1);
+
+                &:not(.active) {
+                    border: 0;
+                }
+            }
+        }
+
+        &.row .nav-underline {
+            @media (min-width: 576px) { /* media-breakpoint-up(sm) */
+                border-bottom: 0;
+                border-left: var(--o-bs-border-width) solid var(--o-border-color);
+
+                .nav-link {
+                    margin-left: calc(var(--o-bs-border-width) * -1);
+                    padding: var(--o-bs-spacer-1) var(--o-bs-spacer-3);
+
+                    &.active {
+                        border-left: calc(var(--o-bs-border-width) * 2) solid var(--link-color);
+                        border-bottom: 0;
+                    }
+                }
+            }
+        }
+
+        .s_tabs_nav:has(.nav-buttons.nav-justified),
+        .s_tabs_nav:has(.nav-buttons.nav-fill) {
+            &, .nav-buttons {
+                width: 100%;
+            }
+        }
+
+        .nav-buttons {
+            .active {
+                color: color-contrast($white);
+                background-color: var(--white);
+
+                &:where(:not(:focus-visible)) {
+                    box-shadow: var(--box-shadow-sm);
+                }
+            }
+        }
+
+        .nav-pills {
+            .active {
+                &:where(:focus-visible) {
+                    box-shadow: inset 0 0 var(--o-bs-focus-ring-blur) var(--focus-ring-width) rgba($nav-pills-link-active-color, $focus-ring-opacity);
+                }
+            }
+        }
+    }
+}

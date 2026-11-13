@@ -1,122 +1,155 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
+from datetime import datetime
 
-from odoo.addons.account.tests.account_test_no_chart import TestAccountNoChartCommon
+from freezegun import freeze_time
+
+from odoo import Command
+
+from odoo.addons.account.tests.common import AccountTestInvoicingCommon
+from odoo.addons.mail.tests.common import mail_new_test_user
 
 
-class TestExpenseCommon(TestAccountNoChartCommon):
+class TestExpenseCommon(AccountTestInvoicingCommon):
+
+    _test_user_groups = None  # FIXME list needed groups
 
     @classmethod
     def setUpClass(cls):
-        super(TestExpenseCommon, cls).setUpClass()
+        super().setUpClass()
 
-        cls.setUpUsers()
+        cls.company_data_2 = cls.setup_other_company()
+        cls.other_currency = cls.setup_other_currency('HRK')
 
-        # The user manager is only expense manager
-        user_group_manager = cls.env.ref('hr_expense.group_hr_expense_manager')
-        cls.user_manager.write({
-            'groups_id': [(6, 0, [user_group_manager.id])],
-        })
+        group_expense_manager = cls.env.ref('hr_expense.group_hr_expense_manager')
 
-        # create employee
-        cls.employee = cls.env['hr.employee'].create({
-            'name': 'Johnny Employee',
-            'user_id': cls.user_employee.id,
-            'address_home_id': cls.user_employee.partner_id.id,
-            'address_id': cls.user_employee.partner_id.id,
-        })
+        cls.expense_user_employee = mail_new_test_user(
+            cls.env,
+            name='expense_user_employee',
+            login='expense_user_employee',
+            email='expense_user_employee@example.com',
+            notification_type='email',
+            groups='base.group_user',
+            company_ids=[Command.set(cls.env.companies.ids)],
+        )
+        cls.expense_user_manager = mail_new_test_user(
+            cls.env,
+            name='Expense manager',
+            login='expense_manager_1',
+            email='expense_manager_1@example.com',
+            notification_type='email',
+            groups='base.group_user,hr_expense.group_hr_expense_manager',
+            company_ids=[Command.set(cls.env.companies.ids)],
+        )
 
-        # Create tax
-        cls.tax = cls.env['account.tax'].create({
-            'name': 'Expense 10%',
-            'amount': 10,
-            'amount_type': 'percent',
-            'type_tax_use': 'purchase',
-            'price_include': True,
-        })
+        cls.expense_user_manager_2 = mail_new_test_user(
+            cls.env,
+            name='Expense manager',
+            login='expense_manager_2',
+            email='expense_manager_2@example.com',
+            notification_type='email',
+            groups='base.group_user,hr_expense.group_hr_expense_manager',
+            company_ids=[Command.set(cls.env.companies.ids)],
+        )
+
+        cls.expense_employee = cls.env['hr.employee'].sudo().create({
+            'name': 'expense_employee',
+            'user_id': cls.expense_user_employee.id,
+            'expense_manager_id': cls.expense_user_manager.id,
+            'work_contact_id': cls.expense_user_employee.partner_id.id,
+            'bank_account_ids': [
+                Command.create({
+                    'account_number': 'BE68539007547034',
+                    'allow_out_payment': True,
+                    'partner_id': cls.expense_user_employee.partner_id.id,
+            })]
+        }).sudo(False)
+
+        cls.expense_employee.user_partner_id.parent_id = cls.env.company.partner_id
+
+        # Allow the current accounting user to access the expenses.
+        cls.env.user.group_ids |= group_expense_manager
 
         # Create analytic account
-        cls.analytic_account = cls.env['account.analytic.account'].create({
-            'name': 'Test Analytic Account for Expenses',
+        cls.analytic_plan = cls.env['account.analytic.plan'].create({'name': 'Expense Plan Test'})
+        cls.analytic_account_1 = cls.env['account.analytic.account'].create({
+            'name': 'analytic_account_1',
+            'plan_id': cls.analytic_plan.id,
+        })
+        cls.analytic_account_2 = cls.env['account.analytic.account'].create({
+            'name': 'analytic_account_2',
+            'plan_id': cls.analytic_plan.id,
         })
 
-        # Expense reports
-        cls.journal = cls.env['account.journal'].create({
-            'name': 'Purchase Journal - Test',
-            'code': 'HRTPJ',
-            'type': 'purchase',
-            'company_id': cls.env.user.company_id.id,
-        })
-        cls.expense_sheet = cls.env['hr.expense.sheet'].create({
-            'name': 'Expense for Johnny Employee',
-            'employee_id': cls.employee.id,
-            'journal_id': cls.journal.id,
-        })
-        cls.expense_sheet2 = cls.env['hr.expense.sheet'].create({
-            'name': 'Second Expense for Johnny Employee',
-            'employee_id': cls.employee.id,
-            'journal_id': cls.journal.id,
+        # Create product without cost
+        cls.product_c = cls.env['product.product'].create({
+            'name': 'product_c with no cost',
+            'uom_id': cls.env.ref('uom.product_uom_dozen').id,
+            'lst_price': 200.0,
+            'property_account_income_id': cls.copy_account(cls.company_data['default_account_revenue']).id,
+            'property_account_expense_id': cls.copy_account(cls.company_data['default_account_expense']).id,
+            'taxes_id': [Command.set((cls.tax_sale_a + cls.tax_sale_b).ids)],
+            'supplier_taxes_id': [Command.set((cls.tax_purchase_a + cls.tax_purchase_b).ids)],
+            'can_be_expensed': True,
+            'default_code': 'product_c',
         })
 
-        Users = cls.env['res.users'].with_context(no_reset_password=True)
+        # Ensure Invoicing tests products can be expensed and their code is properly set.
+        (cls.product_a + cls.product_b).write({'can_be_expensed': True})
+        cls.product_a.default_code = 'product_a'
+        cls.product_b.default_code = 'product_b'
 
-        # Find Employee group
-        group_employee_id = cls.env.ref('base.group_user').id
+        cls.frozen_today = datetime(year=2022, month=1, day=25, hour=0, minute=0, second=0)
 
-        cls.user_emp2 = Users.create({
-            'name': 'Superboy Employee',
-            'login': 'superboy',
-            'email': 'superboy@example.com',
-            'groups_id': [(6, 0, [group_employee_id])]
+        # create expense account
+        cls.expense_account = cls.env['account.account'].create({
+            'code': '610010',
+            'name': 'Expense Account 1'
         })
 
-        cls.user_officer = Users.create({
-            'name': 'Batman Officer',
-            'login': 'batman',
-            'email': 'batman.hero@example.com',
-            'groups_id': [(6, 0, [group_employee_id, cls.env.ref('hr_expense.group_hr_expense_user').id])]
-        })
+    @classmethod
+    def create_expenses(cls, values=None):
+        if values is None or isinstance(values, dict):
+            values = [values or {}]
 
-        cls.emp_emp2 = cls.env['hr.employee'].create({
-            'name': 'Superboy',
-            'user_id': cls.user_emp2.id,
-        })
+        default_values = {
+            'employee_id': cls.expense_employee.id,
+            'date': cls.frozen_today.isoformat(),
+            'company_id': cls.company_data['company'].id,
+            'currency_id': cls.company_data['currency'].id,
+        }
 
-        cls.emp_officer = cls.env['hr.employee'].create({
-            'name': 'Batman',
-            'user_id': cls.user_officer.id,
-        })
+        default_product_values = {
+            'product_id': cls.product_c.id,
+            'total_amount_currency': 1000.00,
+        }
+        create_values = []
+        for value_dict in values:
+            if 'product_id' not in value_dict:
+                default_values.update(default_product_values)
+            value_dict = {**default_values, **(value_dict or {})}
+            create_values.append(value_dict)
+        return cls.env['hr.expense'].create(create_values).sorted()
 
-        cls.emp_manager = cls.env['hr.employee'].create({
-            'name': 'Superman',
-            'user_id': cls.user_manager.id,
-        })
+    def post_expenses(self, expenses):
+        """
+        Helper to "post" expenses (it actually post draft moves related to expenses),
+        whether it's company or employee paid expenses
+        """
+        company_expenses = expenses.filtered(lambda expense: expense.payment_mode == 'company_account')
+        if company_expenses:
+            # post through payment to post both payment and move
+            company_expenses.account_move_id.origin_payment_id.action_post()
+        if employee_expenses := expenses - company_expenses:
+            employee_expenses.account_move_id.action_post()
 
-        cls.rd = cls.env['hr.department'].create({
-            'name': 'R&D',
-            'manager_id': cls.emp_officer.id,
-            'member_ids': [(6, 0, [cls.employee.id])],
-        })
-
-        cls.ps = cls.env['hr.department'].create({
-            'name': 'PS',
-            'manager_id': cls.emp_manager.id,
-            'member_ids': [(6, 0, [cls.emp_emp2.id])],
-        })
-
-        cls.uom_unit = cls.env.ref('uom.product_uom_unit').id
-        cls.uom_dozen = cls.env.ref('uom.product_uom_dozen').id
-
-        cls.product_1 = cls.env['product.product'].create({
-            'name': 'Batmobile repair',
-            'type': 'service',
-            'uom_id': cls.uom_unit,
-            'uom_po_id': cls.uom_unit,
-        })
-
-        cls.product_2 = cls.env['product.product'].create({
-            'name': 'Superboy costume washing',
-            'type': 'service',
-            'uom_id': cls.uom_unit,
-            'uom_po_id': cls.uom_unit,
-        })
+    def get_new_payment(self, expenses, amount):
+        """ Helper to create payments """
+        ctx = {'active_model': 'account.move', 'active_ids': expenses.account_move_id.ids}
+        with freeze_time(self.frozen_today):
+            payment_register = self.env['account.payment.register'].with_context(**ctx).create({
+                'amount': amount,
+                'journal_id': self.company_data['default_journal_bank'].id,
+                'payment_method_line_id': self.inbound_payment_method_line.id,
+            })
+            self.assertEqual(payment_register.partner_bank_id.partner_id, expenses.employee_id.work_contact_id)
+            return payment_register._create_payments()

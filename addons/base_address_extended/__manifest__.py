@@ -1,23 +1,25 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 {
     'name': 'Extended Addresses',
     'summary': 'Add extra fields on addresses',
-    'sequence': '19',
-    'category': 'Base',
-    'complexity': 'easy',
+    'sequence': 19,
+    'version': '1.1',
+    'category': 'Sales/Sales',
     'description': """
 Extended Addresses Management
 =============================
 
-This module holds all extra fields one may need to manage accurately addresses.
+This module provides the ability to choose a city from a list (in specific countries).
 
-For example, in legal reports, some countries need to split the street into several fields,
-with the street name, the house number, and room number.
+It is primarily used for EDIs that might need a special city code.
         """,
     'data': [
-        'views/base_address_extended.xml',
-        'data/base_address_extended_data.xml',
+        'views/res_city_view.xml',
+        'views/res_country_view.xml',
+        'views/res_partner_views.xml',
+        'security/ir.access.csv',
     ],
-    'depends': ['base'],
+    'depends': ['web'],
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }

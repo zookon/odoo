@@ -1,0 +1,126 @@
+import { Component, signal, t, useListener, usePlugin, useProps, xml } from "@odoo/owl";
+
+import { _t } from "@web/core/l10n/translation";
+import { isMobileOS } from "@web/core/browser/feature_detection";
+import { useService } from "@web/core/utils/hooks";
+import { Tabs, Tab } from "@mail/core/common/tabs";
+import { useMicrophoneVolume } from "@mail/utils/common/hooks";
+import { ActionPanel } from "@mail/discuss/core/common/action_panel";
+import { CameraPreview } from "@mail/discuss/call/common/camera_preview";
+import { DeviceSelect } from "@mail/discuss/call/common/device_select";
+import { Dialog } from "@web/core/dialog/dialog";
+import { DebugModePlugin } from "@web/core/debug_mode_plugin";
+import { PttExtensionPlugin } from "@mail/discuss/call/common/ptt_extension_plugin";
+import { NotificationPlugin } from "@web/core/notifications/notification_plugin";
+
+export class CallSettings extends Component {
+    static template = "discuss.CallSettings";
+    static components = { ActionPanel, CameraPreview, DeviceSelect, Tabs, Tab };
+
+    debugMode = usePlugin(DebugModePlugin);
+
+    setup() {
+        super.setup();
+        this.props = useProps({
+            close: t.function([t.instanceOf(MouseEvent)]).optional(),
+            initialTab: t.string().optional(),
+            isCompact: t.boolean().optional(),
+            withActionPanel: t.boolean().optional(true),
+        });
+        this.notification = usePlugin(NotificationPlugin);
+        this.showCameraPreview = signal(false);
+        this.store = useService("mail.store");
+        this.rtc = useService("discuss.rtc");
+        this.microphoneVolume = useMicrophoneVolume();
+        this.pttExtService = usePlugin(PttExtensionPlugin);
+        useListener(window, "keydown", (ev) => this._onKeyDown(ev), { capture: true });
+        useListener(window, "keyup", (ev) => this._onKeyUp(ev), { capture: true });
+        this.isMobileOS = isMobileOS;
+    }
+
+    get stopText() {
+        return _t("Stop");
+    }
+
+    get testText() {
+        return _t("Test");
+    }
+
+    _onKeyDown(ev) {
+        if (!this.store.settings.isRegisteringKey) {
+            return;
+        }
+        ev.stopPropagation();
+        ev.preventDefault();
+        this.store.settings.setPushToTalkKey(ev);
+    }
+
+    _onKeyUp(ev) {
+        if (!this.store.settings.isRegisteringKey) {
+            return;
+        }
+        ev.stopPropagation();
+        ev.preventDefault();
+        this.store.settings.isRegisteringKey = false;
+    }
+
+    onChangeLogRtc(ev) {
+        this.store.settings.logRtc = ev.target.checked;
+    }
+
+    onClickDownloadLogs() {
+        this.rtc.dumpLogs({ download: true });
+    }
+
+    onClickRegisterKeyButton() {
+        this.store.settings.isRegisteringKey = !this.store.settings.isRegisteringKey;
+    }
+
+    onChangeDelay(ev) {
+        this.store.settings.setDelayValue(ev.target.value);
+    }
+
+    onChangeBlur(ev) {
+        this.store.settings.useBlur = ev.target.checked;
+    }
+
+    onChangeCallAutoFocus() {
+        this.store.settings.useCallAutoFocus = !this.store.settings.useCallAutoFocus;
+    }
+
+    onChangePushToTalk(ev) {
+        this.store.settings.usePushToTalk = ev.target.checked;
+    }
+
+    onChangeShowCameraPreview(ev) {
+        this.showCameraPreview.set(ev.target.checked);
+    }
+
+    onCameraStateChange(isCameraActive) {
+        if (!isCameraActive) {
+            this.showCameraPreview.set(false);
+            this.notification.add(
+                _t("Couldn't show the camera preview. Check that your camera is available."),
+                { type: "warning" }
+            );
+        }
+    }
+
+    onInputBackgroundBlurAmount(ev) {
+        this.store.settings.backgroundBlurAmount = Number(ev.target.value);
+    }
+
+    onInputEdgeBlurAmount(ev) {
+        this.store.settings.edgeBlurAmount = Number(ev.target.value);
+    }
+}
+
+export class CallSettingsDialog extends Component {
+    static template = xml`
+        <Dialog size="'md'" footer="false" title.translate="Voice &amp; Video Settings">
+            <CallSettings initialTab="this.props.initialTab" withActionPanel="false"/>
+        </Dialog>
+    `;
+    props = useProps({ initialTab: t.string().optional() });
+    static components = { CallSettings, Dialog };
+}

@@ -1,0 +1,311 @@
+import { Action, ACTION_TAGS, PANEL_CONTAINER_TYPE } from "@mail/core/common/action";
+import { ActionList } from "@mail/core/common/action_list";
+import {
+    cameraOnAction,
+    muteAction,
+    quickActionSettings,
+    quickVideoSettings,
+} from "@mail/discuss/call/common/call_actions";
+import { CallPermissionDialog } from "@mail/discuss/call/common/call_permission_dialog";
+import { CallSettingsDialog } from "@mail/discuss/call/common/call_settings";
+import { CameraPreview } from "@mail/discuss/call/common/camera_preview";
+import { DeviceSelect } from "@mail/discuss/call/common/device_select";
+import { closeStream, hasRtcSupport } from "@mail/utils/common/misc";
+import { useAncestors } from "@mail/core/common/ancestor_plugin";
+
+import {
+    Component,
+    computed,
+    onWillDestroy,
+    onWillUnmount,
+    proxy,
+    signal,
+    types,
+    useOnChange,
+    usePlugin,
+    useProps,
+    useScope,
+} from "@odoo/owl";
+
+import { _t } from "@web/core/l10n/translation";
+import { UIPlugin } from "@web/core/ui/ui_plugin";
+import { useService } from "@web/core/utils/hooks";
+
+export class CallPreview extends Component {
+    static template = "mail.CallPreview";
+    static components = { ActionList, CameraPreview, DeviceSelect };
+
+    audioRef = signal.ref();
+    /**
+     * The preview has no panel of its own: the quick settings open theirs in a dropdown above it.
+     *
+     * @type {import("@mail/core/common/action_list").ActionPanelContainer}
+     */
+    panelContainer = {
+        type: PANEL_CONTAINER_TYPE.DROPDOWN,
+        position: "top-end",
+        menuClass: "p-1 overflow-x-hidden",
+    };
+
+    scope = useScope();
+
+    setup() {
+        this.ancestors = useAncestors();
+        this.props = useProps({
+            activateCamera: types.number().optional(),
+            activateMicrophone: types.number().optional(),
+            hasSettingsAtBottom: types.boolean().optional(),
+            onSettingsChanged: types
+                .function([
+                    types.object({
+                        camera: types.boolean().optional(),
+                        microphone: types.boolean().optional(),
+                    }),
+                ])
+                .optional(),
+        });
+        this.dialog = useService("dialog");
+        this.rtc = useService("discuss.rtc");
+        this.store = useService("mail.store");
+        this.ui = usePlugin(UIPlugin);
+        this.state = proxy({ audioStream: null, isCameraActive: false });
+        useOnChange(
+            () => [this.audioRef(), this.state.audioStream],
+            (audioEl, audioStream) => {
+                if (audioEl && !audioEl.srcObject && audioStream) {
+                    audioEl.srcObject = audioStream;
+                }
+            }
+        );
+        useOnChange(
+            () => [this.state.isCameraActive],
+            (isCameraActive) => this.props.onSettingsChanged?.({ camera: isCameraActive }),
+            { initialRun: false }
+        );
+        if (hasRtcSupport()) {
+            useOnChange(
+                () => [this.rtc.microphonePermission],
+                (microphonePermission) => {
+                    if (microphonePermission !== "granted") {
+                        this.disableMicrophone();
+                    }
+                },
+                { initialRun: false }
+            );
+            useOnChange(
+                () => [this.store.settings.audioInputDeviceId],
+                () => {
+                    if (this.state.audioStream) {
+                        closeStream(this.state.audioStream);
+                        this.enableMicrophone();
+                    }
+                },
+                { initialRun: false }
+            );
+            useOnChange(
+                () => [this.store.settings.audioOutputDeviceId],
+                (deviceId) => {
+                    this.audioRef()
+                        ?.setSinkId?.(deviceId)
+                        .catch(() => {});
+                },
+                { initialRun: false }
+            );
+            onWillUnmount(() => {
+                // A media element with an active srcObject is kept alive by the
+                // browser once detached, retaining this component through it.
+                const audioEl = this.audioRef();
+                if (audioEl) {
+                    audioEl.srcObject = null;
+                    audioEl.load();
+                }
+            });
+            onWillDestroy(() => {
+                closeStream(this.state.audioStream);
+            });
+            useOnChange(
+                () => [this.props.activateCamera],
+                (activateCamera) => {
+                    if (activateCamera > 0 && !this.state.isCameraActive) {
+                        this.enableCamera();
+                    }
+                }
+            );
+            useOnChange(
+                () => [this.props.activateMicrophone],
+                (activateMicrophone) => {
+                    if (activateMicrophone > 0 && !this.state.audioStream) {
+                        this.enableMicrophone();
+                    }
+                }
+            );
+        }
+    }
+
+    get inWelcomePageMobile() {
+        return this.ancestors.inWelcomePage && this.ui.isSmall();
+    }
+
+    actions = computed(() => {
+        const cameraOnActionUpdated = {
+            ...cameraOnAction,
+            isActive: () => this.state.isCameraActive,
+            name: ({ action }) => (action.isActive ? _t("Turn camera off") : _t("Turn camera on")),
+            onSelected: () => this.toggleCamera(),
+            tags: (...args) => {
+                const tags = cameraOnAction.tags?.(...args) ?? [];
+                if (!args[0].action.isActive && this.rtc.cameraPermission !== "granted") {
+                    tags.push(ACTION_TAGS.DANGER);
+                }
+                return tags;
+            },
+        };
+        const muteActionUpdated = {
+            ...muteAction,
+            isActive: () => !this.state.audioStream,
+            name: ({ action }) => (action.isActive ? _t("Unmute") : _t("Mute")),
+            onSelected: () => this.toggleMic(),
+        };
+        const videoBlurAction = {
+            condition: () => this.state.isCameraActive,
+            icon: () => "image",
+            iconClass: () => "oi oi-fw",
+            isActive: ({ store }) => store.settings.useBlur,
+            name: ({ action }) =>
+                action.isActive ? _t("Disable background blur") : _t("Enable background blur"),
+            onSelected: ({ store }) => {
+                store.settings.useBlur = !store.settings.useBlur;
+            },
+            tags: ({ action }) => (action.isActive ? [ACTION_TAGS.SUCCESS] : []),
+        };
+        const callAudioActions = [
+            new Action({
+                id: "toggle-microphone",
+                ancestors: this.ancestors,
+                owner: this,
+                definition: muteActionUpdated,
+                store: this.store,
+            }),
+        ];
+        const callVideoActions = [
+            new Action({
+                id: "toggle-camera",
+                ancestors: this.ancestors,
+                owner: this,
+                definition: cameraOnActionUpdated,
+                store: this.store,
+            }),
+        ];
+        if (this.props.hasSettingsAtBottom) {
+            callVideoActions.push(
+                new Action({
+                    id: "video-blur",
+                    ancestors: this.ancestors,
+                    owner: this,
+                    definition: videoBlurAction,
+                    store: this.store,
+                })
+            );
+        } else {
+            callAudioActions.push(
+                new Action({
+                    id: "audio-settings",
+                    ancestors: this.ancestors,
+                    owner: this,
+                    definition: quickActionSettings,
+                    store: this.store,
+                })
+            );
+            callVideoActions.push(
+                new Action({
+                    id: "video-settings",
+                    ancestors: this.ancestors,
+                    owner: this,
+                    definition: quickVideoSettings,
+                    store: this.store,
+                })
+            );
+        }
+
+        return [callAudioActions, callVideoActions];
+    });
+
+    async enableMicrophone() {
+        if (
+            this.rtc.microphonePermission !== "granted" &&
+            !(await this.rtc.askForBrowserPermission({ audio: true }))
+        ) {
+            return;
+        }
+        this.state.audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: this.store.settings.audioConstraints,
+        });
+        if (this.scope.isDestroyed()) {
+            closeStream(this.state.audioStream);
+            return;
+        }
+        if (this.audioRef()) {
+            this.audioRef().srcObject = this.state.audioStream;
+        }
+        this.props.onSettingsChanged?.({ microphone: true });
+    }
+
+    disableMicrophone() {
+        closeStream(this.state.audioStream);
+        this.state.audioStream = null;
+        if (this.audioRef()) {
+            this.audioRef().srcObject = null;
+        }
+        this.props.onSettingsChanged?.({ microphone: false });
+    }
+
+    async toggleMic() {
+        if (this.state.audioStream) {
+            this.disableMicrophone();
+            return;
+        }
+        if (this.rtc.microphonePermission === "prompt") {
+            this.dialog.add(CallPermissionDialog, {
+                media: "microphone",
+                useMicrophone: () => this.enableMicrophone(),
+                useCamera: () => this.enableCamera(),
+            });
+            return;
+        }
+        await this.enableMicrophone();
+    }
+
+    enableCamera() {
+        this.state.isCameraActive = true;
+    }
+
+    disableCamera() {
+        this.state.isCameraActive = false;
+    }
+
+    async toggleCamera() {
+        if (this.state.isCameraActive) {
+            this.disableCamera();
+            return;
+        }
+        if (this.rtc.cameraPermission === "prompt") {
+            this.dialog.add(CallPermissionDialog, {
+                media: "camera",
+                useMicrophone: () => this.enableMicrophone(),
+                useCamera: () => this.enableCamera(),
+            });
+            return;
+        }
+        this.enableCamera();
+    }
+
+    onClickSettings() {
+        this.dialog.add(CallSettingsDialog, {});
+    }
+
+    onCameraStateChange(isCameraActive) {
+        if (this.state.isCameraActive !== isCameraActive) {
+            this.state.isCameraActive = isCameraActive;
+        }
+    }
+}

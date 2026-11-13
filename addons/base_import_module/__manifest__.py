@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 {
     'name': 'Base import module',
@@ -9,9 +8,22 @@ Import a custom data module
 This module allows authorized users to import a custom data module (.xml files and static assests)
 for customization purpose.
 """,
-    'category': 'Extra Tools',
+    'category': 'Hidden/Tools',
     'depends': ['web'],
-    'installable': True,
-    'auto_install': False,
-    'data': ['views/base_import_module_view.xml'],
+    'auto_install': True,
+    'data': [
+        'views/base_import_module_view.xml',
+        'views/ir_module_views.xml',
+        'security/ir.access.csv',
+    ],
+    'assets': {
+        'web.assets_backend': [
+            'base_import_module/static/src/**/*',
+        ],
+        'web.assets_unit_tests': [
+            'base_import_module/static/tests/**/*.test.js',
+        ],
+    },
+    'author': 'Odoo S.A.',
+    'license': 'LGPL-3',
 }
